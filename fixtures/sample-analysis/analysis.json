@@ -1,0 +1,7 @@
+{
+  "packageName": "bcrypt",
+  "version": "5.1.1",
+  "riskLevel": "low",
+  "riskScore": 12,
+  "summary": "Standard bcrypt native addon with expected entropy access and no suspicious network activity."
+}

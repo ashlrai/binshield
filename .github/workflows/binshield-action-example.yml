@@ -1,0 +1,15 @@
+name: BinShield Example
+
+on:
+  pull_request:
+
+jobs:
+  binshield:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          api-key: ${{ secrets.BINSHIELD_API_KEY }}
+          api-base-url: https://api.binshield.dev
+          fail-on: high

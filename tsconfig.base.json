@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@binshield/analysis-types": ["packages/analysis-types/src/index.ts"],
+      "@binshield/risk-engine": ["packages/risk-engine/src/index.ts"],
+      "@binshield/config": ["packages/config/src/index.ts"],
+      "@binshield/ui": ["packages/ui/src/index.ts"]
+    }
+  }
+}
