@@ -2,6 +2,12 @@
 
 This action scans npm dependencies by discovering packages from `package-lock.json` or `npm-shrinkwrap.json`, submits them to the BinShield API, and renders results in the workflow summary or PR comments.
 
+The report format is intentionally security-native:
+
+- each row includes risk, evidence cues, and a remediation hint
+- failures combine scan errors and threshold violations into one actionable message
+- summary output mirrors the PR comment so teams see the same signal in both places
+
 ## Inputs
 
 - `api-base-url`: BinShield API URL, default `http://localhost:4000`
@@ -21,3 +27,4 @@ This action scans npm dependencies by discovering packages from `package-lock.js
 - The action prefers lockfile data over hard-coded package names.
 - Native-package detection is heuristic by default, but `scan-mode: all-dependencies` forces all discovered packages to be scanned.
 - PR comments are only posted when `comment-mode` allows them and a `github-token` is available.
+- If a PR comment is requested without a token, the action still writes the summary and emits a warning rather than failing silently.

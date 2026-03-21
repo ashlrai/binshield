@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { AnalysisCard } from "../../../components/analysis-card";
 import { MetricCard } from "../../../components/metric-card";
 import { PageHeader } from "../../../components/page-header";
 import { RiskBadge } from "../../../components/risk-badge";
@@ -29,16 +28,41 @@ export default async function PackagePage({
       <PageHeader
         eyebrow="Package detail"
         title={`${workspace.packageName}@${workspace.selected.version}`}
-        description="Inspect the package-level summary, then drill into the binaries, findings, and version history behind the score."
+        description="Treat this as an investigation surface: start with package posture, then inspect binary evidence, finding clusters, and version drift before approving rollout."
         actions={
-          <Link href="/packages" className="button-link">
-            Back to browser
-          </Link>
+          <>
+            <Link href="/packages" className="button-link">
+              Back to browser
+            </Link>
+            <Link href={`#binary-${workspace.evidenceCards[0]?.id ?? "evidence"}`} className="button-link button-link--ghost">
+              Jump to evidence
+            </Link>
+          </>
         }
       />
 
       <section className="detail-hero">
-        <AnalysisCard analysis={workspace.selected} />
+        <article className="analysis-card analysis-card--investigation">
+          <div className="analysis-card__header">
+            <div>
+              <p className="eyebrow">{workspace.selected.ecosystem}</p>
+              <h3>
+                {workspace.selected.packageName}@{workspace.selected.version}
+              </h3>
+            </div>
+            <RiskBadge level={workspace.selected.riskLevel} score={workspace.selected.riskScore} />
+          </div>
+          <p>{workspace.selected.summary}</p>
+          <div className="signal-grid">
+            {workspace.packageSignals.map((signal) => (
+              <article key={signal.label} className="signal-card">
+                <span>{signal.label}</span>
+                <strong>{signal.value}</strong>
+                <p>{signal.detail}</p>
+              </article>
+            ))}
+          </div>
+        </article>
         <div className="detail-hero__aside">
           {stats.map((stat) => (
             <MetricCard key={stat.label} label={stat.label} value={stat.value} detail={stat.detail} />
@@ -49,18 +73,36 @@ export default async function PackagePage({
       <section className="surface-grid surface-grid--split">
         <div className="panel">
           <div className="panel__heading">
+            <h2>Analyst takeaways</h2>
+            <span>{workspace.evidenceSummary.length} evidence summaries</span>
+          </div>
+          <div className="evidence-summary-list">
+            {workspace.evidenceSummary.map((item) => (
+              <article key={item.title} className={`evidence-summary evidence-summary--${item.tone}`}>
+                <strong>{item.title}</strong>
+                <p>{item.detail}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel__heading">
             <h2>Version history</h2>
-            <span>{workspace.versions.length} analyzed versions</span>
+            <span>{workspace.versionTimeline.length} analyzed versions</span>
           </div>
           <div className="version-pills">
-            {workspace.versions.map((analysis) => (
+            {workspace.versionTimeline.map((analysis) => (
               <Link
                 key={analysis.version}
                 href={`/packages/${workspace.packageName}?version=${encodeURIComponent(analysis.version)}`}
-                className={`version-pill ${analysis.version === workspace.selected.version ? "version-pill--active" : ""}`}
+                className={`version-pill ${analysis.active ? "version-pill--active" : ""}`}
               >
                 <strong>{analysis.version}</strong>
-                <span>{analysis.riskLevel}</span>
+                <span>
+                  {analysis.riskLevel} ({analysis.riskScore})
+                </span>
+                <small>{analysis.changedLabel}</small>
               </Link>
             ))}
           </div>
@@ -70,67 +112,132 @@ export default async function PackagePage({
             <li>Data mode: {workspace.mode === "live" ? "Connected to API" : "Demo fallback"}</li>
           </ul>
         </div>
+      </section>
 
+      <section className="surface-grid surface-grid--split">
         <div className="panel">
           <div className="panel__heading">
-            <h2>Behavior drift</h2>
-            <span>{workspace.diff.fromVersion} to {workspace.diff.toVersion}</span>
+            <h2>Version drift</h2>
+            <span>
+              {workspace.diff.fromVersion} to {workspace.diff.toVersion}
+            </span>
           </div>
-          <p>{workspace.diff.summary}</p>
+          <p>{workspace.diffNarrative.headline}</p>
+          <p className="panel__supporting-copy">{workspace.diffNarrative.analystNote}</p>
+          <div className="impact-banner">
+            <strong>{workspace.diffNarrative.impactLabel}</strong>
+            <span>Use this as triage guidance, then validate against binary evidence below.</span>
+          </div>
           <div className="tag-list">
-            {workspace.diff.addedBehaviors.map((change) => (
+            {workspace.diffNarrative.addedBehaviors.map((change) => (
               <span key={change} className="tag">
                 Added: {change}
               </span>
             ))}
-            {workspace.diff.removedBehaviors.map((change) => (
+            {workspace.diffNarrative.removedBehaviors.map((change) => (
               <span key={change} className="tag tag-muted">
                 Removed: {change}
               </span>
             ))}
           </div>
+          <ol className="timeline">
+            {workspace.diffNarrative.reviewChecklist.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ol>
+        </div>
+
+        <div className="panel">
+          <div className="panel__heading">
+            <h2>Finding clusters</h2>
+            <span>{workspace.findingsBySeverity.reduce((total, bucket) => total + bucket.findings.length, 0)} findings</span>
+          </div>
+          {workspace.findingsBySeverity.length ? (
+            <div className="finding-groups">
+              {workspace.findingsBySeverity.map((bucket) => (
+                <article key={bucket.severity} className="finding-group">
+                  <div className="finding-group__header">
+                    <strong>{bucket.severity.toUpperCase()}</strong>
+                    <span>{bucket.findings.length} items</span>
+                  </div>
+                  <div className="finding-list">
+                    {bucket.findings.map((finding) => (
+                      <div key={`${bucket.severity}-${finding.title}-${finding.location ?? "root"}`} className="finding-row">
+                        <h3>{finding.title}</h3>
+                        <p>{finding.description}</p>
+                        <small>{finding.recommendation}</small>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state">No escalated findings were emitted for this package version.</p>
+          )}
         </div>
       </section>
 
       <section className="surface-grid surface-grid--split">
         <div className="panel">
           <div className="panel__heading">
-            <h2>Binaries</h2>
+            <h2>Binary evidence</h2>
             <span>{workspace.selected.binaryCount} native artifacts</span>
           </div>
           <div className="binary-list">
-            {workspace.selected.binaries.map((binary) => (
-              <article key={binary.id} className="binary-row">
+            {workspace.evidenceCards.map((binary) => (
+              <article key={binary.id} id={`binary-${binary.id}`} className={`binary-row binary-row--${binary.tone}`}>
                 <div className="binary-row__heading">
                   <div>
                     <h3>{binary.filename}</h3>
                     <p>
-                      {binary.architecture} • {binary.format} • {binary.functionCount} functions • {Math.round(binary.fileSize / 1024)} KB
+                      {binary.architecture} • {binary.format} • {binary.sizeLabel}
                     </p>
                   </div>
                   <RiskBadge level={binary.riskLevel} score={binary.riskScore} />
                 </div>
-                <p>{binary.aiExplanation}</p>
+                <p>{binary.headline}</p>
+                <p className="panel__supporting-copy">{binary.explanation}</p>
+                <div className="tag-list">
+                  {binary.behaviors.map((behavior) => (
+                    <span key={`${binary.id}-${behavior.name}`} className={`tag tag--${behavior.tone}`}>
+                      {behavior.name}: {behavior.summary}
+                    </span>
+                  ))}
+                </div>
+                <div className="evidence-checklist">
+                  {binary.evidenceChecklist.map((item) => (
+                    <span key={`${binary.id}-${item}`}>{item}</span>
+                  ))}
+                </div>
                 <code>{binary.decompiledPreview}</code>
                 <div className="binary-grid">
                   <div>
                     <strong>Imports</strong>
-                    <p>{binary.imports.join(", ")}</p>
+                    <p>{binary.imports.length ? binary.imports.join(", ") : "No imports surfaced in the preview."}</p>
                   </div>
                   <div>
                     <strong>Interesting strings</strong>
-                    <p>{binary.strings.join(", ")}</p>
+                    <p>{binary.strings.length ? binary.strings.join(", ") : "No high-signal strings surfaced."}</p>
                   </div>
                 </div>
-                <div className="tag-list">
-                  {Object.entries(binary.behaviors).map(([key, signal]) =>
-                    signal.detected ? (
-                      <span key={key} className="tag">
-                        {key}
-                      </span>
-                    ) : null
-                  )}
-                </div>
+                {binary.findings.length ? (
+                  <div className="finding-list">
+                    {binary.findings.map((finding) => (
+                      <div key={`${binary.id}-${finding.title}`} className="finding-row">
+                        <h3>{finding.title}</h3>
+                        <p>{finding.description}</p>
+                        <small>{finding.recommendation}</small>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <Link
+                  href={`/packages/${workspace.packageName}/binaries/${binary.id}?version=${encodeURIComponent(workspace.selected.version)}`}
+                  className="binary-row__link"
+                >
+                  Open binary evidence view
+                </Link>
               </article>
             ))}
           </div>
@@ -149,6 +256,9 @@ export default async function PackagePage({
                     <p className="eyebrow">{item.ecosystem}</p>
                     <strong>{item.packageName}</strong>
                     <p>{item.summary}</p>
+                    <small className="stack-item__meta">
+                      {item.topBehaviors.length ? item.topBehaviors.join(", ") : "No strong behavior signal"} • {item.sourceMatchConfidence} confidence
+                    </small>
                   </div>
                   <RiskBadge level={item.riskLevel} score={item.riskScore} />
                 </Link>

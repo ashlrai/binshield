@@ -1,15 +1,19 @@
 import type {
   AnalysisStatus,
   ApiListResponse,
+  BinaryAnalysis,
   Ecosystem,
+  Finding,
+  FindingSeverity,
   PackageAnalysis,
   PackageDiff,
   RepoRecord,
   SearchResult
 } from "@binshield/analysis-types";
-import { sampleAnalyses, sampleDiff } from "@binshield/analysis-types";
+import { getSampleAnalysis, getSamplePackageDiff, getSamplePackageHistory, sampleAnalyses, sampleDiff } from "@binshield/analysis-types";
 
 export type DataMode = "live" | "demo";
+export type EvidenceTone = "benign" | "review" | "suspicious";
 
 export interface MetricCardData {
   label: string;
@@ -20,6 +24,50 @@ export interface MetricCardData {
 export interface PublicPackageCard extends SearchResult {
   versions: number;
   publishedAt: string;
+  sourceMatchConfidence: "low" | "medium" | "high";
+  highestFinding: FindingSeverity;
+  topBehaviors: string[];
+}
+
+export interface BinaryEvidenceCard {
+  id: string;
+  filename: string;
+  architecture: string;
+  format: string;
+  sizeLabel: string;
+  riskScore: number;
+  riskLevel: BinaryAnalysis["riskLevel"];
+  tone: EvidenceTone;
+  headline: string;
+  explanation: string;
+  behaviors: Array<{
+    name: string;
+    summary: string;
+    tone: EvidenceTone;
+  }>;
+  imports: string[];
+  strings: string[];
+  findings: Finding[];
+  evidenceChecklist: string[];
+  decompiledPreview: string;
+}
+
+export interface VersionTimelineEntry {
+  version: string;
+  riskLevel: PackageAnalysis["riskLevel"];
+  riskScore: number;
+  binaryCount: number;
+  changedLabel: string;
+  active: boolean;
+}
+
+export interface DiffNarrative {
+  headline: string;
+  analystNote: string;
+  addedBehaviors: string[];
+  removedBehaviors: string[];
+  reviewChecklist: string[];
+  impactLabel: string;
 }
 
 export interface PackageWorkspace {
@@ -31,6 +79,36 @@ export interface PackageWorkspace {
   diff: PackageDiff;
   related: PublicPackageCard[];
   found: boolean;
+  evidenceCards: BinaryEvidenceCard[];
+  findingsBySeverity: Array<{
+    severity: FindingSeverity;
+    findings: Finding[];
+  }>;
+  versionTimeline: VersionTimelineEntry[];
+  diffNarrative: DiffNarrative;
+  packageSignals: Array<{
+    label: string;
+    value: string;
+    detail: string;
+  }>;
+  evidenceSummary: Array<{
+    title: string;
+    detail: string;
+    tone: EvidenceTone;
+  }>;
+}
+
+export interface BinaryWorkspace {
+  mode: DataMode;
+  packageName: string;
+  selectedVersion: string;
+  binary: BinaryEvidenceCard;
+  packageSignals: PackageWorkspace["packageSignals"];
+  diffNarrative: DiffNarrative;
+  breadcrumbs: Array<{
+    label: string;
+    href: string;
+  }>;
 }
 
 export interface RepoSummary {
@@ -100,32 +178,10 @@ export interface DashboardSnapshot {
 
 const rawApiBaseUrl = process.env.BINSHIELD_API_BASE_URL?.trim() || process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL?.trim() || "";
 const dataMode: DataMode = rawApiBaseUrl ? "live" : "demo";
+const severityOrder: FindingSeverity[] = ["critical", "high", "medium", "low", "info"];
 
 function normalizeBaseUrl(url: string) {
   return url.replace(/\/+$/, "");
-}
-
-function toSearchResult(analysis: PackageAnalysis): PublicPackageCard {
-  return {
-    ecosystem: analysis.ecosystem,
-    packageName: analysis.packageName,
-    latestVersion: analysis.version,
-    riskLevel: analysis.riskLevel,
-    riskScore: analysis.riskScore,
-    summary: analysis.summary,
-    binaryCount: analysis.binaryCount,
-    versions: 1,
-    publishedAt: analysis.createdAt
-  };
-}
-
-function toPackageCards(analyses: PackageAnalysis[]): PublicPackageCard[] {
-  const cards = analyses.map(toSearchResult);
-  return cards.sort((a, b) => b.riskScore - a.riskScore);
-}
-
-function getSamplePackage(name: string, version?: string) {
-  return sampleAnalyses.find((analysis) => analysis.packageName === name && (!version || analysis.version === version));
 }
 
 function formatRelative(timestamp: string) {
@@ -138,6 +194,163 @@ function formatRelative(timestamp: string) {
 
   const days = Math.max(1, Math.round(hours / 24));
   return `${days}d ago`;
+}
+
+function formatKilobytes(value: number) {
+  return `${Math.max(1, Math.round(value / 1024))} KB`;
+}
+
+function dedupe<T>(items: T[]) {
+  return Array.from(new Set(items));
+}
+
+function compareSeverity(a: FindingSeverity, b: FindingSeverity) {
+  return severityOrder.indexOf(a) - severityOrder.indexOf(b);
+}
+
+function highestFindingSeverity(analysis: PackageAnalysis): FindingSeverity {
+  const severities = analysis.binaries.flatMap((binary) => binary.findings.map((finding) => finding.severity));
+  if (severities.length === 0) {
+    return "info";
+  }
+
+  return severities.sort(compareSeverity)[0];
+}
+
+function topBehaviors(analysis: PackageAnalysis) {
+  const entries = analysis.binaries.flatMap((binary) =>
+    Object.entries(binary.behaviors)
+      .filter(([, signal]) => signal.detected)
+      .map(([name]) => name)
+  );
+
+  return dedupe(entries).slice(0, 3);
+}
+
+function toneForBinary(binary: BinaryAnalysis): EvidenceTone {
+  if (binary.riskLevel === "critical" || binary.riskLevel === "high") {
+    return "suspicious";
+  }
+  if (binary.riskLevel === "medium") {
+    return "review";
+  }
+  return "benign";
+}
+
+function behaviorTone(behaviorName: string): EvidenceTone {
+  if (behaviorName === "obfuscation" || behaviorName === "dataExfiltration" || behaviorName === "network") {
+    return "suspicious";
+  }
+  if (behaviorName === "process" || behaviorName === "filesystem") {
+    return "review";
+  }
+  return "benign";
+}
+
+function summarizeBehavior(name: string, binary: BinaryAnalysis) {
+  const signal = binary.behaviors[name as keyof BinaryAnalysis["behaviors"]];
+  if (!signal?.detected) {
+    return "";
+  }
+
+  return signal.details[0] ?? `${name} activity observed during analysis.`;
+}
+
+function buildEvidenceChecklist(binary: BinaryAnalysis) {
+  return [
+    `${binary.importCount} imports surfaced during decompilation`,
+    `${binary.functionCount} functions were recovered`,
+    binary.strings.length ? `${Math.min(binary.strings.length, 3)} notable strings surfaced` : "No notable strings surfaced",
+    binary.findings.length ? `${binary.findings.length} findings require analyst review` : "No findings escalated beyond informational"
+  ];
+}
+
+function toEvidenceCard(binary: BinaryAnalysis): BinaryEvidenceCard {
+  const detectedBehaviors = Object.entries(binary.behaviors).filter(([, signal]) => signal.detected);
+  const tone = toneForBinary(binary);
+
+  return {
+    id: binary.id,
+    filename: binary.filename,
+    architecture: binary.architecture,
+    format: binary.format,
+    sizeLabel: formatKilobytes(binary.fileSize),
+    riskScore: binary.riskScore,
+    riskLevel: binary.riskLevel,
+    tone,
+    headline:
+      tone === "suspicious"
+        ? "Review this binary closely before allowing the package upgrade."
+        : tone === "review"
+          ? "Behavior is likely expected, but the evidence still deserves human review."
+          : "Evidence is consistent with an expected native package implementation.",
+    explanation: binary.aiExplanation,
+    behaviors: detectedBehaviors.map(([name]) => ({
+      name,
+      summary: summarizeBehavior(name, binary),
+      tone: behaviorTone(name)
+    })),
+    imports: binary.imports.slice(0, 8),
+    strings: binary.strings.slice(0, 8),
+    findings: binary.findings,
+    evidenceChecklist: buildEvidenceChecklist(binary),
+    decompiledPreview: binary.decompiledPreview
+  };
+}
+
+function groupFindings(analysis: PackageAnalysis) {
+  const grouped = new Map<FindingSeverity, Finding[]>();
+
+  for (const binary of analysis.binaries) {
+    for (const finding of binary.findings) {
+      const bucket = grouped.get(finding.severity) ?? [];
+      bucket.push(finding);
+      grouped.set(finding.severity, bucket);
+    }
+  }
+
+  return severityOrder
+    .map((severity) => ({
+      severity,
+      findings: grouped.get(severity) ?? []
+    }))
+    .filter((entry) => entry.findings.length > 0);
+}
+
+function toSearchResult(analysis: PackageAnalysis): PublicPackageCard {
+  const history = getSamplePackageHistory(analysis.packageName, analysis.ecosystem);
+  return {
+    ecosystem: analysis.ecosystem,
+    packageName: analysis.packageName,
+    latestVersion: analysis.version,
+    riskLevel: analysis.riskLevel,
+    riskScore: analysis.riskScore,
+    summary: analysis.summary,
+    binaryCount: analysis.binaryCount,
+    versions: history.length,
+    publishedAt: analysis.createdAt,
+    sourceMatchConfidence: analysis.sourceMatchConfidence,
+    highestFinding: highestFindingSeverity(analysis),
+    topBehaviors: topBehaviors(analysis)
+  };
+}
+
+function toPackageCards(analyses: PackageAnalysis[]): PublicPackageCard[] {
+  const byPackage = new Map<string, PackageAnalysis>();
+
+  for (const analysis of analyses) {
+    const existing = byPackage.get(analysis.packageName);
+    if (!existing || analysis.version.localeCompare(existing.version, undefined, { numeric: true }) > 0) {
+      byPackage.set(analysis.packageName, analysis);
+    }
+  }
+
+  const cards = Array.from(byPackage.values()).map(toSearchResult);
+  return cards.sort((a, b) => b.riskScore - a.riskScore);
+}
+
+function getSamplePackage(name: string, version?: string) {
+  return getSampleAnalysis(name, version);
 }
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T | null> {
@@ -170,6 +383,85 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T | null>
   }
 }
 
+function buildVersionTimeline(versions: PackageAnalysis[], selectedVersion: string): VersionTimelineEntry[] {
+  const reference = versions.find((entry) => entry.version === selectedVersion) ?? versions[0];
+
+  return versions.map((analysis) => ({
+    version: analysis.version,
+    riskLevel: analysis.riskLevel,
+    riskScore: analysis.riskScore,
+    binaryCount: analysis.binaryCount,
+    changedLabel:
+      analysis.version === reference.version
+        ? "Current investigation target"
+        : analysis.riskScore > reference.riskScore
+          ? "Riskier than selected"
+          : analysis.riskScore < reference.riskScore
+            ? "Less risky than selected"
+            : "Same overall package score",
+    active: analysis.version === selectedVersion
+  }));
+}
+
+function buildDiffNarrative(selected: PackageAnalysis, diff: PackageDiff, previous?: PackageAnalysis): DiffNarrative {
+  const riskDelta = selected.riskScore - (previous?.riskScore ?? selected.riskScore - diff.riskDelta);
+  const impactLabel =
+    riskDelta > 0 ? `Risk increased by ${riskDelta} points` : riskDelta < 0 ? `Risk decreased by ${Math.abs(riskDelta)} points` : "Risk held steady";
+
+  return {
+    headline:
+      riskDelta > 0
+        ? "This version introduces additional behavior that deserves security review."
+        : riskDelta < 0
+          ? "This version removes or tightens behavior compared with the previous release."
+          : "This version keeps a similar behavioral profile to the previous release.",
+    analystNote: diff.summary,
+    addedBehaviors: diff.addedBehaviors,
+    removedBehaviors: diff.removedBehaviors,
+    reviewChecklist: [
+      "Validate whether any newly added filesystem or process behavior is expected.",
+      "Compare binary inventory to ensure no unexpected native artifact was introduced.",
+      "Review high-signal strings and imports before approving rollout."
+    ],
+    impactLabel
+  };
+}
+
+function buildPackageSignals(selected: PackageAnalysis) {
+  const behaviors = dedupe(topBehaviors(selected));
+  return [
+    { label: "Overall risk", value: `${selected.riskLevel.toUpperCase()} (${selected.riskScore})`, detail: "Package-level aggregate score" },
+    { label: "Source match", value: selected.sourceMatchConfidence.toUpperCase(), detail: "Confidence in decompiled/source alignment" },
+    { label: "Binary inventory", value: String(selected.binaryCount), detail: `${formatKilobytes(selected.totalBinarySize)} total analyzed size` },
+    { label: "Behavior families", value: behaviors.length ? behaviors.join(", ") : "none detected", detail: "Observed across all binaries" }
+  ];
+}
+
+function buildEvidenceSummary(selected: PackageAnalysis): PackageWorkspace["evidenceSummary"] {
+  const highest = highestFindingSeverity(selected);
+  const binariesWithFindings = selected.binaries.filter((binary) => binary.findings.length > 0).length;
+  return [
+    {
+      title: highest === "info" ? "No escalated findings" : `${highest.toUpperCase()} findings surfaced`,
+      detail:
+        highest === "info"
+          ? "The current evidence set is dominated by expected native behavior."
+          : "At least one binary contains findings that should be reviewed before shipping.",
+      tone: highest === "info" ? "benign" : highest === "critical" || highest === "high" ? "suspicious" : "review"
+    },
+    {
+      title: `${binariesWithFindings}/${selected.binaryCount} binaries carry findings`,
+      detail: "Not every native artifact in a package deserves equal attention. Focus review where findings cluster.",
+      tone: binariesWithFindings > 0 ? "review" : "benign"
+    },
+    {
+      title: `${selected.aiModel} analysis with ${selected.sourceMatchConfidence} confidence`,
+      detail: "Use the model summary as triage guidance, then validate against imports, strings, and recovered functions.",
+      tone: selected.sourceMatchConfidence === "low" ? "review" : "benign"
+    }
+  ];
+}
+
 export function getDataMode() {
   return dataMode;
 }
@@ -180,7 +472,10 @@ export async function getFeaturedPackages(limit = 4): Promise<PublicPackageCard[
     return response.items.slice(0, limit).map((item) => ({
       ...item,
       versions: 1,
-      publishedAt: new Date().toISOString()
+      publishedAt: new Date().toISOString(),
+      sourceMatchConfidence: "medium",
+      highestFinding: item.riskLevel === "medium" || item.riskLevel === "high" || item.riskLevel === "critical" ? "medium" : "info",
+      topBehaviors: []
     }));
   }
 
@@ -193,7 +488,10 @@ export async function searchPackages(query: string): Promise<PublicPackageCard[]
     return response.items.map((item) => ({
       ...item,
       versions: 1,
-      publishedAt: new Date().toISOString()
+      publishedAt: new Date().toISOString(),
+      sourceMatchConfidence: "medium",
+      highestFinding: item.riskLevel === "medium" || item.riskLevel === "high" || item.riskLevel === "critical" ? "medium" : "info",
+      topBehaviors: []
     }));
   }
 
@@ -212,8 +510,8 @@ export async function getPackageWorkspace(packageName: string, version?: string)
 
   const versions = packageResponse?.versions?.length
     ? packageResponse.versions
-    : sampleAnalyses.filter((analysis) => analysis.packageName === packageName);
-  const selectedVersion = version ?? versions[0]?.version ?? sampleAnalyses.find((analysis) => analysis.packageName === packageName)?.version;
+    : getSamplePackageHistory(packageName);
+  const selectedVersion = version ?? versions[0]?.version ?? getSamplePackageHistory(packageName)[0]?.version;
 
   const liveAnalysis = selectedVersion
     ? await fetchJson<PackageAnalysis>(`/packages/npm/${encodeURIComponent(packageName)}/versions/${encodeURIComponent(selectedVersion)}`)
@@ -221,7 +519,13 @@ export async function getPackageWorkspace(packageName: string, version?: string)
 
   const selected = liveAnalysis ?? getSamplePackage(packageName, selectedVersion) ?? sampleAnalyses[0];
   const found = Boolean(packageResponse?.versions?.length || liveAnalysis || versions.length);
-  const diff = (await fetchJson<PackageDiff>(`/packages/npm/${encodeURIComponent(packageName)}/diff`)) ?? sampleDiff;
+  const previous = versions.find((entry) => entry.version !== selected.version);
+  const diff =
+    (await fetchJson<PackageDiff>(
+      `/packages/npm/${encodeURIComponent(packageName)}/diff?from=${encodeURIComponent(previous?.version ?? sampleDiff.fromVersion)}&to=${encodeURIComponent(selected.version)}`
+    )) ??
+    getSamplePackageDiff(packageName, previous?.version ?? sampleDiff.fromVersion, selected.version) ??
+    sampleDiff;
   const related = await searchPackages(packageName).then((items) => items.filter((item) => item.packageName !== packageName).slice(0, 4));
 
   return {
@@ -232,7 +536,40 @@ export async function getPackageWorkspace(packageName: string, version?: string)
     selected,
     diff,
     related,
-    found
+    found,
+    evidenceCards: selected.binaries.map(toEvidenceCard),
+    findingsBySeverity: groupFindings(selected),
+    versionTimeline: buildVersionTimeline(versions.length ? versions : [selected], selected.version),
+    diffNarrative: buildDiffNarrative(selected, diff, previous),
+    packageSignals: buildPackageSignals(selected),
+    evidenceSummary: buildEvidenceSummary(selected)
+  };
+}
+
+export async function getBinaryWorkspace(
+  packageName: string,
+  binaryId: string,
+  version?: string
+): Promise<BinaryWorkspace | null> {
+  const workspace = await getPackageWorkspace(packageName, version);
+  const binary = workspace.evidenceCards.find((entry) => entry.id === binaryId);
+
+  if (!binary) {
+    return null;
+  }
+
+  return {
+    mode: workspace.mode,
+    packageName: workspace.packageName,
+    selectedVersion: workspace.selected.version,
+    binary,
+    packageSignals: workspace.packageSignals,
+    diffNarrative: workspace.diffNarrative,
+    breadcrumbs: [
+      { label: "Packages", href: "/packages" },
+      { label: workspace.packageName, href: `/packages/${workspace.packageName}?version=${encodeURIComponent(workspace.selected.version)}` },
+      { label: binary.filename, href: `/packages/${workspace.packageName}/binaries/${binary.id}?version=${encodeURIComponent(workspace.selected.version)}` }
+    ]
   };
 }
 
@@ -384,7 +721,7 @@ export async function getSettingsSnapshot(): Promise<SettingsSnapshot> {
 
 export function getPublicBrowseCounts() {
   return {
-    packages: sampleAnalyses.length,
+    packages: dedupe(sampleAnalyses.map((analysis) => analysis.packageName)).length,
     binaries: sampleAnalyses.reduce((total, analysis) => total + analysis.binaryCount, 0),
     watchlists: 2
   };
@@ -392,9 +729,9 @@ export function getPublicBrowseCounts() {
 
 export function getPackageSummaryStats(analysis: PackageAnalysis) {
   return [
-    { label: "Risk score", value: String(analysis.riskScore), detail: analysis.riskLevel },
-    { label: "Binary count", value: String(analysis.binaryCount), detail: "Native artifacts" },
-    { label: "Confidence", value: analysis.sourceMatchConfidence.toUpperCase(), detail: "Source match" },
-    { label: "Total size", value: `${Math.round(analysis.totalBinarySize / 1024)} KB`, detail: "Combined binaries" }
+    { label: "Risk score", value: String(analysis.riskScore), detail: `${analysis.riskLevel} severity posture` },
+    { label: "Binary count", value: String(analysis.binaryCount), detail: "Native artifacts recovered" },
+    { label: "Confidence", value: analysis.sourceMatchConfidence.toUpperCase(), detail: "Source/decompile alignment" },
+    { label: "Total size", value: formatKilobytes(analysis.totalBinarySize), detail: "Combined binary payload" }
   ];
 }

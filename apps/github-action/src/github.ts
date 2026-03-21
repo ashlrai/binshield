@@ -14,12 +14,16 @@ export async function publishResults(
   }
 
   if (!shouldPublishComment(commentMode) || !githubToken) {
+    if (shouldPublishComment(commentMode) && !githubToken) {
+      core.warning("BinShield was asked to post a PR comment, but no github-token was provided. Summary output was still written.");
+    }
     return;
   }
 
   const context = github.context;
   const pullRequestNumber = context.payload.pull_request?.number ?? context.issue.number;
   if (!pullRequestNumber) {
+    core.notice("BinShield skipped PR comment because the workflow is not running on a pull request.");
     return;
   }
 

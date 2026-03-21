@@ -5,7 +5,7 @@ import path from "node:path";
 import { BinShieldClient, scanTarget } from "./client";
 import { discoverTargets } from "./discovery";
 import { publishResults } from "./github";
-import { shouldFail, summarize } from "./report";
+import { buildFailureMessage, summarize } from "./report";
 import type { GitHubActionConfig, ScanOutcome } from "./types";
 
 function readIntInput(name: string, fallback: number) {
@@ -78,19 +78,9 @@ async function main() {
   const summary = summarize(outcomes);
   core.info(`Processed ${summary.successful} analyses with ${summary.failures} failures. Highest risk: ${summary.highest}.`);
 
-  const highestSuccessful = outcomes
-    .map((outcome) => outcome.analysis)
-    .filter((analysis): analysis is NonNullable<typeof analysis> => Boolean(analysis))
-    .find((analysis) => shouldFail(analysis.riskLevel, config.failOn));
-
-  const firstError = outcomes.find((outcome) => outcome.error);
-  if (firstError && !highestSuccessful) {
-    core.setFailed(firstError.error ?? "BinShield scan failed");
-    return;
-  }
-
-  if (highestSuccessful) {
-    core.setFailed(`${highestSuccessful.packageName}@${highestSuccessful.version} exceeded the ${config.failOn} threshold.`);
+  const failureMessage = buildFailureMessage(outcomes, config.failOn);
+  if (failureMessage) {
+    core.setFailed(failureMessage);
   }
 }
 

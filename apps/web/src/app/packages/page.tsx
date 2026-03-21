@@ -50,8 +50,20 @@ export default async function PackagesIndexPage({
                 <RiskBadge level={item.riskLevel} score={item.riskScore} />
               </div>
               <p>{item.summary}</p>
+              <div className="tag-list">
+                {item.topBehaviors.length ? (
+                  item.topBehaviors.map((behavior) => (
+                    <span key={`${item.packageName}-${behavior}`} className="tag tag--review">
+                      {behavior}
+                    </span>
+                  ))
+                ) : (
+                  <span className="tag tag-muted">No elevated behavior family</span>
+                )}
+              </div>
               <div className="package-tile__footer">
                 <span>{item.binaryCount} binaries</span>
+                <span>{item.sourceMatchConfidence} confidence</span>
                 <span>Latest {item.latestVersion}</span>
               </div>
             </Link>

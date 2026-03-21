@@ -379,7 +379,7 @@ class LocalRepository implements BaseRepository {
   private getAnalysisRows(packageRow: PackageRow) {
     return Array.from(this.analyses.values())
       .filter((analysis) => analysis.package_id === packageRow.id)
-      .sort((left, right) => right.version.localeCompare(left.version));
+      .sort((left, right) => right.version.localeCompare(left.version, undefined, { numeric: true }));
   }
 
   private getBinaryRows(analysisId: string) {

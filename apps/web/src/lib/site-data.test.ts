@@ -27,6 +27,9 @@ describe("site data", () => {
     expect(search[0]?.packageName).toBe("bcrypt");
     expect(workspace.selected.packageName).toBe("bcrypt");
     expect(workspace.versions.length).toBeGreaterThan(0);
+    expect(workspace.evidenceCards.length).toBeGreaterThan(0);
+    expect(workspace.packageSignals.length).toBeGreaterThan(0);
+    expect(workspace.diffNarrative.reviewChecklist.length).toBeGreaterThan(0);
   });
 
   it("returns dashboard, billing, watchlist, and settings snapshots", async () => {

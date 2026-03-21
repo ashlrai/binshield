@@ -78,8 +78,19 @@ export default async function HomePage() {
                 <RiskBadge level={item.riskLevel} score={item.riskScore} />
               </div>
               <p>{item.summary}</p>
+              <div className="tag-list">
+                {item.topBehaviors.length ? (
+                  item.topBehaviors.map((behavior) => (
+                    <span key={`${item.packageName}-${behavior}`} className="tag tag--review">
+                      {behavior}
+                    </span>
+                  ))
+                ) : (
+                  <span className="tag tag-muted">No elevated behavior family</span>
+                )}
+              </div>
               <span className="package-tile__meta">
-                {item.binaryCount} binaries • latest {item.latestVersion}
+                {item.binaryCount} binaries • {item.sourceMatchConfidence} confidence • latest {item.latestVersion}
               </span>
             </Link>
           ))}
