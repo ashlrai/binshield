@@ -6,6 +6,7 @@ describe("config", () => {
   it("reads env with defaults", () => {
     const env = readEnv({});
     expect(env.apiBaseUrl).toContain("localhost");
+    expect(env.stripeSecretKey).toContain("sk_test");
     expect(productCopy.name).toBe("BinShield");
   });
 });

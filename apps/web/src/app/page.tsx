@@ -2,22 +2,36 @@ import Link from "next/link";
 
 import { productCopy } from "@binshield/config";
 
+import { MetricCard } from "../components/metric-card";
+import { PageHeader } from "../components/page-header";
 import { RiskBadge } from "../components/risk-badge";
-import { getFeaturedPackages } from "../lib/data";
+import { getDataMode, getFeaturedPackages, getPublicBrowseCounts } from "../lib/site-data";
 
 export default async function HomePage() {
   const featured = await getFeaturedPackages();
+  const counts = getPublicBrowseCounts();
+  const mode = getDataMode();
 
   return (
     <main className="home-page">
       <section className="hero">
-        <div>
+        <div className="hero__copy">
           <p className="eyebrow">Binary supply-chain security</p>
           <h1>{productCopy.tagline}</h1>
           <p className="hero-copy">
             Decompile native package binaries, explain their behavior in plain English, and block risky compiled code
             before it ships.
           </p>
+          <form className="hero-search" action="/search">
+            <input name="q" placeholder="Search bcrypt, sharp, sqlite3..." aria-label="Search packages" />
+            <button type="submit">Search database</button>
+          </form>
+          <div className="hero__meta">
+            <span className={`status-pill status-pill--${mode === "live" ? "healthy" : "watch"}`}>
+              {mode === "live" ? "Live API connected" : "Demo data fallback"}
+            </span>
+            <span className="hero__meta-note">{counts.packages} packages surfaced, {counts.binaries} binaries tracked</span>
+          </div>
         </div>
         <div className="hero-card">
           <div className="hero-card__terminal">
@@ -27,35 +41,32 @@ export default async function HomePage() {
           <div className="hero-card__result">
             <RiskBadge level="low" score={12} />
             <p>Expected bcrypt hashing behavior. No suspicious network activity detected.</p>
+            <div className="hero-card__stats">
+              <span>1 binary</span>
+              <span>17 imports</span>
+              <span>high confidence</span>
+            </div>
           </div>
         </div>
       </section>
 
       <section className="metrics-grid">
-        <article>
-          <strong>Compiled code visibility</strong>
-          <p>See what `.node`, `.so`, `.dylib`, and WASM artifacts actually do.</p>
-        </article>
-        <article>
-          <strong>Version diffs</strong>
-          <p>Track behavioral changes between package releases instead of trusting release notes.</p>
-        </article>
-        <article>
-          <strong>CI policy enforcement</strong>
-          <p>Push the same API contract into your GitHub Action and your public package database.</p>
-        </article>
+        <MetricCard label="Compiled code visibility" value="Binary-first" detail="Inspect native package artifacts, not just manifests." />
+        <MetricCard label="Version diffs" value="Drift-aware" detail="Track behavior changes between package releases." tone="warning" />
+        <MetricCard label="CI policy enforcement" value="Action-ready" detail="Reuse the same scan contract in GitHub Actions." tone="accent" />
       </section>
 
-      <section className="featured-section">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">Public database</p>
-            <h2>Featured analyses</h2>
-          </div>
-          <Link href="/dashboard" className="button-link">
-            View dashboard
-          </Link>
-        </div>
+      <section className="surface-grid">
+        <PageHeader
+          eyebrow="Public database"
+          title="Featured analyses"
+          description="Browse the highest-signal compiled packages already surfaced in the BinShield database."
+          actions={
+            <Link href="/packages" className="button-link">
+              Open package browser
+            </Link>
+          }
+        />
         <div className="featured-grid">
           {featured.map((item) => (
             <Link key={item.packageName} href={`/packages/${item.packageName}`} className="package-tile">
@@ -72,6 +83,45 @@ export default async function HomePage() {
               </span>
             </Link>
           ))}
+        </div>
+      </section>
+
+      <section className="surface-grid surface-grid--split">
+        <div className="panel">
+          <div className="panel__heading">
+            <h2>Launch surfaces</h2>
+            <span>Built for product discovery and team adoption</span>
+          </div>
+          <div className="launch-link-grid">
+            <Link href="/dashboard" className="launch-link">
+              <strong>Dashboard</strong>
+              <span>Repository coverage, risk posture, and scan history.</span>
+            </Link>
+            <Link href="/dashboard/watchlists" className="launch-link">
+              <strong>Watchlists</strong>
+              <span>Track package versions and receive email alerts.</span>
+            </Link>
+            <Link href="/dashboard/billing" className="launch-link">
+              <strong>Billing</strong>
+              <span>Plan usage, invoices, and customer portal handoff.</span>
+            </Link>
+            <Link href="/dashboard/settings" className="launch-link">
+              <strong>Settings</strong>
+              <span>API keys, org profile, and audit trail.</span>
+            </Link>
+          </div>
+        </div>
+        <div className="panel">
+          <div className="panel__heading">
+            <h2>How it works</h2>
+            <span>Data flow</span>
+          </div>
+          <ol className="timeline">
+            <li>Discover native binaries in npm package tarballs.</li>
+            <li>Decompile and classify behavior through queued workers.</li>
+            <li>Store immutable package results and surface them in the app.</li>
+            <li>Use the same API in CI, dashboard, and future integrations.</li>
+          </ol>
         </div>
       </section>
     </main>

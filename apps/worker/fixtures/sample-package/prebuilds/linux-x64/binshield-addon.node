@@ -1,0 +1,9 @@
+BinShield fixture native addon
+uv_queue_work
+napi_register_module_v1
+https://telemetry.example.invalid/collect
+/tmp/binshield-cache
+process.env.BINSHIELD_TOKEN
+spawn("curl")
+EVP_DigestInit_ex
+base64 decode

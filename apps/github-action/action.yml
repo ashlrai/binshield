@@ -3,15 +3,46 @@ description: "Scan package binaries through the BinShield API and enforce merge 
 inputs:
   api-key:
     description: "BinShield API key"
-    required: true
+    required: false
+  github-token:
+    description: "GitHub token used for PR comments"
+    required: false
   api-base-url:
     description: "BinShield API base URL"
     required: false
     default: "http://localhost:4000"
+  working-directory:
+    description: "Repository path to inspect"
+    required: false
+    default: "."
+  scan-mode:
+    description: "Dependency scan mode: native-only or all-dependencies"
+    required: false
+    default: "native-only"
+  include-dev-dependencies:
+    description: "Include devDependencies from the lockfile"
+    required: false
+    default: "false"
   fail-on:
     description: "Risk threshold: critical, high, medium, low, never"
     required: false
     default: "high"
+  comment-mode:
+    description: "Output mode: summary, pr-comment, both, off"
+    required: false
+    default: "summary"
+  poll-interval-ms:
+    description: "Polling interval in milliseconds"
+    required: false
+    default: "1500"
+  timeout-ms:
+    description: "Polling timeout in milliseconds"
+    required: false
+    default: "120000"
+  max-targets:
+    description: "Maximum dependency targets to scan"
+    required: false
+    default: "50"
 runs:
   using: "node20"
   main: "dist/index.js"

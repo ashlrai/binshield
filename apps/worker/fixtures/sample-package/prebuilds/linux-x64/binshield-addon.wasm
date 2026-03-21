@@ -1,0 +1,4 @@
+wasm32 runtime shim
+connect
+upload telemetry
+process.env.SECRET_KEY

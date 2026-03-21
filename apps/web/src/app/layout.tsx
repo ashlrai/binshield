@@ -6,7 +6,10 @@ import { Header } from "../components/header";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "BinShield",
+  title: {
+    default: "BinShield",
+    template: "%s | BinShield"
+  },
   description: productCopy.description
 };
 

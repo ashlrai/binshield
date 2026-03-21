@@ -1,0 +1,99 @@
+import type {
+  BehaviorSummary,
+  ApiListResponse,
+  AnalysisStatus,
+  Ecosystem,
+  Finding,
+  PackageAnalysis,
+  PackageDiff,
+  RepoRecord,
+  RiskLevel,
+  ScanJob,
+  ScanRequest,
+  SearchResult
+} from "@binshield/analysis-types";
+
+export type {
+  ApiListResponse,
+  AnalysisStatus,
+  BehaviorSummary,
+  Ecosystem,
+  Finding,
+  PackageAnalysis,
+  PackageDiff,
+  RepoRecord,
+  RiskLevel,
+  ScanJob,
+  ScanRequest,
+  SearchResult
+};
+
+export interface AuthPrincipal {
+  apiKeyId: string;
+  orgId: string;
+  userId?: string;
+  label: string;
+  scopes: string[];
+}
+
+export interface ApiKeySummary {
+  id: string;
+  label: string;
+  prefix: string;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
+export interface OrganizationSummary {
+  id: string;
+  name: string;
+  slug: string;
+  plan: string;
+  billingStatus: string;
+  createdAt: string;
+}
+
+export interface WatchlistSummary {
+  id: string;
+  orgId: string;
+  name: string;
+  channel: "email" | "slack" | "webhook";
+  destination: string;
+  createdAt: string;
+  packageCount: number;
+}
+
+export interface WatchlistPackageSummary {
+  id: string;
+  watchlistId: string;
+  ecosystem: Ecosystem;
+  packageName: string;
+  version?: string;
+  createdAt: string;
+}
+
+export interface SubscriptionSummary {
+  id: string;
+  orgId: string;
+  provider: "stripe" | "manual";
+  plan: string;
+  status: string;
+  currentPeriodEnd?: string;
+  cancelAtPeriodEnd: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CheckoutSession {
+  checkoutUrl: string;
+  customerId: string;
+  subscriptionId: string;
+  plan: string;
+  status: "pending";
+}
+
+export interface RepositoryInfo {
+  mode: "local" | "supabase";
+  ready: boolean;
+  description: string;
+}

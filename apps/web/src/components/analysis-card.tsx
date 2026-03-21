@@ -28,6 +28,18 @@ export function AnalysisCard({ analysis }: { analysis: PackageAnalysis }) {
           <dt>Model</dt>
           <dd>{analysis.aiModel}</dd>
         </div>
+        <div>
+          <dt>Status</dt>
+          <dd>{analysis.status}</dd>
+        </div>
+        <div>
+          <dt>Updated</dt>
+          <dd>{new Date(analysis.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</dd>
+        </div>
+        <div>
+          <dt>Risk</dt>
+          <dd>{analysis.riskLevel}</dd>
+        </div>
       </dl>
     </article>
   );

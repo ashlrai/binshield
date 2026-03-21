@@ -1,49 +1,89 @@
-const repos = [
-  { name: "ashlrai/payments-api", dependencies: 6, risk: 18, status: "healthy" },
-  { name: "ashlrai/platform-web", dependencies: 4, risk: 22, status: "watch" },
-  { name: "ashlrai/agent-runtime", dependencies: 9, risk: 43, status: "review" }
-];
+import Link from "next/link";
 
-export default function DashboardPage() {
+import { MetricCard } from "../../components/metric-card";
+import { PageHeader } from "../../components/page-header";
+import { RiskBadge } from "../../components/risk-badge";
+import { getDashboardSnapshot } from "../../lib/site-data";
+
+function scoreForLevel(level: string) {
+  switch (level) {
+    case "critical":
+      return 91;
+    case "high":
+      return 67;
+    case "medium":
+      return 34;
+    case "low":
+      return 12;
+    default:
+      return 0;
+  }
+}
+
+export default async function DashboardPage() {
+  const snapshot = await getDashboardSnapshot();
+
   return (
     <main className="dashboard-page">
-      <section className="dashboard-hero">
-        <div>
-          <p className="eyebrow">Org dashboard</p>
-          <h1>Native dependency coverage across your repos</h1>
-        </div>
-        <div className="dashboard-kpis">
-          <article>
-            <span>Repos monitored</span>
-            <strong>3</strong>
-          </article>
-          <article>
-            <span>Binaries tracked</span>
-            <strong>19</strong>
-          </article>
-          <article>
-            <span>Open reviews</span>
-            <strong>1</strong>
-          </article>
-        </div>
+      <PageHeader
+        eyebrow="Dashboard"
+        title="Repository posture at a glance"
+        description="Monitor compiled dependencies across your repos, watch for behavior drift, and jump from summary to package-level evidence."
+        actions={
+          <Link href="/dashboard/watchlists" className="button-link">
+            Review watchlists
+          </Link>
+        }
+      />
+
+      <section className="metrics-grid">
+        {snapshot.metrics.map((metric) => (
+          <MetricCard key={metric.label} label={metric.label} value={metric.value} detail={metric.detail} />
+        ))}
       </section>
 
-      <section className="panel">
-        <div className="panel__heading">
-          <h2>Repository posture</h2>
-          <span>Sample authenticated view</span>
+      <section className="surface-grid surface-grid--split">
+        <div className="panel">
+          <div className="panel__heading">
+            <h2>Repository posture</h2>
+            <span>Latest scans and aggregate risk</span>
+          </div>
+          <div className="repo-table">
+            {snapshot.repos.map((repo) => (
+              <article key={repo.name} className="repo-row">
+                <div>
+                  <h3>{repo.name}</h3>
+                  <p>
+                    {repo.nativeDependencyCount} native dependencies • last scan {repo.lastScanLabel}
+                  </p>
+                </div>
+                <strong>{repo.aggregateRiskScore}</strong>
+                <span className={`status-pill status-pill--${repo.status}`}>{repo.status}</span>
+              </article>
+            ))}
+          </div>
         </div>
-        <div className="repo-table">
-          {repos.map((repo) => (
-            <article key={repo.name} className="repo-row">
-              <div>
-                <h3>{repo.name}</h3>
-                <p>{repo.dependencies} native dependencies monitored</p>
-              </div>
-              <strong>{repo.risk}</strong>
-              <span className={`status-pill status-pill--${repo.status}`}>{repo.status}</span>
-            </article>
-          ))}
+
+        <div className="panel">
+          <div className="panel__heading">
+            <h2>Recent scans</h2>
+            <span>Pipeline activity</span>
+          </div>
+          <div className="activity-list">
+            {snapshot.recentScans.map((scan) => (
+              <article key={`${scan.packageName}-${scan.version}`} className="activity-row">
+                <div>
+                  <strong>
+                    {scan.packageName}@{scan.version}
+                  </strong>
+                  <p>
+                    {scan.status} • {scan.timestampLabel}
+                  </p>
+                </div>
+                <RiskBadge level={scan.riskLevel as "none" | "low" | "medium" | "high" | "critical"} score={scoreForLevel(scan.riskLevel)} />
+              </article>
+            ))}
+          </div>
         </div>
       </section>
     </main>

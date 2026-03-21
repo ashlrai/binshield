@@ -1,128 +1,285 @@
-import type { BinaryAnalysis, PackageAnalysis, ScanRequest } from "@binshield/analysis-types";
-import { emptyBehaviorSummary } from "@binshield/analysis-types";
-import { scoreBinary, aggregatePackageRisk } from "@binshield/risk-engine";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 
-interface DecompiledArtifact {
-  imports: string[];
-  strings: string[];
-  preview: string;
-  functionCount: number;
+import type { PackageAnalysis } from "@binshield/analysis-types";
+import { aggregatePackageRisk, summarizePackage, scoreBinary } from "@binshield/risk-engine";
+
+import { buildCacheKey, InMemoryAnalysisCache } from "./cache";
+import { FileSystemBinaryExtractor } from "./extractor";
+import { InMemoryJobStore } from "./job-store";
+import {
+  CompositeClassifierProvider,
+  CompositeDecompilerProvider,
+  HttpClassifierProvider,
+  HttpDecompilerProvider,
+  LocalHeuristicClassifierProvider,
+  LocalHeuristicDecompilerProvider
+} from "./providers";
+import { LocalDirectoryPackageSource, RegistryPackageSource, createDefaultPackageSource } from "./package-source";
+import type {
+  AcquiredPackage,
+  AnalysisOutcome,
+  AnalysisServiceBundle,
+  ClassifiedArtifact,
+  DecompiledArtifact,
+  FingerprintedArtifact,
+  PackageManifest,
+  WorkerScanRequest
+} from "./types";
+
+function defaultDemoPackageRoot(): string {
+  return path.resolve(new URL("../fixtures/sample-package", import.meta.url).pathname);
 }
 
-export class ExtractionService {
-  async extractBinaries(request: ScanRequest) {
-    return [
-      {
-        filename: `${request.packageName}.node`,
-        architecture: "x86_64",
-        format: "ELF" as const,
-        fileSize: 184_320
-      }
-    ];
+function collapsePackageConfidence(values: Array<"low" | "medium" | "high">): "low" | "medium" | "high" {
+  if (values.length === 0) {
+    return "low";
   }
+  if (values.every((value) => value === "high")) {
+    return "high";
+  }
+  if (values.some((value) => value === "low")) {
+    return "low";
+  }
+  return "medium";
 }
 
-export class GhidraService {
-  async decompile(binaryName: string): Promise<DecompiledArtifact> {
+function createDefaultBundle(demoPackageRoot = defaultDemoPackageRoot()): AnalysisServiceBundle {
+  return {
+    acquisition: createDefaultPackageSource(demoPackageRoot),
+    extraction: new FileSystemBinaryExtractor(),
+    decompiler: new CompositeDecompilerProvider([
+      new HttpDecompilerProvider(),
+      new LocalHeuristicDecompilerProvider()
+    ]),
+    classifier: new CompositeClassifierProvider([
+      new HttpClassifierProvider(),
+      new LocalHeuristicClassifierProvider()
+    ]),
+    cache: new InMemoryAnalysisCache(),
+    jobs: new InMemoryJobStore()
+  };
+}
+
+async function loadManifest(packageRoot: string): Promise<PackageManifest> {
+  const content = await readFile(path.join(packageRoot, "package.json"), "utf8");
+  const raw = JSON.parse(content) as Partial<PackageManifest> & {
+    name?: string;
+    version?: string;
+    scripts?: Record<string, string>;
+    dependencies?: Record<string, string>;
+    optionalDependencies?: Record<string, string>;
+  };
+
+  return {
+    name: raw.name ?? "unknown-package",
+    version: raw.version ?? "0.0.0",
+    scripts: raw.scripts ?? {},
+    dependencies: raw.dependencies ?? {},
+    optionalDependencies: raw.optionalDependencies ?? {}
+  };
+}
+
+function buildPackageSummary(packageAnalysis: PackageAnalysis): string {
+  if (packageAnalysis.binaryCount === 0) {
+    return `${packageAnalysis.packageName}@${packageAnalysis.version} has no native binaries in the scanned package tree.`;
+  }
+
+  return summarizePackage(packageAnalysis);
+}
+
+function toAnalysisPackage(
+  request: WorkerScanRequest,
+  manifest: PackageManifest,
+  classifiedArtifacts: Array<{
+    fingerprint: FingerprintedArtifact;
+    decompiled: { pseudoSource: string; imports: string[]; strings: string[]; functionCount: number; callTargets: string[]; confidence: number };
+    classified: ClassifiedArtifact;
+  }>
+): PackageAnalysis {
+  const binaries = classifiedArtifacts.map(({ fingerprint, decompiled, classified }) => {
+    const scored = scoreBinary({
+      behaviors: classified.behaviors,
+      findings: classified.findings,
+      importCount: decompiled.imports.length,
+      functionCount: decompiled.functionCount
+    });
+
     return {
-      imports: ["uv_queue_work", "napi_create_function", "open"],
-      strings: ["/dev/urandom", "binshield-simulated-analysis", binaryName],
-      preview: `int entry_${binaryName.replace(/\W/g, "_")}(void) { return 0; }`,
-      functionCount: 34
+      id: `${request.packageName}_${fingerprint.sha256.slice(0, 12)}`,
+      filename: fingerprint.filename,
+      architecture: fingerprint.architecture,
+      format: fingerprint.format,
+      fileSize: fingerprint.fileSize,
+      functionCount: decompiled.functionCount,
+      importCount: decompiled.imports.length,
+      riskScore: scored.riskScore,
+      riskLevel: scored.riskLevel,
+      decompiledPreview: decompiled.pseudoSource,
+      aiExplanation: classified.explanation,
+      imports: decompiled.imports,
+      strings: decompiled.strings,
+      behaviors: classified.behaviors,
+      findings: classified.findings
     };
-  }
+  });
+
+  const confidence = collapsePackageConfidence(classifiedArtifacts.map(({ classified }) => classified.sourceMatchConfidence));
+  const packageAnalysis: PackageAnalysis = {
+    id: `${request.packageName}_${request.version}`,
+    ecosystem: request.ecosystem,
+    packageName: manifest.name || request.packageName,
+    version: manifest.version || request.version,
+    status: "complete",
+    riskScore: 0,
+    riskLevel: "none",
+    summary: "",
+    sourceMatchConfidence: confidence,
+    binaryCount: binaries.length,
+    totalBinarySize: binaries.reduce((total, binary) => total + binary.fileSize, 0),
+    aiModel: "binshield-worker",
+    createdAt: new Date().toISOString(),
+    binaries
+  };
+
+  const aggregate = aggregatePackageRisk(binaries);
+  packageAnalysis.riskScore = aggregate.riskScore;
+  packageAnalysis.riskLevel = aggregate.riskLevel;
+  packageAnalysis.summary = buildPackageSummary(packageAnalysis);
+  return packageAnalysis;
 }
 
-export class AiAnalysisService {
-  async classify(binaryName: string, artifact: DecompiledArtifact) {
-    const behaviors = emptyBehaviorSummary();
-    const findings = [];
+function createAcquisitionForRequest(request: WorkerScanRequest, acquisition: AnalysisServiceBundle["acquisition"]) {
+  if (request.packageRoot) {
+    return new LocalDirectoryPackageSource(request.packageRoot);
+  }
 
-    if (artifact.strings.some((value) => value.includes("urandom"))) {
-      behaviors.filesystem = {
-        detected: true,
-        details: ["Reads /dev/urandom for entropy during startup."]
+  if (request.packageSource === "registry" || process.env.BINSHIELD_PACKAGE_SOURCE === "registry") {
+    return new RegistryPackageSource();
+  }
+
+  return acquisition;
+}
+
+export class WorkerRuntime {
+  constructor(private readonly services: AnalysisServiceBundle = createDefaultBundle()) {}
+
+  submit(request: WorkerScanRequest) {
+    const cacheKey = buildCacheKey(request, [request.packageRoot ?? request.packageSource ?? "pending"]);
+    return this.services.jobs.submit(request, cacheKey);
+  }
+
+  async process(jobId: string): Promise<AnalysisOutcome> {
+    const submitted = this.services.jobs.start(jobId);
+    const request = submitted.request;
+    const packageSource = createAcquisitionForRequest(request, this.services.acquisition);
+
+    const acquired = await packageSource.acquire(request);
+    const artifacts = await this.services.extraction.discover(acquired.packageRoot);
+    const artifactHashes = artifacts.map((artifact) => artifact.sha256);
+    const cacheKey = buildCacheKey(request, artifactHashes);
+
+    const cached = !request.forceReanalyze ? this.services.cache.get(cacheKey) : undefined;
+    if (cached) {
+      const completed = this.services.jobs.cache(jobId, cached.analysis, artifactHashes, cacheKey);
+      return {
+        job: completed,
+        analysis: cached.analysis,
+        artifacts
       };
-      behaviors.crypto = {
-        detected: true,
-        details: ["Entropy access is consistent with cryptographic setup."]
-      };
-      findings.push({
-        severity: "info" as const,
-        title: "Entropy source access",
-        description: `${binaryName} reads an OS entropy device.`,
-        location: "entrypoint",
-        recommendation: "Treat as expected when crypto primitives are present."
-      });
     }
 
+    const classifiedArtifacts: Array<{
+      fingerprint: FingerprintedArtifact;
+      decompiled: DecompiledArtifact;
+      classified: ClassifiedArtifact;
+    }> = [];
+
+    for (const fingerprint of artifacts) {
+      const decompiled = await this.services.decompiler.decompile({
+        packageRequest: request,
+        packageRoot: acquired.packageRoot,
+        artifact: fingerprint
+      });
+
+      const classified = await this.services.classifier.classify({
+        packageRequest: request,
+        packageRoot: acquired.packageRoot,
+        artifact: fingerprint,
+        decompiled
+      });
+
+      classifiedArtifacts.push({ fingerprint, decompiled, classified });
+    }
+
+    const analysis = toAnalysisPackage(request, acquired.manifest, classifiedArtifacts);
+    this.services.cache.set({
+      cacheKey,
+      artifactHashes,
+      analysis,
+      createdAt: new Date().toISOString()
+    });
+
+    const completed = this.services.jobs.complete(jobId, analysis, artifactHashes, cacheKey);
     return {
-      summary: `${binaryName} exhibits expected native addon initialization and no suspicious network behavior.`,
-      explanation:
-        "Simulated classifier result from the worker pipeline. Replace this service with a provider-backed Claude adapter for production.",
-      behaviors,
-      findings
+      job: completed,
+      analysis,
+      artifacts
     };
+  }
+
+  async run(request: WorkerScanRequest): Promise<AnalysisOutcome> {
+    const job = this.submit(request);
+    return this.process(job.id);
+  }
+
+  async analyze(request: WorkerScanRequest): Promise<PackageAnalysis> {
+    const outcome = await this.run(request);
+    return outcome.analysis;
+  }
+
+  async resolvePackage(request: WorkerScanRequest): Promise<AcquiredPackage> {
+    const source = createAcquisitionForRequest(request, this.services.acquisition);
+    return source.acquire(request);
+  }
+
+  getJob(jobId: string) {
+    return this.services.jobs.get(jobId);
+  }
+
+  listJobs() {
+    return this.services.jobs.list();
+  }
+
+  jobEvents(jobId: string) {
+    return this.services.jobs.events(jobId);
   }
 }
 
 export class AnalysisPipeline {
-  constructor(
-    private extraction = new ExtractionService(),
-    private ghidra = new GhidraService(),
-    private ai = new AiAnalysisService()
-  ) {}
+  constructor(private readonly runtime = new WorkerRuntime()) {}
 
-  async analyze(request: ScanRequest): Promise<PackageAnalysis> {
-    const extracted = await this.extraction.extractBinaries(request);
-    const binaries: BinaryAnalysis[] = [];
+  async analyze(request: WorkerScanRequest): Promise<PackageAnalysis> {
+    return this.runtime.analyze(request);
+  }
 
-    for (const binary of extracted) {
-      const decompiled = await this.ghidra.decompile(binary.filename);
-      const aiResult = await this.ai.classify(binary.filename, decompiled);
-      const scored = scoreBinary({
-        behaviors: aiResult.behaviors,
-        findings: aiResult.findings,
-        importCount: decompiled.imports.length,
-        functionCount: decompiled.functionCount
-      });
+  submit(request: WorkerScanRequest) {
+    return this.runtime.submit(request);
+  }
 
-      binaries.push({
-        id: `${request.packageName}_${binary.filename}`,
-        filename: binary.filename,
-        architecture: binary.architecture,
-        format: binary.format,
-        fileSize: binary.fileSize,
-        functionCount: decompiled.functionCount,
-        importCount: decompiled.imports.length,
-        riskScore: scored.riskScore,
-        riskLevel: scored.riskLevel,
-        decompiledPreview: decompiled.preview,
-        aiExplanation: aiResult.explanation,
-        imports: decompiled.imports,
-        strings: decompiled.strings,
-        behaviors: aiResult.behaviors,
-        findings: aiResult.findings
-      });
-    }
+  async process(jobId: string): Promise<AnalysisOutcome> {
+    return this.runtime.process(jobId);
+  }
 
-    const aggregate = aggregatePackageRisk(binaries);
+  async run(request: WorkerScanRequest): Promise<AnalysisOutcome> {
+    return this.runtime.run(request);
+  }
 
-    return {
-      id: `${request.packageName}_${request.version}`,
-      ecosystem: request.ecosystem,
-      packageName: request.packageName,
-      version: request.version,
-      status: "complete",
-      riskScore: aggregate.riskScore,
-      riskLevel: aggregate.riskLevel,
-      summary: binaries[0]?.aiExplanation ?? "No binaries discovered.",
-      sourceMatchConfidence: "medium",
-      binaryCount: binaries.length,
-      totalBinarySize: binaries.reduce((total, binary) => total + binary.fileSize, 0),
-      aiModel: "claude-simulated",
-      createdAt: new Date().toISOString(),
-      binaries
-    };
+  getJob(jobId: string) {
+    return this.runtime.getJob(jobId);
+  }
+
+  listJobs() {
+    return this.runtime.listJobs();
   }
 }
