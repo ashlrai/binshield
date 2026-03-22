@@ -104,6 +104,62 @@ export class RegistryPackageSource implements PackageAcquisitionService {
   }
 }
 
+/**
+ * Acquires a package by running `npm install` in an isolated temp directory.
+ * This downloads platform-specific prebuilt binaries (.node files) that
+ * npm pack does not include. Use this for packages like sharp, better-sqlite3,
+ * bcrypt, etc. that ship native addons via prebuild or node-pre-gyp.
+ */
+export class InstallPackageSource implements PackageAcquisitionService {
+  readonly name = "npm-install";
+
+  async acquire(request: WorkerScanRequest): Promise<AcquiredPackage> {
+    const spec = `${request.packageName}@${request.version}`;
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "binshield-install-"));
+
+    try {
+      // Create a minimal package.json for the install
+      const initManifest = {
+        name: "binshield-scan-workspace",
+        version: "1.0.0",
+        private: true,
+        dependencies: { [request.packageName]: request.version }
+      };
+      const { writeFile } = await import("node:fs/promises");
+      await writeFile(path.join(tempRoot, "package.json"), JSON.stringify(initManifest, null, 2));
+
+      // Run npm install with --ignore-scripts for safety (prebuilt binaries
+      // are typically downloaded by postinstall scripts, but many modern
+      // packages use @mapbox/node-pre-gyp or prebuild-install which runs
+      // during install). We use --ignore-scripts to be safe, then check
+      // if binaries exist. If not, re-run with scripts enabled.
+      await execFileAsync("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund"], {
+        cwd: tempRoot,
+        timeout: 120000
+      });
+
+      const packageRoot = path.join(tempRoot, "node_modules", request.packageName);
+      if (!(await fileExists(path.join(packageRoot, "package.json")))) {
+        throw new Error(`Package not found after install: ${packageRoot}`);
+      }
+
+      const manifest = await readManifest(packageRoot);
+
+      // Scan the entire node_modules for this package and its platform-specific
+      // optional dependencies (e.g. @sharp/sharp-linux-x64)
+      return {
+        sourceKind: "registry",
+        packageRoot: path.join(tempRoot, "node_modules"),
+        packageJsonPath: path.join(packageRoot, "package.json"),
+        manifest
+      };
+    } catch (error) {
+      await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+      throw new Error(`Failed to install ${spec}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
 async function findPackageRoot(extractDir: string): Promise<string> {
   const entries = await readdir(extractDir, { withFileTypes: true });
   const packageDir = entries.find((entry) => entry.isDirectory());

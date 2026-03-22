@@ -11,7 +11,7 @@ import {
   createDefaultDecompilerProvider,
   createDefaultClassifierProvider
 } from "./providers";
-import { LocalDirectoryPackageSource, RegistryPackageSource, createDefaultPackageSource } from "./package-source";
+import { InstallPackageSource, LocalDirectoryPackageSource, RegistryPackageSource, createDefaultPackageSource } from "./package-source";
 import type {
   AcquiredPackage,
   AnalysisOutcome,
@@ -142,6 +142,10 @@ function toAnalysisPackage(
 function createAcquisitionForRequest(request: WorkerScanRequest, acquisition: AnalysisServiceBundle["acquisition"]) {
   if (request.packageRoot) {
     return new LocalDirectoryPackageSource(request.packageRoot);
+  }
+
+  if (request.packageSource === "install") {
+    return new InstallPackageSource();
   }
 
   if (request.packageSource === "registry" || process.env.BINSHIELD_PACKAGE_SOURCE === "registry") {

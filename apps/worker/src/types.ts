@@ -9,7 +9,7 @@ import type {
   ScanRequest
 } from "@binshield/analysis-types";
 
-export type PackageSourceKind = "fixture" | "directory" | "registry" | "tarball";
+export type PackageSourceKind = "fixture" | "directory" | "registry" | "tarball" | "install";
 
 export interface WorkerScanRequest extends ScanRequest {
   packageRoot?: string;

@@ -135,7 +135,7 @@ export class WorkerDaemon {
       ecosystem: job.ecosystem,
       packageName: job.packageName,
       version: job.version,
-      packageSource: "registry",
+      packageSource: "install",
     };
 
     try {
