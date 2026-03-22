@@ -16,7 +16,7 @@ export interface EnvShape {
   stripeWebhookSecret: string;
   stripePriceIds: Record<string, string>;
   githubActionToken: string;
-  resendApiKey: string;
+  sendgridApiKey: string;
   smtpFromEmail: string;
   defaultFailOn: "critical" | "high" | "medium" | "low" | "never";
 }
@@ -44,8 +44,8 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): EnvShape {
       enterprise: source.STRIPE_PRICE_ENTERPRISE ?? "price_enterprise_placeholder"
     },
     githubActionToken: source.GITHUB_TOKEN ?? "dev-github-token",
-    resendApiKey: source.RESEND_API_KEY ?? "",
-    smtpFromEmail: source.BINSHIELD_SMTP_FROM_EMAIL ?? "alerts@binshield.dev",
+    sendgridApiKey: source.SENDGRID_API_KEY ?? "",
+    smtpFromEmail: source.BINSHIELD_SMTP_FROM_EMAIL ?? "support@ashlr.ai",
     defaultFailOn: (source.BINSHIELD_DEFAULT_FAIL_ON as EnvShape["defaultFailOn"]) ?? "high"
   };
 }

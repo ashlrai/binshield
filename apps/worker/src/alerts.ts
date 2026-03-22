@@ -36,13 +36,13 @@ interface WatchlistPackageRow {
  * and logged rather than thrown, so a failed alert never blocks job completion.
  */
 export async function checkAndSendAlerts(
-  config: SupabaseWorkerConfig & { resendApiKey: string; fromEmail: string },
+  config: SupabaseWorkerConfig & { sendgridApiKey: string; fromEmail: string },
   packageName: string,
   ecosystem: string,
   version: string,
   analysis: PackageAnalysis,
 ): Promise<void> {
-  if (!config.resendApiKey) {
+  if (!config.sendgridApiKey) {
     return;
   }
 
@@ -111,7 +111,7 @@ export async function checkAndSendAlerts(
         );
 
         const sent = await sendEmail(
-          { resendApiKey: config.resendApiKey, fromEmail: config.fromEmail },
+          { sendgridApiKey: config.sendgridApiKey, fromEmail: config.fromEmail },
           match.email,
           subject,
           html,

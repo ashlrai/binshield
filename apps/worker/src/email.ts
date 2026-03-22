@@ -1,18 +1,19 @@
 /**
- * Email sender using the Resend API.
+ * Email sender using the SendGrid API.
  *
  * Uses native fetch — no SDKs required.
+ * Consistent with Koala, Evero, and Probe email infrastructure.
  */
 
-const RESEND_API_URL = "https://api.resend.com/emails";
+const SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send";
 
 export interface EmailConfig {
-  resendApiKey: string;
+  sendgridApiKey: string;
   fromEmail: string;
 }
 
 /**
- * Send an email via the Resend API.
+ * Send an email via the SendGrid API.
  *
  * Returns `true` on success (2xx), `false` on any failure.
  * Failures are logged but never thrown — callers should treat
@@ -24,30 +25,30 @@ export async function sendEmail(
   subject: string,
   html: string,
 ): Promise<boolean> {
-  if (!config.resendApiKey) {
-    console.warn("[BinShield Email] RESEND_API_KEY is not configured, skipping email");
+  if (!config.sendgridApiKey) {
+    console.warn("[BinShield Email] SENDGRID_API_KEY is not configured, skipping email");
     return false;
   }
 
   try {
-    const response = await fetch(RESEND_API_URL, {
+    const response = await fetch(SENDGRID_API_URL, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${config.resendApiKey}`,
+        Authorization: `Bearer ${config.sendgridApiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        from: config.fromEmail,
-        to,
+        personalizations: [{ to: [{ email: to }] }],
+        from: { email: config.fromEmail, name: "BinShield" },
         subject,
-        html,
+        content: [{ type: "text/html", value: html }],
       }),
     });
 
     if (!response.ok) {
       const body = await response.text();
       console.error(
-        `[BinShield Email] Resend API error (${response.status}): ${body}`,
+        `[BinShield Email] SendGrid API error (${response.status}): ${body}`,
       );
       return false;
     }

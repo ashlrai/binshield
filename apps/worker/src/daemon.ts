@@ -11,7 +11,7 @@ export interface DaemonConfig extends SupabaseWorkerConfig {
   /** Maximum number of jobs processed concurrently. Default 2. */
   maxConcurrent: number;
   /** Resend API key for email alerts. Empty string disables alerts. */
-  resendApiKey: string;
+  sendgridApiKey: string;
   /** From address for alert emails. */
   fromEmail: string;
 }
@@ -153,7 +153,7 @@ export class WorkerDaemon {
         {
           supabaseUrl: this.config.supabaseUrl,
           supabaseServiceRoleKey: this.config.supabaseServiceRoleKey,
-          resendApiKey: this.config.resendApiKey,
+          sendgridApiKey: this.config.sendgridApiKey,
           fromEmail: this.config.fromEmail,
         },
         job.packageName,
