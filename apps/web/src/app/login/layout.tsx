@@ -1,0 +1,14 @@
+import type { Metadata } from "next";
+
+export const metadata: Metadata = {
+  title: "Sign In",
+  description:
+    "Sign in to BinShield to access your organization dashboard, watchlists, billing, and API key management.",
+  alternates: {
+    canonical: "https://binshield.dev/login"
+  }
+};
+
+export default function LoginLayout({ children }: { children: React.ReactNode }) {
+  return children;
+}

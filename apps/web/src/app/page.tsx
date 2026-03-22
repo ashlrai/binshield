@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { productCopy } from "@binshield/config";
 
+import { DemoVideo } from "../components/demo-video";
 import { HeroViz } from "../components/hero-viz";
 import { MetricCard } from "../components/metric-card";
 import { PageHeader } from "../components/page-header";
@@ -43,6 +44,8 @@ export default async function HomePage() {
       </section>
 
       <ScanForm apiBase={process.env.BINSHIELD_API_BASE_URL ?? process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL ?? ""} />
+
+      <DemoVideo />
 
       <section className="metrics-grid">
         <MetricCard label="Compiled code visibility" value="Binary-first" detail="Inspect native package artifacts, not just manifests." />

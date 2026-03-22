@@ -1,8 +1,18 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 
 import { PageHeader } from "../../components/page-header";
 import { RiskBadge } from "../../components/risk-badge";
 import { searchPackages } from "../../lib/site-data";
+
+export const metadata: Metadata = {
+  title: "Search Packages",
+  description:
+    "Search BinShield's database of npm packages with native binaries. Find risk scores, behavior classifications, and decompiled binary analysis by package name.",
+  alternates: {
+    canonical: "https://binshield.dev/search"
+  }
+};
 
 export default async function SearchPage({
   searchParams

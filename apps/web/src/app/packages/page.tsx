@@ -1,9 +1,19 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 
 import { MetricCard } from "../../components/metric-card";
 import { PageHeader } from "../../components/page-header";
 import { RiskBadge } from "../../components/risk-badge";
 import { getPublicBrowseCounts, searchPackages } from "../../lib/site-data";
+
+export const metadata: Metadata = {
+  title: "Package Database",
+  description:
+    "Browse BinShield's database of analyzed npm packages with native binaries. View risk scores, behavior classifications, and binary-level evidence for each package.",
+  alternates: {
+    canonical: "https://binshield.dev/packages"
+  }
+};
 
 export default async function PackagesIndexPage({
   searchParams

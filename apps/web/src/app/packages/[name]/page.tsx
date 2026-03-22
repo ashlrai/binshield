@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -10,6 +11,39 @@ import { PageHeader } from "../../../components/page-header";
 import { RiskBadge } from "../../../components/risk-badge";
 import { RiskTimeline } from "../../../components/risk-timeline";
 import { getPackageSummaryStats, getPackageWorkspace } from "../../../lib/site-data";
+
+export async function generateMetadata({
+  params,
+  searchParams
+}: {
+  params: Promise<{ name: string }>;
+  searchParams: Promise<{ version?: string }>;
+}): Promise<Metadata> {
+  const { name } = await params;
+  const { version } = await searchParams;
+  const workspace = await getPackageWorkspace(name, version);
+
+  if (!workspace.found) {
+    return {
+      title: `${decodeURIComponent(name)} — Not Found`
+    };
+  }
+
+  const riskLabel = workspace.selected.riskLevel.charAt(0).toUpperCase() + workspace.selected.riskLevel.slice(1);
+
+  return {
+    title: `${workspace.packageName} Binary Analysis`,
+    description: `${riskLabel} risk (score ${workspace.selected.riskScore}/100) — ${workspace.selected.summary}. ${workspace.selected.binaryCount} native binaries analyzed by BinShield.`,
+    alternates: {
+      canonical: `https://binshield.dev/packages/${encodeURIComponent(workspace.packageName)}`
+    },
+    openGraph: {
+      title: `${workspace.packageName} Binary Analysis | BinShield`,
+      description: `${riskLabel} risk (score ${workspace.selected.riskScore}/100). ${workspace.selected.binaryCount} native binaries decompiled and classified.`,
+      url: `https://binshield.dev/packages/${encodeURIComponent(workspace.packageName)}`
+    }
+  };
+}
 
 export default async function PackagePage({
   params,
