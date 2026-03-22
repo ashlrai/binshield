@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 
 import { productCopy } from "@binshield/config";
 
+import { Footer } from "../components/footer";
 import { Header } from "../components/header";
 import "./globals.css";
 
@@ -109,6 +110,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <div className="page-shell">
           <Header />
           {children}
+          <Footer />
         </div>
       </body>
     </html>
