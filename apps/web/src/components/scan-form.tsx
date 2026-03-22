@@ -18,6 +18,23 @@ export function ScanForm({ apiBase, onComplete }: ScanFormProps) {
   const [status, setStatus] = useState<"idle" | "submitting" | "polling" | "complete" | "error">("idle");
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  if (!apiBase) {
+    return (
+      <div className="scan-form">
+        <div className="scan-form__fields">
+          <div className="scan-form__field scan-form__field--name">
+            <label>Scan a package</label>
+            <p style={{ color: "var(--muted)", margin: 0, fontSize: "0.88rem" }}>
+              Live scanning is available when the API is connected. Browse the{" "}
+              <a href="/packages" style={{ color: "var(--accent)" }}>public database</a>{" "}
+              to view pre-analyzed packages.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
   const [result, setResult] = useState<PackageAnalysis | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {

@@ -463,21 +463,51 @@ function buildEvidenceSummary(selected: PackageAnalysis): PackageWorkspace["evid
   ];
 }
 
-export function getDataMode() {
-  return dataMode;
+let verifiedDataMode: DataMode | null = null;
+
+export async function getDataMode(): Promise<DataMode> {
+  if (verifiedDataMode !== null) return verifiedDataMode;
+  if (!rawApiBaseUrl) {
+    verifiedDataMode = "demo";
+    return "demo";
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    const res = await fetch(`${normalizeBaseUrl(rawApiBaseUrl)}/health`, {
+      signal: controller.signal,
+      cache: "no-store"
+    });
+    clearTimeout(timeout);
+    verifiedDataMode = res.ok ? "live" : "demo";
+  } catch {
+    verifiedDataMode = "demo";
+  }
+
+  return verifiedDataMode;
 }
 
-export async function getFeaturedPackages(limit = 4): Promise<PublicPackageCard[]> {
+export async function getFeaturedPackages(limit = 6): Promise<PublicPackageCard[]> {
   const response = await fetchJson<ApiListResponse<SearchResult>>("/packages/search");
   if (response?.items?.length) {
-    return response.items.slice(0, limit).map((item) => ({
-      ...item,
-      versions: 1,
-      publishedAt: new Date().toISOString(),
-      sourceMatchConfidence: "medium",
-      highestFinding: item.riskLevel === "medium" || item.riskLevel === "high" || item.riskLevel === "critical" ? "medium" : "info",
-      topBehaviors: []
-    }));
+    // Sort by risk score descending to show most interesting packages first
+    const sorted = [...response.items].sort((a, b) => b.riskScore - a.riskScore);
+    return sorted.slice(0, limit).map((item) => {
+      const behaviorLabels: string[] = [];
+      if (item.riskScore >= 30) behaviorLabels.push("review-worthy");
+      if (item.binaryCount > 5) behaviorLabels.push("multi-binary");
+      if (item.riskScore >= 60) behaviorLabels.push("elevated risk");
+
+      return {
+        ...item,
+        versions: 1,
+        publishedAt: new Date().toISOString(),
+        sourceMatchConfidence: item.riskScore >= 40 ? "high" as const : "medium" as const,
+        highestFinding: item.riskLevel === "high" || item.riskLevel === "critical" ? "high" as const : item.riskLevel === "medium" ? "medium" as const : "info" as const,
+        topBehaviors: behaviorLabels
+      };
+    });
   }
 
   return toPackageCards(sampleAnalyses).slice(0, limit);
@@ -723,7 +753,16 @@ export async function getSettingsSnapshot(): Promise<SettingsSnapshot> {
   };
 }
 
-export function getPublicBrowseCounts() {
+export async function getPublicBrowseCounts() {
+  const response = await fetchJson<ApiListResponse<SearchResult>>("/packages/search");
+  if (response?.items?.length) {
+    return {
+      packages: response.items.length,
+      binaries: response.items.reduce((total, item) => total + item.binaryCount, 0),
+      watchlists: 2
+    };
+  }
+
   return {
     packages: dedupe(sampleAnalyses.map((analysis) => analysis.packageName)).length,
     binaries: sampleAnalyses.reduce((total, analysis) => total + analysis.binaryCount, 0),

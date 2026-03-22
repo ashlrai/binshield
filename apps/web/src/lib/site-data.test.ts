@@ -13,7 +13,7 @@ import {
 
 describe("site data", () => {
   it("returns browse counts and featured packages", async () => {
-    const counts = getPublicBrowseCounts();
+    const counts = await getPublicBrowseCounts();
     const featured = await getFeaturedPackages();
 
     expect(counts.packages).toBeGreaterThan(0);

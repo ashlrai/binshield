@@ -11,8 +11,7 @@ export default async function PackagesIndexPage({
   searchParams: Promise<{ q?: string }>;
 }) {
   const { q = "" } = await searchParams;
-  const results = await searchPackages(q);
-  const counts = getPublicBrowseCounts();
+  const [results, counts] = await Promise.all([searchPackages(q), getPublicBrowseCounts()]);
 
   return (
     <main className="browse-page">

@@ -9,9 +9,11 @@ import { ScanForm } from "../components/scan-form";
 import { getDataMode, getFeaturedPackages, getPublicBrowseCounts } from "../lib/site-data";
 
 export default async function HomePage() {
-  const featured = await getFeaturedPackages();
-  const counts = getPublicBrowseCounts();
-  const mode = getDataMode();
+  const [featured, counts, mode] = await Promise.all([
+    getFeaturedPackages(),
+    getPublicBrowseCounts(),
+    getDataMode()
+  ]);
 
   return (
     <main className="home-page">

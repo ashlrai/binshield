@@ -2,8 +2,8 @@ import Link from "next/link";
 
 import { getDataMode } from "../lib/site-data";
 
-export function Header() {
-  const mode = getDataMode();
+export async function Header() {
+  const mode = await getDataMode();
 
   return (
     <header className="site-header">
