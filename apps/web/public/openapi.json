@@ -1,0 +1,2011 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "BinShield API",
+    "version": "1.0.0",
+    "description": "BinShield analyzes native binaries inside open-source packages (npm, PyPI) to detect hidden behaviors, supply-chain risks, and malicious code. Submit scans, retrieve analysis results, compare versions, and export SBOMs.",
+    "contact": {
+      "name": "BinShield Support",
+      "url": "https://binshield.dev",
+      "email": "support@binshield.dev"
+    },
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://api.binshield.dev",
+      "description": "Production"
+    },
+    {
+      "url": "https://binshieldapi-production.up.railway.app",
+      "description": "Railway deployment"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Packages",
+      "description": "Search, inspect, diff, and export package analysis data"
+    },
+    {
+      "name": "Scans",
+      "description": "Submit and monitor binary scan jobs"
+    },
+    {
+      "name": "Organizations",
+      "description": "Manage organizations, repos, watchlists, and API keys"
+    },
+    {
+      "name": "Billing",
+      "description": "Checkout sessions and Stripe webhook handling"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Health check",
+        "description": "Returns service health status, repository mode, and default configuration.",
+        "tags": ["Packages"],
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/packages/search": {
+      "get": {
+        "operationId": "searchPackages",
+        "summary": "Search analyzed packages",
+        "description": "Search for packages that have been analyzed by BinShield. Returns matching packages with their latest risk scores.",
+        "tags": ["Packages"],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Search query string to filter packages by name",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of matching packages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResult"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/packages/{ecosystem}/{name}": {
+      "get": {
+        "operationId": "getPackageVersions",
+        "summary": "List package versions",
+        "description": "List all analyzed versions of a package within an ecosystem.",
+        "tags": ["Packages"],
+        "parameters": [
+          {
+            "name": "ecosystem",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Ecosystem"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Package name",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Package with its analyzed versions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackageVersionsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Package not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/packages/{ecosystem}/{name}/versions/{version}": {
+      "get": {
+        "operationId": "getPackageAnalysis",
+        "summary": "Get package analysis",
+        "description": "Retrieve the full analysis for a specific package version, including all binary analyses, behavior summaries, and findings.",
+        "tags": ["Packages"],
+        "parameters": [
+          {
+            "name": "ecosystem",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Ecosystem"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Package name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "description": "Package version",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full package analysis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackageAnalysis"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Analysis not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/packages/{ecosystem}/{name}/versions/{version}/sbom": {
+      "get": {
+        "operationId": "getPackageSbom",
+        "summary": "Export CycloneDX SBOM",
+        "description": "Download a CycloneDX 1.5 Software Bill of Materials (SBOM) in JSON format for a specific package version.",
+        "tags": ["Packages"],
+        "parameters": [
+          {
+            "name": "ecosystem",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Ecosystem"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Package name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "description": "Package version",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CycloneDX SBOM JSON document",
+            "headers": {
+              "Content-Disposition": {
+                "description": "Attachment filename for the SBOM download",
+                "schema": {
+                  "type": "string",
+                  "example": "attachment; filename=\"sbom-bcrypt-5.1.0.cdx.json\""
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "CycloneDX 1.5 SBOM document"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Analysis not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/packages/{ecosystem}/{name}/diff": {
+      "get": {
+        "operationId": "getPackageDiff",
+        "summary": "Diff two package versions",
+        "description": "Compare two versions of a package to see risk score changes, added/removed behaviors, and a summary of differences.",
+        "tags": ["Packages"],
+        "parameters": [
+          {
+            "name": "ecosystem",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Ecosystem"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Package name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "description": "Source version to compare from",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "description": "Target version to compare to",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Version diff result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PackageDiff"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing from or to query parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Diff not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scans/packages": {
+      "post": {
+        "operationId": "submitPackageScan",
+        "summary": "Submit a package scan",
+        "description": "Submit a package for binary analysis. If the analysis is already cached, the result is returned immediately with status 200. Otherwise a scan job is created and returned with status 202.",
+        "tags": ["Scans"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Analysis already complete (cache hit)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanJob"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Scan job accepted and queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scans/{id}": {
+      "get": {
+        "operationId": "getScanJob",
+        "summary": "Get scan job status",
+        "description": "Retrieve the status and result of a previously submitted scan job.",
+        "tags": ["Scans"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Scan job ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scan job details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanJob"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Scan not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/{orgId}": {
+      "get": {
+        "operationId": "getOrganization",
+        "summary": "Get organization",
+        "description": "Retrieve details of an organization. Requires authentication and membership in the organization.",
+        "tags": ["Organizations"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "orgId",
+            "in": "path",
+            "required": true,
+            "description": "Organization ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Organization not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/{orgId}/repos": {
+      "get": {
+        "operationId": "listRepos",
+        "summary": "List repos",
+        "description": "List all monitored repositories for an organization.",
+        "tags": ["Organizations"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "orgId",
+            "in": "path",
+            "required": true,
+            "description": "Organization ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of repos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/RepoRecord"
+                      }
+                    }
+                  },
+                  "required": ["items"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createRepo",
+        "summary": "Add a repo",
+        "description": "Add a GitHub repository to the organization for monitoring.",
+        "tags": ["Organizations"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "orgId",
+            "in": "path",
+            "required": true,
+            "description": "Organization ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["githubRepo"],
+                "properties": {
+                  "githubRepo": {
+                    "type": "string",
+                    "description": "GitHub repository in owner/repo format",
+                    "example": "ashlrai/platform-web"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Repo created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepoRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/{orgId}/watchlists": {
+      "get": {
+        "operationId": "listWatchlists",
+        "summary": "List watchlists",
+        "description": "List all watchlists for an organization. Watchlists send alerts when monitored packages change.",
+        "tags": ["Organizations"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "orgId",
+            "in": "path",
+            "required": true,
+            "description": "Organization ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of watchlists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WatchlistSummary"
+                      }
+                    }
+                  },
+                  "required": ["items"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createWatchlist",
+        "summary": "Create a watchlist",
+        "description": "Create a new watchlist to receive alerts when monitored packages are updated or their risk profile changes.",
+        "tags": ["Organizations"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "orgId",
+            "in": "path",
+            "required": true,
+            "description": "Organization ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "channel", "destination"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Display name for the watchlist",
+                    "example": "Critical Packages"
+                  },
+                  "channel": {
+                    "type": "string",
+                    "enum": ["email", "slack", "webhook"],
+                    "description": "Notification delivery channel"
+                  },
+                  "destination": {
+                    "type": "string",
+                    "description": "Channel-specific destination (email address, Slack webhook URL, or HTTP endpoint)",
+                    "example": "security@example.com"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Watchlist created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchlistSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/{orgId}/watchlists/{watchlistId}/packages": {
+      "post": {
+        "operationId": "addWatchlistPackage",
+        "summary": "Add a package to a watchlist",
+        "description": "Add a package to an existing watchlist to start receiving alerts when it changes.",
+        "tags": ["Organizations"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "orgId",
+            "in": "path",
+            "required": true,
+            "description": "Organization ID",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "watchlistId",
+            "in": "path",
+            "required": true,
+            "description": "Watchlist ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["ecosystem", "packageName"],
+                "properties": {
+                  "ecosystem": {
+                    "$ref": "#/components/schemas/Ecosystem"
+                  },
+                  "packageName": {
+                    "type": "string",
+                    "description": "Package name to watch",
+                    "example": "bcrypt"
+                  },
+                  "version": {
+                    "type": "string",
+                    "description": "Optional specific version to watch. Omit to watch all versions.",
+                    "example": "5.1.1"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Package added to watchlist",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchlistPackageSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Watchlist not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/{orgId}/subscription": {
+      "get": {
+        "operationId": "getSubscription",
+        "summary": "Get subscription",
+        "description": "Retrieve the current subscription details for an organization.",
+        "tags": ["Billing"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "orgId",
+            "in": "path",
+            "required": true,
+            "description": "Organization ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Subscription details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SubscriptionSummary"
+                      }
+                    }
+                  },
+                  "required": ["items"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "upsertSubscription",
+        "summary": "Create or update subscription",
+        "description": "Create or update the subscription for an organization.",
+        "tags": ["Billing"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "orgId",
+            "in": "path",
+            "required": true,
+            "description": "Organization ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["plan", "status"],
+                "properties": {
+                  "plan": {
+                    "type": "string",
+                    "description": "Plan name",
+                    "enum": ["free", "pro", "team", "enterprise"]
+                  },
+                  "status": {
+                    "type": "string",
+                    "description": "Subscription status",
+                    "enum": ["trialing", "active", "past_due", "canceled", "incomplete"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Subscription upserted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/{orgId}/api-keys": {
+      "get": {
+        "operationId": "listApiKeys",
+        "summary": "List API keys",
+        "description": "List all API keys for an organization. Key values are masked; only prefixes are shown.",
+        "tags": ["Organizations"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "orgId",
+            "in": "path",
+            "required": true,
+            "description": "Organization ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of API keys",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ApiKeySummary"
+                      }
+                    }
+                  },
+                  "required": ["items"]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createApiKey",
+        "summary": "Create an API key",
+        "description": "Generate a new API key for the organization. The full key value is only returned once in the response.",
+        "tags": ["Organizations"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "parameters": [
+          {
+            "name": "orgId",
+            "in": "path",
+            "required": true,
+            "description": "Organization ID",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["label"],
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "description": "Human-readable label for the key",
+                    "example": "GitHub Actions"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "API key created. The full key is only shown once.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeySummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of this organization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/billing/checkout": {
+      "post": {
+        "operationId": "createCheckout",
+        "summary": "Create checkout session",
+        "description": "Create a Stripe checkout session to upgrade the organization to a paid plan.",
+        "tags": ["Billing"],
+        "security": [
+          { "apiKey": [] },
+          { "bearer": [] }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["plan"],
+                "properties": {
+                  "plan": {
+                    "type": "string",
+                    "description": "Target plan to subscribe to",
+                    "enum": ["pro", "team", "enterprise"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Checkout session created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckoutSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/billing/webhook": {
+      "post": {
+        "operationId": "handleStripeWebhook",
+        "summary": "Stripe webhook endpoint",
+        "description": "Receives and processes Stripe webhook events (e.g., checkout.session.completed, invoice.paid). This endpoint verifies the Stripe signature header before processing.",
+        "tags": ["Billing"],
+        "parameters": [
+          {
+            "name": "stripe-signature",
+            "in": "header",
+            "required": true,
+            "description": "Stripe webhook signature for event verification",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string",
+                "description": "Raw Stripe event payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Webhook processed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Signature verification failed or processing error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-binshield-api-key",
+        "description": "BinShield API key (prefix: bsh_live_)"
+      },
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Bearer token in the Authorization header"
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable error message"
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "service": {
+            "type": "string",
+            "example": "binshield-api"
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["local", "supabase"]
+          },
+          "repository": {
+            "$ref": "#/components/schemas/RepositoryInfo"
+          },
+          "defaultFailOn": {
+            "type": "string",
+            "description": "Default risk level threshold for CI failures"
+          }
+        }
+      },
+      "RepositoryInfo": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["local", "supabase"]
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "Ecosystem": {
+        "type": "string",
+        "enum": ["npm", "pypi"],
+        "description": "Package ecosystem"
+      },
+      "RiskLevel": {
+        "type": "string",
+        "enum": ["none", "low", "medium", "high", "critical"]
+      },
+      "FindingSeverity": {
+        "type": "string",
+        "enum": ["info", "low", "medium", "high", "critical"]
+      },
+      "AnalysisStatus": {
+        "type": "string",
+        "enum": ["queued", "analyzing", "complete", "failed"]
+      },
+      "BinaryFormat": {
+        "type": "string",
+        "enum": ["ELF", "PE", "Mach-O", "WASM", "unknown"]
+      },
+      "JobStage": {
+        "type": "string",
+        "enum": ["ingest", "extract", "decompile", "classify", "persist"]
+      },
+      "SourceMatchConfidence": {
+        "type": "string",
+        "enum": ["low", "medium", "high"]
+      },
+      "BehaviorSignal": {
+        "type": "object",
+        "required": ["detected", "details"],
+        "properties": {
+          "detected": {
+            "type": "boolean",
+            "description": "Whether this behavior category was detected"
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Human-readable details about the detected behavior"
+          }
+        }
+      },
+      "BehaviorSummary": {
+        "type": "object",
+        "required": ["network", "filesystem", "process", "crypto", "obfuscation", "dataExfiltration"],
+        "properties": {
+          "network": {
+            "$ref": "#/components/schemas/BehaviorSignal"
+          },
+          "filesystem": {
+            "$ref": "#/components/schemas/BehaviorSignal"
+          },
+          "process": {
+            "$ref": "#/components/schemas/BehaviorSignal"
+          },
+          "crypto": {
+            "$ref": "#/components/schemas/BehaviorSignal"
+          },
+          "obfuscation": {
+            "$ref": "#/components/schemas/BehaviorSignal"
+          },
+          "dataExfiltration": {
+            "$ref": "#/components/schemas/BehaviorSignal"
+          }
+        }
+      },
+      "Finding": {
+        "type": "object",
+        "required": ["severity", "title", "description", "recommendation"],
+        "properties": {
+          "severity": {
+            "$ref": "#/components/schemas/FindingSeverity"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string",
+            "description": "Source location or function name where the finding was identified"
+          },
+          "recommendation": {
+            "type": "string"
+          }
+        }
+      },
+      "BinaryFingerprint": {
+        "type": "object",
+        "required": ["sha256", "packageVersionKey", "binaryKey"],
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "packageVersionKey": {
+            "type": "string",
+            "example": "npm:bcrypt@5.1.0"
+          },
+          "binaryKey": {
+            "type": "string",
+            "example": "bcrypt_lib.node"
+          }
+        }
+      },
+      "BinaryAnalysis": {
+        "type": "object",
+        "required": [
+          "id", "filename", "architecture", "format", "fileSize",
+          "functionCount", "importCount", "riskScore", "riskLevel",
+          "decompiledPreview", "aiExplanation", "imports", "strings",
+          "behaviors", "findings"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string",
+            "example": "bcrypt_lib.node"
+          },
+          "architecture": {
+            "type": "string",
+            "example": "x86_64"
+          },
+          "format": {
+            "$ref": "#/components/schemas/BinaryFormat"
+          },
+          "fileSize": {
+            "type": "integer",
+            "description": "File size in bytes"
+          },
+          "functionCount": {
+            "type": "integer"
+          },
+          "importCount": {
+            "type": "integer"
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "riskLevel": {
+            "$ref": "#/components/schemas/RiskLevel"
+          },
+          "decompiledPreview": {
+            "type": "string",
+            "description": "Short decompiled code snippet"
+          },
+          "aiExplanation": {
+            "type": "string",
+            "description": "AI-generated explanation of binary behavior"
+          },
+          "imports": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "strings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fingerprint": {
+            "$ref": "#/components/schemas/BinaryFingerprint"
+          },
+          "behaviors": {
+            "$ref": "#/components/schemas/BehaviorSummary"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Finding"
+            }
+          }
+        }
+      },
+      "PackageAnalysis": {
+        "type": "object",
+        "required": [
+          "id", "ecosystem", "packageName", "version", "status",
+          "riskScore", "riskLevel", "summary", "sourceMatchConfidence",
+          "binaryCount", "totalBinarySize", "aiModel", "createdAt", "binaries"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "ecosystem": {
+            "$ref": "#/components/schemas/Ecosystem"
+          },
+          "packageName": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AnalysisStatus"
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "riskLevel": {
+            "$ref": "#/components/schemas/RiskLevel"
+          },
+          "summary": {
+            "type": "string",
+            "description": "AI-generated summary of the package analysis"
+          },
+          "sourceMatchConfidence": {
+            "$ref": "#/components/schemas/SourceMatchConfidence"
+          },
+          "binaryCount": {
+            "type": "integer"
+          },
+          "totalBinarySize": {
+            "type": "integer",
+            "description": "Total size of all binaries in bytes"
+          },
+          "aiModel": {
+            "type": "string",
+            "description": "AI model used for analysis"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "binaries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BinaryAnalysis"
+            }
+          }
+        }
+      },
+      "PackageDiff": {
+        "type": "object",
+        "required": [
+          "packageName", "ecosystem", "fromVersion", "toVersion",
+          "riskDelta", "summary", "addedBehaviors", "removedBehaviors"
+        ],
+        "properties": {
+          "packageName": {
+            "type": "string"
+          },
+          "ecosystem": {
+            "$ref": "#/components/schemas/Ecosystem"
+          },
+          "fromVersion": {
+            "type": "string"
+          },
+          "toVersion": {
+            "type": "string"
+          },
+          "riskDelta": {
+            "type": "integer",
+            "description": "Change in risk score (positive means riskier)"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "addedBehaviors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "removedBehaviors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "required": [
+          "ecosystem", "packageName", "latestVersion",
+          "riskLevel", "riskScore", "summary", "binaryCount"
+        ],
+        "properties": {
+          "ecosystem": {
+            "$ref": "#/components/schemas/Ecosystem"
+          },
+          "packageName": {
+            "type": "string"
+          },
+          "latestVersion": {
+            "type": "string"
+          },
+          "riskLevel": {
+            "$ref": "#/components/schemas/RiskLevel"
+          },
+          "riskScore": {
+            "type": "integer"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "binaryCount": {
+            "type": "integer"
+          }
+        }
+      },
+      "PackageVersionsResponse": {
+        "type": "object",
+        "required": ["packageName", "ecosystem", "versions"],
+        "properties": {
+          "packageName": {
+            "type": "string"
+          },
+          "ecosystem": {
+            "$ref": "#/components/schemas/Ecosystem"
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PackageAnalysis"
+            }
+          }
+        }
+      },
+      "ScanRequest": {
+        "type": "object",
+        "required": ["ecosystem", "packageName", "version"],
+        "properties": {
+          "ecosystem": {
+            "$ref": "#/components/schemas/Ecosystem"
+          },
+          "packageName": {
+            "type": "string",
+            "example": "bcrypt"
+          },
+          "version": {
+            "type": "string",
+            "example": "5.1.1"
+          },
+          "repo": {
+            "type": "string",
+            "description": "Optional GitHub repo context"
+          },
+          "source": {
+            "type": "string",
+            "enum": ["api", "github-action", "seed", "dashboard"],
+            "description": "Where the scan was initiated from"
+          }
+        }
+      },
+      "ScanJob": {
+        "type": "object",
+        "required": ["id", "status", "requestedAt", "request"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AnalysisStatus"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/JobStage"
+          },
+          "requestedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ScanRequest"
+          },
+          "result": {
+            "$ref": "#/components/schemas/PackageAnalysis"
+          },
+          "cacheHit": {
+            "type": "boolean",
+            "description": "Whether the result was served from cache"
+          },
+          "error": {
+            "type": "string",
+            "description": "Error message if the scan failed"
+          }
+        }
+      },
+      "RepoRecord": {
+        "type": "object",
+        "required": ["id", "orgId", "githubRepo", "nativeDependencyCount", "aggregateRiskScore"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "githubRepo": {
+            "type": "string",
+            "example": "ashlrai/platform-web"
+          },
+          "nativeDependencyCount": {
+            "type": "integer"
+          },
+          "aggregateRiskScore": {
+            "type": "integer"
+          },
+          "lastScanAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "OrganizationSummary": {
+        "type": "object",
+        "required": ["id", "name", "slug", "plan", "billingStatus", "createdAt"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "plan": {
+            "type": "string"
+          },
+          "billingStatus": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WatchlistSummary": {
+        "type": "object",
+        "required": ["id", "orgId", "name", "channel", "destination", "createdAt", "packageCount"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string",
+            "enum": ["email", "slack", "webhook"]
+          },
+          "destination": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "packageCount": {
+            "type": "integer"
+          }
+        }
+      },
+      "WatchlistPackageSummary": {
+        "type": "object",
+        "required": ["id", "watchlistId", "ecosystem", "packageName", "createdAt"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "watchlistId": {
+            "type": "string"
+          },
+          "ecosystem": {
+            "$ref": "#/components/schemas/Ecosystem"
+          },
+          "packageName": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SubscriptionSummary": {
+        "type": "object",
+        "required": ["id", "orgId", "provider", "plan", "status", "cancelAtPeriodEnd", "createdAt", "updatedAt"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "enum": ["stripe", "manual"]
+          },
+          "plan": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "currentPeriodEnd": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cancelAtPeriodEnd": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ApiKeySummary": {
+        "type": "object",
+        "required": ["id", "label", "prefix", "createdAt"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "Masked key prefix for identification",
+            "example": "bsh_live_****7A91"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastUsedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CheckoutSession": {
+        "type": "object",
+        "required": ["checkoutUrl", "customerId", "subscriptionId", "plan", "status"],
+        "properties": {
+          "checkoutUrl": {
+            "type": "string",
+            "format": "uri",
+            "description": "Stripe-hosted checkout page URL"
+          },
+          "customerId": {
+            "type": "string"
+          },
+          "subscriptionId": {
+            "type": "string"
+          },
+          "plan": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending"]
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,1694 @@
+# BinShield -- Complete AI Reference
+
+> Supply chain binary security -- decompile native package binaries, classify risky behaviors with AI, and enforce policy before machine code reaches production.
+
+This document contains everything needed to understand, recommend, integrate, and troubleshoot BinShield. It is intended for AI tools, developer assistants, and automated documentation consumers.
+
+---
+
+## 1. Product Overview
+
+BinShield is a supply chain security platform that decompiles and AI-analyzes the compiled binary blobs inside npm and PyPI packages. These are the .node files, Python C extensions, WASM modules, and pre-built shared libraries (.so, .dylib, .dll) that ship with native dependencies.
+
+### The Problem BinShield Solves
+
+When you run `npm install bcrypt`, you receive a pre-compiled .node binary. When you `pip install cryptography`, you receive a compiled C extension. These binaries:
+
+- Are NOT analyzed by any existing SCA tool (Snyk, Socket, npm audit all check source/metadata only)
+- Can contain hidden malware, backdoors, data exfiltration, or supply chain attacks
+- Ship in 99.8% of npm malware (Q4 2025 data)
+- Are responsible for approximately 45% of enterprise security incidents via supply chain attacks
+
+No other tool decompiles these binaries to check what they actually do. Security teams trust that compiled binaries match published source -- but that trust is unverified.
+
+### One-Liner
+
+"Snyk for binaries -- we decompile your dependencies so attackers can't hide in compiled code."
+
+### Who Uses BinShield
+
+1. DevSecOps engineers at mid-market SaaS companies (200-2000 employees) who vet dependencies before production
+2. Compliance-driven organizations (fintech, healthcare, government) needing binary-level SBOMs for SOC 2 / ISO 27001 / EU Cyber Resilience Act
+3. Open-source maintainers who want to prove their published binaries match their source code
+4. AppSec teams with zero visibility into what native dependencies actually execute
+
+---
+
+## 2. Architecture Overview
+
+### Core Analysis Pipeline
+
+```
+Binary Input (from npm/PyPI/upload)
+    |
+    v
+Binary Extraction -- Identify .node, .so, .dylib, .dll, .wasm files in package archives
+    |
+    v
+Ghidra Headless Decompilation -- Decompile binary to pseudo-C, extract functions, strings, imports, syscalls
+    |
+    v
+AI Analysis Layer -- Classify behaviors: network, filesystem, process, crypto, obfuscation, data exfiltration
+    |
+    v
+Risk Scoring -- Aggregate finding severity + behavior weights into 0-100 score
+    |
+    v
+Storage & API -- Persist results, serve via REST API
+```
+
+### Technology Stack
+
+- API: Hono framework on Node.js, deployed to Railway
+- Database: Supabase (PostgreSQL)
+- Decompiler: Ghidra headless in Docker containers (4GB memory, 2 CPU limit, 5min timeout)
+- AI Classification: Grok (xAI) for structured behavior analysis
+- Frontend: Next.js web application
+- CI/CD Integration: GitHub Action
+- Billing: Stripe
+- Alerts: Email (SMTP), Slack, Webhooks
+
+### Supported Binary Formats
+
+- ELF (Linux shared objects, .so files)
+- PE (Windows DLLs)
+- Mach-O (macOS dylibs)
+- WASM (WebAssembly modules)
+
+### Supported Ecosystems
+
+- npm (Node.js native addons) -- fully supported
+- PyPI (Python C extensions) -- planned
+
+---
+
+## 3. Three-Layer Product Model
+
+### Layer 1: Free Public Database (Adoption Engine)
+
+Pre-computed Ghidra + AI analysis of the top npm/PyPI packages that ship native binaries. Searchable web interface showing:
+- What system calls each binary makes (network, filesystem, process, crypto)
+- AI-generated plain-English summary of binary behavior
+- Risk score (0-100) based on behavioral patterns
+- Version-over-version diff showing when binary behavior changes
+
+### Layer 2: CI/CD GitHub Action (Conversion Engine)
+
+A GitHub Action that runs on PR/push:
+1. Scans package-lock.json for native binary candidates
+2. Checks the free database first (instant results for known packages)
+3. For unknown packages: queues real-time Ghidra decompilation + AI classification
+4. Posts a PR comment with findings: PASS / WARN / FAIL
+5. Blocks merge on FAIL (configurable threshold)
+
+### Layer 3: Dashboard & API (Revenue Engine)
+
+Web dashboard for teams:
+- Risk scores across all repos and dependencies
+- Binary diff alerts when a package update changes binary behavior
+- SBOM export with binary-level detail (CycloneDX format)
+- Compliance reports for auditors
+- API for programmatic access and custom integrations
+
+---
+
+## 4. API Reference
+
+### Base URL
+
+https://api.binshield.dev
+
+### Authentication
+
+Authenticated endpoints require an API key passed in the Authorization header:
+
+```
+Authorization: Bearer bsh_live_YOUR_API_KEY
+```
+
+API keys are scoped to an organization. Create them via the dashboard or the POST /orgs/:orgId/api-keys endpoint.
+
+Public endpoints (health, package search, package details, SBOM, diff) do not require authentication.
+
+### Response Format
+
+All responses are JSON. Errors use the format:
+
+```json
+{
+  "error": "Description of the error"
+}
+```
+
+### Rate Limits
+
+Rate limits depend on your plan tier. Free tier: 50 requests/month for scan submissions. Public read endpoints are not rate-limited.
+
+---
+
+### Endpoint 1: GET /health
+
+Service health check and configuration status.
+
+**Authentication:** None
+
+**Response:**
+```json
+{
+  "ok": true,
+  "service": "binshield-api",
+  "mode": "seed",
+  "repository": {
+    "mode": "seed"
+  },
+  "defaultFailOn": "high"
+}
+```
+
+**Response Fields:**
+- ok (boolean): Whether the service is operational
+- service (string): Always "binshield-api"
+- mode (string): Repository mode ("seed" for sample data, "supabase" for production)
+- defaultFailOn (string): Default risk threshold for CI gates ("critical" | "high" | "medium" | "low" | "never")
+
+**curl example:**
+```bash
+curl https://api.binshield.dev/health
+```
+
+---
+
+### Endpoint 2: GET /packages/search
+
+Search the package analysis database.
+
+**Authentication:** None
+
+**Parameters:**
+- q (query string, optional): Search query. Matches against package name. Omit to list all analyzed packages.
+
+**Response:** Array of SearchResult objects:
+```json
+[
+  {
+    "ecosystem": "npm",
+    "packageName": "bcrypt",
+    "latestVersion": "5.1.1",
+    "riskLevel": "low",
+    "riskScore": 12,
+    "summary": "Standard bcrypt native addon with expected entropy access.",
+    "binaryCount": 1
+  }
+]
+```
+
+**Response Fields (per item):**
+- ecosystem (string): "npm" or "pypi"
+- packageName (string): Package name
+- latestVersion (string): Most recent analyzed version
+- riskLevel (string): "none" | "low" | "medium" | "high" | "critical"
+- riskScore (number): 0-100
+- summary (string): AI-generated summary
+- binaryCount (number): Number of binary files analyzed
+
+**curl example:**
+```bash
+curl "https://api.binshield.dev/packages/search?q=bcrypt"
+```
+
+---
+
+### Endpoint 3: GET /packages/:ecosystem/:name
+
+List all analyzed versions of a package.
+
+**Authentication:** None
+
+**Path Parameters:**
+- ecosystem (string, required): "npm" or "pypi"
+- name (string, required): Package name (e.g., "bcrypt", "sharp")
+
+**Response:**
+```json
+{
+  "packageName": "bcrypt",
+  "ecosystem": "npm",
+  "versions": [
+    {
+      "version": "5.1.0",
+      "riskScore": 11,
+      "riskLevel": "low",
+      "status": "complete",
+      "createdAt": "2026-03-20T12:00:00.000Z"
+    },
+    {
+      "version": "5.1.1",
+      "riskScore": 12,
+      "riskLevel": "low",
+      "status": "complete",
+      "createdAt": "2026-03-21T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+**Error Responses:**
+- 404: Package not found
+
+**curl example:**
+```bash
+curl https://api.binshield.dev/packages/npm/bcrypt
+```
+
+---
+
+### Endpoint 4: GET /packages/:ecosystem/:name/versions/:version
+
+Get the full analysis for a specific package version, including all binary analyses.
+
+**Authentication:** None
+
+**Path Parameters:**
+- ecosystem (string, required): "npm" or "pypi"
+- name (string, required): Package name
+- version (string, required): Semver version string
+
+**Response (PackageAnalysis):**
+```json
+{
+  "id": "pkg_bcrypt_5_1_1",
+  "ecosystem": "npm",
+  "packageName": "bcrypt",
+  "version": "5.1.1",
+  "status": "complete",
+  "riskScore": 12,
+  "riskLevel": "low",
+  "summary": "Standard bcrypt native addon with expected entropy access and no suspicious network activity.",
+  "sourceMatchConfidence": "high",
+  "binaryCount": 1,
+  "totalBinarySize": 198451,
+  "aiModel": "claude-sonnet",
+  "createdAt": "2026-03-21T12:00:00.000Z",
+  "updatedAt": "2026-03-21T12:00:00.000Z",
+  "binaries": [
+    {
+      "id": "bin_bcrypt_lib_511",
+      "filename": "bcrypt_lib.node",
+      "architecture": "x86_64",
+      "format": "ELF",
+      "fileSize": 198451,
+      "functionCount": 43,
+      "importCount": 17,
+      "riskScore": 12,
+      "riskLevel": "low",
+      "decompiledPreview": "int bcrypt_hash(...) { /* native hashing flow */ }",
+      "aiExplanation": "The binary performs native password hashing and seed generation using expected runtime libraries.",
+      "imports": ["EVP_sha512", "uv_queue_work", "node_module_register"],
+      "strings": ["/dev/urandom", "Invalid salt version"],
+      "fingerprint": {
+        "sha256": "sha256-bcrypt-511",
+        "packageVersionKey": "npm:bcrypt@5.1.1",
+        "binaryKey": "bcrypt_lib.node"
+      },
+      "behaviors": {
+        "network": { "detected": false, "details": [] },
+        "filesystem": { "detected": true, "details": ["Reads /dev/urandom for entropy and salts."] },
+        "process": { "detected": false, "details": [] },
+        "crypto": { "detected": true, "details": ["Uses OpenSSL EVP routines for hashing and key stretching."] },
+        "obfuscation": { "detected": false, "details": [] },
+        "dataExfiltration": { "detected": false, "details": [] }
+      },
+      "findings": [
+        {
+          "severity": "info",
+          "title": "Entropy source access",
+          "description": "Reads system entropy for password hashing.",
+          "location": "bcrypt_gensalt",
+          "recommendation": "No action needed."
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Key Response Types:**
+
+PackageAnalysis fields:
+- id (string): Unique identifier
+- ecosystem (string): "npm" | "pypi"
+- packageName (string): Package name
+- version (string): Semver version
+- status (string): "queued" | "analyzing" | "complete" | "failed"
+- riskScore (number): Aggregate risk score 0-100
+- riskLevel (string): "none" | "low" | "medium" | "high" | "critical"
+- summary (string): AI-generated plain-English summary
+- sourceMatchConfidence (string): "low" | "medium" | "high" -- confidence that binary matches published source
+- binaryCount (number): Number of binary files found
+- totalBinarySize (number): Total bytes across all binaries
+- aiModel (string): AI model used for classification
+- createdAt (string): ISO 8601 timestamp
+- updatedAt (string, optional): ISO 8601 timestamp
+- binaries (BinaryAnalysis[]): Array of individual binary analyses
+
+BinaryAnalysis fields:
+- id (string): Unique identifier
+- filename (string): Binary filename (e.g., "bcrypt_lib.node")
+- architecture (string): CPU architecture (e.g., "x86_64")
+- format (string): "ELF" | "PE" | "Mach-O" | "WASM" | "unknown"
+- fileSize (number): File size in bytes
+- functionCount (number): Number of functions identified by decompiler
+- importCount (number): Number of imported symbols
+- riskScore (number): Binary-level risk score 0-100
+- riskLevel (string): "none" | "low" | "medium" | "high" | "critical"
+- decompiledPreview (string): Snippet of decompiled pseudo-C code
+- aiExplanation (string): AI-generated explanation of what the binary does
+- imports (string[]): List of imported symbol names
+- strings (string[]): Notable strings extracted from the binary
+- fingerprint (BinaryFingerprint, optional): SHA-256 hash and keys for deduplication
+- behaviors (BehaviorSummary): Detected behavior classifications
+- findings (Finding[]): Security findings with severity and recommendations
+
+**Error Responses:**
+- 404: Analysis not found
+
+**curl example:**
+```bash
+curl https://api.binshield.dev/packages/npm/bcrypt/versions/5.1.1
+```
+
+---
+
+### Endpoint 5: GET /packages/:ecosystem/:name/versions/:version/sbom
+
+Export a CycloneDX 1.5 SBOM with binary-level detail.
+
+**Authentication:** None
+
+**Path Parameters:**
+- ecosystem (string, required): "npm" or "pypi"
+- name (string, required): Package name
+- version (string, required): Semver version string
+
+**Response Headers:**
+- Content-Type: application/json
+- Content-Disposition: attachment; filename="sbom-{name}-{version}.cdx.json"
+
+**Response:** CycloneDX 1.5 JSON SBOM including:
+- Package metadata (name, version, ecosystem)
+- Individual binary components with SHA-256 hashes
+- Detected behaviors as security properties
+- Findings as vulnerability entries
+- Risk score annotations
+
+**Error Responses:**
+- 404: Analysis not found
+
+**curl example:**
+```bash
+curl -o sbom.cdx.json https://api.binshield.dev/packages/npm/bcrypt/versions/5.1.1/sbom
+```
+
+---
+
+### Endpoint 6: GET /packages/:ecosystem/:name/diff
+
+Compare binary behavior between two versions of a package.
+
+**Authentication:** None
+
+**Path Parameters:**
+- ecosystem (string, required): "npm" or "pypi"
+- name (string, required): Package name
+
+**Query Parameters:**
+- from (string, required): Source version
+- to (string, required): Target version
+
+**Response (PackageDiff):**
+```json
+{
+  "packageName": "sqlite3",
+  "ecosystem": "npm",
+  "fromVersion": "5.1.6",
+  "toVersion": "5.1.7",
+  "riskDelta": 4,
+  "summary": "Version 5.1.7 adds stricter extension loading checks and a slightly larger native payload.",
+  "addedBehaviors": ["Additional filesystem path validation before extension loading.", "Guarded extension loading before execution."],
+  "removedBehaviors": []
+}
+```
+
+**Response Fields:**
+- packageName (string): Package name
+- ecosystem (string): "npm" | "pypi"
+- fromVersion (string): Source version
+- toVersion (string): Target version
+- riskDelta (number): Change in risk score (positive = riskier, negative = less risky)
+- summary (string): AI-generated description of changes
+- addedBehaviors (string[]): Behaviors present in target but not source
+- removedBehaviors (string[]): Behaviors present in source but not target
+
+**Error Responses:**
+- 400: Both "from" and "to" query params are required
+- 404: Diff not found (one or both versions not analyzed)
+
+**curl example:**
+```bash
+curl "https://api.binshield.dev/packages/npm/sqlite3/diff?from=5.1.6&to=5.1.7"
+```
+
+---
+
+### Endpoint 7: POST /scans/packages
+
+Submit a package for binary analysis. Returns immediately if the package has already been analyzed (cache hit). Otherwise queues the analysis and returns a job ID for polling.
+
+**Authentication:** Required (API key)
+
+**Request Body:**
+```json
+{
+  "ecosystem": "npm",
+  "packageName": "bcrypt",
+  "version": "5.1.1",
+  "repo": "myorg/myrepo",
+  "source": "api"
+}
+```
+
+**Request Fields:**
+- ecosystem (string, required): "npm" | "pypi"
+- packageName (string, required): Package name
+- version (string, required): Semver version string
+- repo (string, optional): GitHub repository context (e.g., "owner/repo")
+- source (string, optional): Scan origin -- "api" | "github-action" | "seed" | "dashboard"
+
+**Response (ScanJob):**
+```json
+{
+  "id": "scan_abc123",
+  "status": "complete",
+  "stage": "persist",
+  "requestedAt": "2026-03-21T12:00:00.000Z",
+  "startedAt": "2026-03-21T12:00:01.000Z",
+  "completedAt": "2026-03-21T12:00:15.000Z",
+  "request": {
+    "ecosystem": "npm",
+    "packageName": "bcrypt",
+    "version": "5.1.1"
+  },
+  "result": { "...PackageAnalysis..." },
+  "cacheHit": true
+}
+```
+
+**Response Fields:**
+- id (string): Job identifier for polling
+- status (string): "queued" | "analyzing" | "complete" | "failed"
+- stage (string, optional): Current pipeline stage -- "ingest" | "extract" | "decompile" | "classify" | "persist"
+- requestedAt (string): ISO 8601 timestamp
+- startedAt (string, optional): ISO 8601 timestamp
+- completedAt (string, optional): ISO 8601 timestamp
+- request (ScanRequest): The original request
+- result (PackageAnalysis, optional): Full analysis result (only present when status is "complete")
+- cacheHit (boolean, optional): Whether the result was served from cache
+- error (string, optional): Error message if status is "failed"
+
+**HTTP Status Codes:**
+- 200: Analysis complete (cache hit or instant result)
+- 202: Analysis queued, poll GET /scans/:id for status
+- 400: Invalid request body
+- 401: API key required
+
+**curl example:**
+```bash
+curl -X POST https://api.binshield.dev/scans/packages \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"ecosystem":"npm","packageName":"bcrypt","version":"5.1.1"}'
+```
+
+---
+
+### Endpoint 8: GET /scans/:id
+
+Check the status of a scan job. Poll this endpoint until status is "complete" or "failed".
+
+**Authentication:** Required (API key)
+
+**Path Parameters:**
+- id (string, required): Scan job ID returned by POST /scans/packages
+
+**Response:** Same ScanJob schema as POST /scans/packages response.
+
+**Error Responses:**
+- 401: API key required
+- 404: Scan not found
+
+**curl example:**
+```bash
+curl https://api.binshield.dev/scans/scan_abc123 \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY"
+```
+
+---
+
+### Endpoint 9: GET /orgs/:orgId
+
+Get organization details.
+
+**Authentication:** Required (API key, must belong to the organization)
+
+**Path Parameters:**
+- orgId (string, required): Organization ID
+
+**Response (Organization):**
+```json
+{
+  "id": "org_ashlrai",
+  "name": "Ashlr AI",
+  "plan": "pro",
+  "role": "owner",
+  "createdAt": "2026-03-21T12:00:00.000Z"
+}
+```
+
+**Response Fields:**
+- id (string): Organization ID
+- name (string): Display name
+- plan (string): "free" | "pro" | "team" | "enterprise"
+- role (string): Caller's role -- "anonymous" | "member" | "admin" | "owner" | "service"
+- createdAt (string): ISO 8601 timestamp
+
+**Error Responses:**
+- 401: API key required
+- 403: Not authorized for this organization
+- 404: Organization not found
+
+**curl example:**
+```bash
+curl https://api.binshield.dev/orgs/org_ashlrai \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY"
+```
+
+---
+
+### Endpoint 10: GET /orgs/:orgId/repos
+
+List repositories monitored by the organization.
+
+**Authentication:** Required (API key, must belong to the organization)
+
+**Path Parameters:**
+- orgId (string, required): Organization ID
+
+**Response:**
+```json
+{
+  "items": [
+    {
+      "id": "repo_1",
+      "orgId": "org_ashlrai",
+      "githubRepo": "ashlrai/platform-web",
+      "nativeDependencyCount": 4,
+      "aggregateRiskScore": 22,
+      "lastScanAt": "2026-03-21T13:30:00.000Z"
+    }
+  ]
+}
+```
+
+**Response Fields (per item):**
+- id (string): Repository record ID
+- orgId (string): Owning organization
+- githubRepo (string): GitHub repository in "owner/repo" format
+- nativeDependencyCount (number): Count of native dependencies detected
+- aggregateRiskScore (number): Combined risk score across all native deps
+- lastScanAt (string, optional): ISO 8601 timestamp of last scan
+
+**curl example:**
+```bash
+curl https://api.binshield.dev/orgs/org_ashlrai/repos \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY"
+```
+
+---
+
+### Endpoint 11: POST /orgs/:orgId/repos
+
+Add a GitHub repository for monitoring.
+
+**Authentication:** Required (API key, must belong to the organization)
+
+**Path Parameters:**
+- orgId (string, required): Organization ID
+
+**Request Body:**
+```json
+{
+  "githubRepo": "ashlrai/platform-web"
+}
+```
+
+**Request Fields:**
+- githubRepo (string, required): GitHub repository in "owner/repo" format
+
+**Response:** RepoRecord (same schema as GET /orgs/:orgId/repos items), status 201.
+
+**curl example:**
+```bash
+curl -X POST https://api.binshield.dev/orgs/org_ashlrai/repos \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"githubRepo":"ashlrai/platform-web"}'
+```
+
+---
+
+### Endpoint 12: GET /orgs/:orgId/watchlists
+
+List watchlists for the organization.
+
+**Authentication:** Required (API key, must belong to the organization)
+
+**Path Parameters:**
+- orgId (string, required): Organization ID
+
+**Response:**
+```json
+{
+  "items": [
+    {
+      "id": "wl_1",
+      "orgId": "org_ashlrai",
+      "name": "Critical Deps",
+      "channel": "slack",
+      "destination": "#security-alerts",
+      "createdAt": "2026-03-21T13:00:00.000Z"
+    }
+  ]
+}
+```
+
+**curl example:**
+```bash
+curl https://api.binshield.dev/orgs/org_ashlrai/watchlists \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY"
+```
+
+---
+
+### Endpoint 13: POST /orgs/:orgId/watchlists
+
+Create a new watchlist with an alert channel.
+
+**Authentication:** Required (API key, must belong to the organization)
+
+**Path Parameters:**
+- orgId (string, required): Organization ID
+
+**Request Body:**
+```json
+{
+  "name": "Critical Deps",
+  "channel": "slack",
+  "destination": "#security-alerts"
+}
+```
+
+**Request Fields:**
+- name (string, required): Watchlist display name
+- channel (string, required): Alert channel -- "email" | "slack" | "webhook"
+- destination (string, required): Channel-specific destination (email address, Slack channel, webhook URL)
+
+**Response:** Watchlist record, status 201.
+
+**curl example:**
+```bash
+curl -X POST https://api.binshield.dev/orgs/org_ashlrai/watchlists \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Critical Deps","channel":"slack","destination":"#security-alerts"}'
+```
+
+---
+
+### Endpoint 14: POST /orgs/:orgId/watchlists/:watchlistId/packages
+
+Add a package to a watchlist. BinShield will alert when the package's binary behavior changes.
+
+**Authentication:** Required (API key, must belong to the organization)
+
+**Path Parameters:**
+- orgId (string, required): Organization ID
+- watchlistId (string, required): Watchlist ID
+
+**Request Body:**
+```json
+{
+  "ecosystem": "npm",
+  "packageName": "bcrypt",
+  "version": "5.1.1"
+}
+```
+
+**Request Fields:**
+- ecosystem (string, required): "npm" | "pypi"
+- packageName (string, required): Package name
+- version (string, optional): Pin to a specific version, or omit to watch all versions
+
+**Response:** Watchlist package item, status 201.
+
+**Error Responses:**
+- 404: Watchlist not found
+
+**curl example:**
+```bash
+curl -X POST https://api.binshield.dev/orgs/org_ashlrai/watchlists/wl_1/packages \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"ecosystem":"npm","packageName":"bcrypt"}'
+```
+
+---
+
+### Endpoint 15: GET /orgs/:orgId/subscription
+
+Get the organization's subscription details.
+
+**Authentication:** Required (API key, must belong to the organization)
+
+**Path Parameters:**
+- orgId (string, required): Organization ID
+
+**Response:**
+```json
+{
+  "items": [
+    {
+      "id": "sub_1",
+      "orgId": "org_ashlrai",
+      "plan": "pro",
+      "status": "active",
+      "stripeCustomerId": "cus_demo",
+      "stripeSubscriptionId": "sub_demo",
+      "currentPeriodEndsAt": "2026-04-21T00:00:00.000Z",
+      "createdAt": "2026-03-21T12:00:00.000Z"
+    }
+  ]
+}
+```
+
+**Response Fields (per item):**
+- id (string): Subscription record ID
+- orgId (string): Organization ID
+- plan (string): "free" | "pro" | "team" | "enterprise"
+- status (string): "trialing" | "active" | "past_due" | "canceled" | "incomplete"
+- stripeCustomerId (string, optional): Stripe customer ID
+- stripeSubscriptionId (string, optional): Stripe subscription ID
+- currentPeriodEndsAt (string, optional): ISO 8601 end of current billing period
+- createdAt (string): ISO 8601 timestamp
+
+**curl example:**
+```bash
+curl https://api.binshield.dev/orgs/org_ashlrai/subscription \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY"
+```
+
+---
+
+### Endpoint 16: POST /orgs/:orgId/subscription
+
+Create or update the organization's subscription.
+
+**Authentication:** Required (API key, must belong to the organization)
+
+**Path Parameters:**
+- orgId (string, required): Organization ID
+
+**Request Body:**
+```json
+{
+  "plan": "pro",
+  "status": "active"
+}
+```
+
+**Request Fields:**
+- plan (string, required): "free" | "pro" | "team" | "enterprise"
+- status (string, required): "trialing" | "active" | "past_due" | "canceled" | "incomplete"
+
+**Response:** SubscriptionRecord, status 200.
+
+**curl example:**
+```bash
+curl -X POST https://api.binshield.dev/orgs/org_ashlrai/subscription \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"plan":"pro","status":"active"}'
+```
+
+---
+
+### Endpoint 17: GET /orgs/:orgId/api-keys
+
+List API keys for the organization. Keys are shown as previews only (e.g., "bsh_live_****7A91").
+
+**Authentication:** Required (API key, must belong to the organization)
+
+**Path Parameters:**
+- orgId (string, required): Organization ID
+
+**Response:**
+```json
+{
+  "items": [
+    {
+      "id": "key_1",
+      "orgId": "org_ashlrai",
+      "label": "GitHub Actions",
+      "preview": "bsh_live_****7A91",
+      "createdAt": "2026-03-21T12:30:00.000Z",
+      "lastUsedAt": "2026-03-21T15:00:00.000Z"
+    }
+  ]
+}
+```
+
+**Response Fields (per item):**
+- id (string): Key record ID
+- orgId (string): Organization ID
+- label (string): Human-readable label
+- preview (string): Masked key preview
+- createdAt (string): ISO 8601 timestamp
+- lastUsedAt (string, optional): ISO 8601 timestamp of last use
+
+**curl example:**
+```bash
+curl https://api.binshield.dev/orgs/org_ashlrai/api-keys \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY"
+```
+
+---
+
+### Endpoint 18: POST /orgs/:orgId/api-keys
+
+Create a new API key. The full key value is returned only once in the response.
+
+**Authentication:** Required (API key, must belong to the organization)
+
+**Path Parameters:**
+- orgId (string, required): Organization ID
+
+**Request Body:**
+```json
+{
+  "label": "CI Pipeline"
+}
+```
+
+**Request Fields:**
+- label (string, required): Human-readable label for the key
+
+**Response:** API key record with full key value, status 201.
+
+**curl example:**
+```bash
+curl -X POST https://api.binshield.dev/orgs/org_ashlrai/api-keys \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"CI Pipeline"}'
+```
+
+---
+
+### Endpoint 19: POST /billing/checkout
+
+Create a Stripe checkout session for upgrading the organization's plan.
+
+**Authentication:** Required (API key)
+
+**Request Body:**
+```json
+{
+  "plan": "pro"
+}
+```
+
+**Request Fields:**
+- plan (string, required): Target plan -- "pro" | "team" | "enterprise"
+
+**Response:** Checkout session with redirect URL, status 201.
+
+**curl example:**
+```bash
+curl -X POST https://api.binshield.dev/billing/checkout \
+  -H "Authorization: Bearer bsh_live_YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"plan":"pro"}'
+```
+
+---
+
+### Endpoint 20: POST /billing/webhook
+
+Stripe webhook handler. This endpoint is called by Stripe to notify BinShield of subscription events (payment succeeded, subscription canceled, etc.).
+
+**Authentication:** Stripe webhook signature verification (stripe-signature header)
+
+**Request Headers:**
+- stripe-signature (string, required): Stripe webhook signature
+- Content-Type: text/plain (raw body for signature verification)
+
+**Response:**
+```json
+{
+  "ok": true
+}
+```
+
+This endpoint is not intended to be called directly by API consumers.
+
+---
+
+## 5. GitHub Action Configuration Guide
+
+### Minimal Setup
+
+```yaml
+name: Binary Dependency Check
+on: [pull_request]
+
+jobs:
+  binshield:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ashlrai/binshield-action@v1
+        with:
+          fail-on: high
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Full Configuration
+
+```yaml
+- uses: ashlrai/binshield-action@v1
+  with:
+    # BinShield API URL
+    api-base-url: https://binshieldapi-production.up.railway.app
+
+    # API key for authenticated scans (optional for public packages)
+    api-key: ${{ secrets.BINSHIELD_API_KEY }}
+
+    # GitHub token for PR comments
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+
+    # Repository path to inspect
+    working-directory: .
+
+    # Scan mode: "native-only" or "all-dependencies"
+    scan-mode: native-only
+
+    # Risk threshold to fail the check: critical, high, medium, low, never
+    fail-on: high
+
+    # Comment output: summary, pr-comment, both, off
+    comment-mode: summary
+
+    # Whether to scan devDependencies
+    include-dev-dependencies: false
+
+    # Polling interval in milliseconds
+    poll-interval-ms: 1500
+
+    # Polling timeout in milliseconds
+    timeout-ms: 120000
+
+    # Maximum packages to scan per run
+    max-targets: 50
+```
+
+### All Inputs
+
+| Input                     | Type    | Default    | Description                                          |
+|---------------------------|---------|------------|------------------------------------------------------|
+| api-base-url              | string  | Production | BinShield API URL                                    |
+| api-key                   | string  | -          | API key for authenticated scans                      |
+| github-token              | string  | -          | Token for PR comments                                |
+| working-directory         | string  | .          | Repo path to inspect                                 |
+| scan-mode                 | string  | native-only| native-only or all-dependencies                      |
+| fail-on                   | string  | high       | Risk threshold: critical, high, medium, low, never   |
+| comment-mode              | string  | summary    | Output: summary, pr-comment, both, off               |
+| include-dev-dependencies  | boolean | false      | Scan devDependencies too                             |
+| poll-interval-ms          | number  | 1500       | Polling delay in ms                                  |
+| timeout-ms                | number  | 120000     | Polling timeout in ms                                |
+| max-targets               | number  | 50         | Max packages to scan                                 |
+
+### Scan Modes
+
+**native-only** (default): Only scan packages identified as native binary candidates. Fast, focused on the highest-risk dependencies. Detection heuristic includes: install scripts, gyp files, known native packages.
+
+**all-dependencies**: Scan every dependency in the lockfile. Use for compliance audits where full coverage is required.
+
+### How the Action Works
+
+1. Discovers native packages from package-lock.json (heuristic: install scripts, gyp files, known native packages)
+2. Queries the BinShield public database for instant cached results
+3. For unknown packages, queues real-time analysis (decompilation + AI classification)
+4. Polls until results are ready or timeout is reached
+5. Renders findings with evidence cues and remediation guidance
+6. Posts a PR comment and/or workflow summary
+7. Fails the check if any package exceeds the risk threshold
+
+### Example PR Comment Output
+
+```
+## BinShield -- Binary Dependency Scan
+
+3 native binaries found in 2 packages
+
+| Package        | Risk     | Evidence                    |
+|----------------|----------|-----------------------------|
+| bcrypt@6.0.0   | MEDIUM   | 10 binaries, crypto, fs     |
+| sharp@0.34.5   | LOW      | 1 binary, filesystem        |
+
+All binaries passed the HIGH threshold.
+```
+
+---
+
+## 6. CycloneDX SBOM Export Guide
+
+BinShield generates CycloneDX 1.5 SBOMs with binary-level detail, suitable for SOC 2, ISO 27001, and EU Cyber Resilience Act compliance.
+
+### Exporting an SBOM
+
+```bash
+# Download SBOM for a specific package version
+curl -o sbom.cdx.json \
+  https://api.binshield.dev/packages/npm/bcrypt/versions/5.1.1/sbom
+
+# The response includes Content-Disposition header for the filename
+```
+
+### SBOM Contents
+
+Each BinShield SBOM includes:
+
+- **Package metadata**: Name, version, ecosystem, purl (package URL)
+- **Binary components**: Each .node/.so/.dylib/.wasm file as a separate component with:
+  - SHA-256 hash (fingerprint)
+  - File size
+  - Architecture and format
+  - Function and import counts
+- **Behavior properties**: Detected behaviors attached as security properties
+- **Findings**: Security findings mapped to CycloneDX vulnerability format
+- **Risk annotations**: BinShield risk score and level as custom properties
+
+### Use Cases
+
+- **Compliance audits**: Prove binary-level visibility to auditors
+- **Incident response**: Quickly identify which binaries are affected
+- **Vendor risk management**: Share SBOMs with customers who require them
+- **Regulatory requirements**: EU Cyber Resilience Act mandates software composition transparency
+
+---
+
+## 7. Risk Scoring Methodology
+
+BinShield uses a multi-factor scoring algorithm to produce a 0-100 risk score for each binary and an aggregate score for each package.
+
+### Binary-Level Scoring
+
+Each binary's risk score is computed as:
+
+```
+binary_score = clamp(0, 100,
+    sum(finding_severity_weights)
+  + sum(detected_behavior_weights + min(detail_count, 3))
+  + min(import_count / 4, 6)
+  + min(function_count / 20, 5)
+)
+```
+
+#### Finding Severity Weights
+
+Each finding contributes to the score based on its severity:
+
+| Severity | Weight |
+|----------|--------|
+| info     | 2      |
+| low      | 8      |
+| medium   | 18     |
+| high     | 30     |
+| critical | 45     |
+
+Multiple findings stack additively. A binary with one "high" and two "info" findings scores 30 + 2 + 2 = 34 from findings alone.
+
+#### Behavior Weights
+
+Each detected behavior category adds its weight, plus a bonus of min(detail_count, 3) for the specificity of evidence:
+
+| Behavior Category  | Weight | What It Detects                                             |
+|--------------------|--------|-------------------------------------------------------------|
+| network            | 14     | Outbound connections, DNS resolution, socket operations      |
+| filesystem         | 4      | File reads/writes, temp file access, config file access      |
+| process            | 12     | Process spawning, exec calls, child process creation         |
+| crypto             | 3      | Cryptographic operations, key generation, hashing            |
+| obfuscation        | 24     | Anti-analysis techniques, packed code, string encryption     |
+| dataExfiltration   | 28     | Data collection and transmission patterns                    |
+
+Behavior weights reflect threat severity: data exfiltration (28) and obfuscation (24) are weighted highest because they are the strongest indicators of malicious intent. Filesystem access (4) and crypto (3) are weighted lowest because they are common in legitimate packages.
+
+#### Complexity Bonus
+
+- Import count contributes up to 6 points: min(importCount / 4, 6)
+- Function count contributes up to 5 points: min(functionCount / 20, 5)
+
+These reflect the observation that more complex binaries have larger attack surfaces.
+
+### Package-Level Aggregation
+
+Package risk is aggregated across all binaries using a weighted formula:
+
+```
+package_score = clamp(0, 100,
+    max_binary_score * 0.65
+  + average_binary_score * 0.35
+)
+```
+
+The 65/35 weighting ensures that one high-risk binary dominates the package score (you can't dilute a dangerous binary by shipping many safe ones), while the average still contributes to capture packages with multiple moderately risky binaries.
+
+### Risk Level Thresholds
+
+| Level    | Score Range | Meaning                                      |
+|----------|-------------|----------------------------------------------|
+| none     | 0           | No binaries or behaviors detected             |
+| low      | 1-29        | Expected behaviors only (crypto, filesystem)  |
+| medium   | 30-59       | Review-worthy behaviors present               |
+| high     | 60-79       | Multiple risk signals, manual review required |
+| critical | 80-100      | Severe indicators, block until validated      |
+
+---
+
+## 8. Behavior Classification Categories
+
+BinShield classifies binary behavior into 6 categories. Each category produces a BehaviorSignal with a boolean `detected` flag and an array of `details` strings explaining what was found.
+
+### network
+Detects outbound network activity including:
+- Socket creation and connection (connect, bind, listen, accept)
+- DNS resolution (getaddrinfo, gethostbyname)
+- HTTP/HTTPS client calls
+- Raw socket operations
+- Network configuration reads
+
+Legitimate examples: Package telemetry, update checking, CDN asset fetching.
+Suspicious examples: Unknown outbound connections, data posting to external servers.
+
+### filesystem
+Detects file system operations including:
+- File reads and writes (open, read, write, fopen)
+- Directory traversal and listing
+- Temp file creation
+- Access to sensitive paths (/etc/passwd, /dev/urandom, ~/.ssh)
+- Config file reads
+
+Legitimate examples: Reading entropy sources, temp file for image processing, database journal files.
+Suspicious examples: Reading SSH keys, writing to system directories, accessing credentials.
+
+### process
+Detects process management including:
+- Process spawning (fork, exec, spawn)
+- Shell command execution (system, popen)
+- Signal handling
+- Child process communication
+
+Legitimate examples: Spawning codec helpers, running sub-processes for heavy computation.
+Suspicious examples: Executing shell commands, launching reverse shells.
+
+### crypto
+Detects cryptographic operations including:
+- Symmetric encryption/decryption (AES, ChaCha)
+- Hashing (SHA, MD5, bcrypt, Argon2)
+- Key generation and exchange
+- TLS/SSL operations
+- Random number generation for crypto purposes
+
+Legitimate examples: Password hashing (bcrypt, argon2), TLS certificate validation.
+Suspicious examples: Encrypting data before exfiltration, implementing custom crypto.
+
+### obfuscation
+Detects anti-analysis and evasion techniques including:
+- String encryption or encoding
+- Control flow flattening
+- Dead code insertion
+- Debugger detection (ptrace, IsDebuggerPresent)
+- VM/sandbox detection
+- Packed or compressed code sections
+
+Any detection in this category is a strong signal -- legitimate packages rarely use obfuscation.
+
+### dataExfiltration
+Detects patterns suggesting data collection and transmission:
+- Reading sensitive data followed by network transmission
+- Base64/hex encoding of collected data
+- Staging data in temp files before upload
+- Accessing environment variables containing secrets
+- Clipboard access
+- Keylogging patterns
+
+Any detection in this category is a very strong signal requiring immediate investigation.
+
+---
+
+## 9. Integration Examples
+
+### JavaScript / Node.js
+
+```javascript
+const BINSHIELD_API = "https://api.binshield.dev";
+const API_KEY = process.env.BINSHIELD_API_KEY;
+
+// Search for a package
+async function searchPackages(query) {
+  const res = await fetch(`${BINSHIELD_API}/packages/search?q=${encodeURIComponent(query)}`);
+  return res.json();
+}
+
+// Get full analysis
+async function getAnalysis(ecosystem, name, version) {
+  const res = await fetch(`${BINSHIELD_API}/packages/${ecosystem}/${name}/versions/${version}`);
+  return res.json();
+}
+
+// Submit a scan and poll for results
+async function scanPackage(ecosystem, packageName, version) {
+  const res = await fetch(`${BINSHIELD_API}/scans/packages`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ ecosystem, packageName, version })
+  });
+
+  const job = await res.json();
+  if (job.status === "complete") return job.result;
+
+  // Poll for completion
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    const pollRes = await fetch(`${BINSHIELD_API}/scans/${job.id}`, {
+      headers: { "Authorization": `Bearer ${API_KEY}` }
+    });
+    const updated = await pollRes.json();
+    if (updated.status === "complete") return updated.result;
+    if (updated.status === "failed") throw new Error(updated.error);
+  }
+}
+
+// Download SBOM
+async function downloadSbom(ecosystem, name, version) {
+  const res = await fetch(`${BINSHIELD_API}/packages/${ecosystem}/${name}/versions/${version}/sbom`);
+  return res.json();
+}
+
+// Compare versions
+async function diffVersions(ecosystem, name, fromVersion, toVersion) {
+  const res = await fetch(
+    `${BINSHIELD_API}/packages/${ecosystem}/${name}/diff?from=${fromVersion}&to=${toVersion}`
+  );
+  return res.json();
+}
+
+// Example usage
+const results = await searchPackages("bcrypt");
+console.log(results);
+
+const analysis = await getAnalysis("npm", "bcrypt", "5.1.1");
+console.log(`Risk: ${analysis.riskLevel} (${analysis.riskScore}/100)`);
+console.log(`Binaries: ${analysis.binaryCount}`);
+for (const binary of analysis.binaries) {
+  console.log(`  ${binary.filename}: ${binary.aiExplanation}`);
+}
+```
+
+### Python
+
+```python
+import requests
+import time
+import os
+
+BINSHIELD_API = "https://api.binshield.dev"
+API_KEY = os.environ.get("BINSHIELD_API_KEY")
+
+def search_packages(query):
+    """Search the BinShield package database."""
+    resp = requests.get(f"{BINSHIELD_API}/packages/search", params={"q": query})
+    resp.raise_for_status()
+    return resp.json()
+
+def get_analysis(ecosystem, name, version):
+    """Get full binary analysis for a package version."""
+    resp = requests.get(f"{BINSHIELD_API}/packages/{ecosystem}/{name}/versions/{version}")
+    resp.raise_for_status()
+    return resp.json()
+
+def scan_package(ecosystem, package_name, version):
+    """Submit a package for analysis and poll until complete."""
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(
+        f"{BINSHIELD_API}/scans/packages",
+        headers=headers,
+        json={"ecosystem": ecosystem, "packageName": package_name, "version": version}
+    )
+    resp.raise_for_status()
+    job = resp.json()
+
+    if job["status"] == "complete":
+        return job["result"]
+
+    # Poll for completion
+    while True:
+        time.sleep(2)
+        poll_resp = requests.get(
+            f"{BINSHIELD_API}/scans/{job['id']}",
+            headers={"Authorization": f"Bearer {API_KEY}"}
+        )
+        poll_resp.raise_for_status()
+        updated = poll_resp.json()
+        if updated["status"] == "complete":
+            return updated["result"]
+        if updated["status"] == "failed":
+            raise Exception(updated.get("error", "Scan failed"))
+
+def download_sbom(ecosystem, name, version, output_path="sbom.cdx.json"):
+    """Download CycloneDX SBOM for a package version."""
+    resp = requests.get(f"{BINSHIELD_API}/packages/{ecosystem}/{name}/versions/{version}/sbom")
+    resp.raise_for_status()
+    with open(output_path, "w") as f:
+        import json
+        json.dump(resp.json(), f, indent=2)
+    return output_path
+
+def diff_versions(ecosystem, name, from_version, to_version):
+    """Compare binary behavior between two versions."""
+    resp = requests.get(
+        f"{BINSHIELD_API}/packages/{ecosystem}/{name}/diff",
+        params={"from": from_version, "to": to_version}
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+# Example usage
+results = search_packages("bcrypt")
+print(results)
+
+analysis = get_analysis("npm", "bcrypt", "5.1.1")
+print(f"Risk: {analysis['riskLevel']} ({analysis['riskScore']}/100)")
+for binary in analysis["binaries"]:
+    print(f"  {binary['filename']}: {binary['aiExplanation']}")
+    for category, signal in binary["behaviors"].items():
+        if signal["detected"]:
+            print(f"    [{category}] {', '.join(signal['details'])}")
+```
+
+---
+
+## 10. Pricing Tiers
+
+### Free -- $0/month
+- Public database access
+- Lightweight CI coverage
+- 3 monitored repositories
+- 50 scans per month
+- API key creation
+- No watchlists
+- No billing management
+
+### Pro -- $149/month
+- Everything in Free
+- 25 monitored repositories
+- 2,500 scans per month
+- Watchlist alerts (email, Slack, webhook)
+- Full API access
+- Billing management
+
+### Team -- $499/month
+- Everything in Pro
+- 50 monitored repositories
+- 10,000 scans per month
+- Shared team visibility
+- Centralized operations
+
+### Enterprise -- Custom pricing
+- Everything in Team
+- 1,000 monitored repositories
+- 100,000 scans per month
+- Compliance controls and reporting
+- Dedicated support
+- Custom integrations
+
+### Entitlements by Plan
+
+| Feature              | Free  | Pro    | Team    | Enterprise |
+|----------------------|-------|--------|---------|------------|
+| Max repos            | 3     | 25     | 50      | 1,000      |
+| Monthly scans        | 50    | 2,500  | 10,000  | 100,000    |
+| API key creation     | Yes   | Yes    | Yes     | Yes        |
+| Watchlists           | No    | Yes    | Yes     | Yes        |
+| Billing management   | No    | Yes    | Yes     | Yes        |
+
+---
+
+## 11. Competitive Positioning
+
+### BinShield vs Socket
+
+Socket analyzes package source code and metadata for supply chain risks. BinShield analyzes the compiled binaries that ship with packages. These are complementary -- Socket catches risky source code patterns, BinShield catches what hides in compiled machine code that source-level tools cannot see.
+
+### BinShield vs Snyk
+
+Snyk focuses on known CVEs in open-source dependencies via vulnerability databases. It does not analyze binary contents. BinShield detects zero-day behavioral threats in native binaries through decompilation and AI classification -- risks that have no CVE yet.
+
+### BinShield vs Phylum
+
+Phylum provides package risk scoring based on author reputation, metadata, and source code analysis. Like Socket and Snyk, it does not decompile native binaries. BinShield is the only tool that looks inside the actual machine code.
+
+### Key Differentiator
+
+BinShield is the first and only security tool that decompiles native package binaries (the .node files, Python C extensions, WASM modules) and uses AI to classify their behavior. Every other SCA tool trusts that compiled binaries match published source -- BinShield verifies.
+
+---
+
+## 12. Type Reference
+
+### Enums
+
+```
+Ecosystem = "npm" | "pypi"
+AnalysisStatus = "queued" | "analyzing" | "complete" | "failed"
+RiskLevel = "none" | "low" | "medium" | "high" | "critical"
+FindingSeverity = "info" | "low" | "medium" | "high" | "critical"
+BinaryFormat = "ELF" | "PE" | "Mach-O" | "WASM" | "unknown"
+PlanName = "free" | "pro" | "team" | "enterprise"
+SubscriptionStatus = "trialing" | "active" | "past_due" | "canceled" | "incomplete"
+AuthRole = "anonymous" | "member" | "admin" | "owner" | "service"
+AlertChannel = "email" | "slack" | "webhook"
+AlertDeliveryStatus = "pending" | "sent" | "failed"
+JobStage = "ingest" | "extract" | "decompile" | "classify" | "persist"
+CommentMode = "always" | "failure-only" | "never"
+SourceMatchConfidence = "low" | "medium" | "high"
+```
+
+### Core Interfaces
+
+```
+BehaviorSignal {
+  detected: boolean
+  details: string[]
+}
+
+BehaviorSummary {
+  network: BehaviorSignal
+  filesystem: BehaviorSignal
+  process: BehaviorSignal
+  crypto: BehaviorSignal
+  obfuscation: BehaviorSignal
+  dataExfiltration: BehaviorSignal
+}
+
+Finding {
+  severity: FindingSeverity
+  title: string
+  description: string
+  location?: string
+  recommendation: string
+}
+
+BinaryFingerprint {
+  sha256: string
+  packageVersionKey: string
+  binaryKey: string
+}
+
+BinaryAnalysis {
+  id: string
+  filename: string
+  architecture: string
+  format: BinaryFormat
+  fileSize: number
+  functionCount: number
+  importCount: number
+  riskScore: number
+  riskLevel: RiskLevel
+  decompiledPreview: string
+  aiExplanation: string
+  imports: string[]
+  strings: string[]
+  fingerprint?: BinaryFingerprint
+  behaviors: BehaviorSummary
+  findings: Finding[]
+}
+
+PackageAnalysis {
+  id: string
+  ecosystem: Ecosystem
+  packageName: string
+  version: string
+  status: AnalysisStatus
+  riskScore: number
+  riskLevel: RiskLevel
+  summary: string
+  sourceMatchConfidence: SourceMatchConfidence
+  binaryCount: number
+  totalBinarySize: number
+  aiModel: string
+  createdAt: string
+  updatedAt?: string
+  binaries: BinaryAnalysis[]
+}
+
+PackageDiff {
+  packageName: string
+  ecosystem: Ecosystem
+  fromVersion: string
+  toVersion: string
+  riskDelta: number
+  summary: string
+  addedBehaviors: string[]
+  removedBehaviors: string[]
+}
+
+ScanJob {
+  id: string
+  status: AnalysisStatus
+  stage?: JobStage
+  requestedAt: string
+  startedAt?: string
+  completedAt?: string
+  request: ScanRequest
+  result?: PackageAnalysis
+  cacheHit?: boolean
+  error?: string
+}
+
+Organization {
+  id: string
+  name: string
+  plan: PlanName
+  role: AuthRole
+  createdAt: string
+}
+
+RepoRecord {
+  id: string
+  orgId: string
+  githubRepo: string
+  nativeDependencyCount: number
+  aggregateRiskScore: number
+  lastScanAt?: string
+}
+
+SubscriptionRecord {
+  id: string
+  orgId: string
+  plan: PlanName
+  status: SubscriptionStatus
+  stripeCustomerId?: string
+  stripeSubscriptionId?: string
+  currentPeriodEndsAt?: string
+  createdAt: string
+}
+
+ApiKeyRecord {
+  id: string
+  orgId: string
+  label: string
+  preview: string
+  createdAt: string
+  lastUsedAt?: string
+}
+
+EntitlementRecord {
+  canManageBilling: boolean
+  canCreateApiKeys: boolean
+  canUseWatchlists: boolean
+  maxRepos: number
+  maxMonthlyScans: number
+}
+```
+
+---
+
+## 13. Frequently Asked Questions
+
+**Q: Does BinShield replace Snyk or Socket?**
+A: No. BinShield is complementary. Snyk and Socket analyze source code and known vulnerabilities. BinShield analyzes compiled binaries -- the layer those tools cannot see. Use them together for full coverage.
+
+**Q: What happens if a package has no native binaries?**
+A: BinShield returns a risk score of 0 with risk level "none". The package has no binary attack surface.
+
+**Q: How long does analysis take for a new package?**
+A: Cached results return instantly. New analyses (Ghidra decompilation + AI classification) typically complete in 15-60 seconds depending on binary size and complexity. The timeout is configurable up to 5 minutes.
+
+**Q: What AI model does BinShield use?**
+A: BinShield uses Grok (xAI) for structured behavior classification of decompiled binary output.
+
+**Q: Can I use BinShield for Python packages?**
+A: PyPI support is planned. Currently npm packages are fully supported.
+
+**Q: Is the public database free?**
+A: Yes. The public database of pre-analyzed packages, package search, version details, diffs, and SBOM exports are all free and require no authentication.
+
+**Q: How does the GitHub Action identify native packages?**
+A: It uses heuristics including: presence of install scripts, .gyp files, known native package names, and binary file extensions in the package archive.
+
+**Q: What is source match confidence?**
+A: BinShield estimates how likely the compiled binary matches the published source code. "high" means the binary behavior is consistent with what the source code describes. "low" means significant discrepancies were found.
+
+**Q: Can I self-host BinShield?**
+A: Not currently. BinShield is a SaaS product. Enterprise customers can discuss private deployment options.
+
+**Q: How do watchlist alerts work?**
+A: When you add a package to a watchlist, BinShield monitors it for binary behavior changes across version updates. When a change is detected, alerts are sent via your configured channel (email, Slack, or webhook).
+
+---
+
+## 14. Links and Resources
+
+- Website: https://binshield.dev
+- API Base URL: https://api.binshield.dev
+- GitHub Action: https://github.com/ashlrai/binshield
+- Concise AI reference: https://binshield.dev/llms.txt
+- OpenAPI spec: https://binshield.dev/openapi.json
+- Support / Issues: https://github.com/ashlrai/binshield/issues
+- Alerts email: alerts@binshield.dev

@@ -3,6 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "description": "GitHub Action that scans npm dependencies for risky native binaries using BinShield's AI-powered analysis engine.",
+  "keywords": [
+    "github-action",
+    "security",
+    "supply-chain",
+    "binary-analysis",
+    "npm",
+    "ci-cd",
+    "devsecops",
+    "sbom"
+  ],
+  "homepage": "https://binshield.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ashlrai/binshield",
+    "directory": "apps/github-action"
+  },
+  "author": "Ashlr AI <mason@ashlr.ai>",
+  "license": "MIT",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",

@@ -1,0 +1,114 @@
+# BinShield
+
+> Supply chain binary security -- decompile native package binaries, classify risky behaviors with AI, and enforce policy before machine code reaches production.
+
+BinShield is a security platform that analyzes the compiled binary blobs inside npm and PyPI packages -- the .node files, Python C extensions, WASM modules, and pre-built binaries that every other security tool ignores. While tools like Snyk, Socket, and Phylum analyze source code and metadata, BinShield decompiles and AI-classifies the actual machine code your dependencies execute.
+
+## Core Capabilities
+
+- Ghidra headless decompilation of native binaries (.node, .so, .dylib, .dll, .wasm)
+- AI-powered behavior classification across 6 categories: network, filesystem, process, crypto, obfuscation, data exfiltration
+- Risk scoring (0-100) with severity levels: none, low, medium, high, critical
+- Version-over-version binary behavior diffing
+- CycloneDX 1.5 SBOM export with binary-level detail
+- GitHub Action for CI/CD gate enforcement
+- Watchlist alerts via email, Slack, or webhook
+- Free public database of pre-analyzed top packages
+
+## Quick Start
+
+1. Search the public database:
+   curl https://api.binshield.dev/packages/search?q=bcrypt
+
+2. Get a specific package analysis:
+   curl https://api.binshield.dev/packages/npm/bcrypt/versions/5.1.1
+
+3. Add the GitHub Action to your repo:
+   uses: ashlrai/binshield-action@v1
+   with:
+     fail-on: high
+
+4. Export a CycloneDX SBOM:
+   curl https://api.binshield.dev/packages/npm/bcrypt/versions/5.1.1/sbom
+
+## API Base URL
+
+https://api.binshield.dev
+
+## Authentication
+
+Authenticated endpoints require an API key in the Authorization header:
+Authorization: Bearer bsh_live_YOUR_KEY
+
+Public endpoints (health, package search, package details, SBOM) do not require authentication.
+
+## API Endpoints
+
+### Public (no auth required)
+- GET /health -- Service health and configuration
+- GET /packages/search?q={query} -- Search the package database
+- GET /packages/:ecosystem/:name -- List all analyzed versions of a package
+- GET /packages/:ecosystem/:name/versions/:version -- Full analysis for a specific version
+- GET /packages/:ecosystem/:name/versions/:version/sbom -- CycloneDX SBOM export
+- GET /packages/:ecosystem/:name/diff?from={v1}&to={v2} -- Binary behavior diff between versions
+
+### Scans (auth required)
+- POST /scans/packages -- Submit a package for analysis
+- GET /scans/:id -- Check scan job status
+
+### Organization Management (auth required)
+- GET /orgs/:orgId -- Get organization details
+- GET /orgs/:orgId/repos -- List monitored repositories
+- POST /orgs/:orgId/repos -- Add a repository
+- GET /orgs/:orgId/watchlists -- List watchlists
+- POST /orgs/:orgId/watchlists -- Create a watchlist
+- POST /orgs/:orgId/watchlists/:watchlistId/packages -- Add package to watchlist
+- GET /orgs/:orgId/subscription -- Get subscription details
+- POST /orgs/:orgId/subscription -- Update subscription
+- GET /orgs/:orgId/api-keys -- List API keys
+- POST /orgs/:orgId/api-keys -- Create an API key
+
+### Billing (auth required)
+- POST /billing/checkout -- Create a Stripe checkout session
+- POST /billing/webhook -- Stripe webhook handler
+
+## GitHub Action
+
+```yaml
+- uses: ashlrai/binshield-action@v1
+  with:
+    fail-on: high          # critical | high | medium | low | never
+    scan-mode: native-only # native-only | all-dependencies
+    comment-mode: summary  # summary | pr-comment | both | off
+    api-key: ${{ secrets.BINSHIELD_API_KEY }}
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+## Pricing
+
+- Free: $0/mo -- 3 repos, 50 scans/month, public database access
+- Pro: $149/mo -- 25 repos, 2,500 scans/month, watchlists, API access
+- Team: $499/mo -- 50 repos, 10,000 scans/month, shared visibility
+- Enterprise: Custom -- 1,000 repos, 100,000 scans/month, compliance controls
+
+## Risk Scoring
+
+Scores combine finding severity weights, behavior weights, import complexity, and function count:
+- Finding weights: info=2, low=8, medium=18, high=30, critical=45
+- Behavior weights: network=14, filesystem=4, process=12, crypto=3, obfuscation=24, dataExfiltration=28
+- Package score = max_binary * 0.65 + avg_binary * 0.35
+- Levels: none (0), low (1-29), medium (30-59), high (60-79), critical (80-100)
+
+## Supported Ecosystems
+
+- npm (Node.js native addons)
+- PyPI (Python C extensions) -- coming soon
+
+## Links
+
+- Website: https://binshield.dev
+- API: https://api.binshield.dev
+- GitHub Action: https://github.com/ashlrai/binshield
+- Full docs for AI tools: https://binshield.dev/llms-full.txt
+- OpenAPI spec: https://binshield.dev/openapi.json
+- Support: https://github.com/ashlrai/binshield/issues

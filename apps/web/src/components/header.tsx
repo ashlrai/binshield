@@ -26,6 +26,7 @@ export async function Header() {
       <nav className="site-header__nav">
         <Link href="/packages" className="nav-link">Database</Link>
         <Link href="/search" className="nav-link">Search</Link>
+        <Link href="/docs" className="nav-link">Docs</Link>
         <Link href="/dashboard" className="nav-link">Dashboard</Link>
         <Link href="/login" className="nav-link nav-link--cta">Sign in</Link>
       </nav>
