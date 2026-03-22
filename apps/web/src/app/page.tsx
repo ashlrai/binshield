@@ -18,10 +18,12 @@ export default async function HomePage() {
       <section className="hero">
         <div className="hero__copy">
           <p className="eyebrow">Binary supply-chain security</p>
-          <h1>{productCopy.tagline}</h1>
+          <h1>
+            See inside the <span>compiled code</span> your tools ignore.
+          </h1>
           <p className="hero-copy">
-            Decompile native package binaries, explain their behavior in plain English, and block risky compiled code
-            before it ships.
+            Every npm install ships native binaries that no scanner checks. BinShield decompiles them, classifies
+            their behavior with AI, and blocks threats before they reach production.
           </p>
           <form className="hero-search" action="/search">
             <input name="q" placeholder="Search bcrypt, sharp, sqlite3..." aria-label="Search packages" />
