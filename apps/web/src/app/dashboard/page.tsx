@@ -1,9 +1,12 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 
 import { MetricCard } from "../../components/metric-card";
 import { PageHeader } from "../../components/page-header";
 import { RiskBadge } from "../../components/risk-badge";
 import { getDashboardSnapshot } from "../../lib/site-data";
+import { createServerClient, getOrgContext } from "../../lib/supabase";
 
 function scoreForLevel(level: string) {
   switch (level) {
@@ -21,7 +24,20 @@ function scoreForLevel(level: string) {
 }
 
 export default async function DashboardPage() {
-  const snapshot = await getDashboardSnapshot();
+  const cookieStore = await cookies();
+  const supabase = createServerClient(cookieStore);
+  const {
+    data: { user }
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    redirect("/login");
+  }
+
+  const orgCtx = await getOrgContext(user.id);
+  const snapshot = await getDashboardSnapshot(orgCtx?.orgId);
+
+  const hasRepos = snapshot.repos.length > 0;
 
   return (
     <main className="dashboard-page">
@@ -42,50 +58,72 @@ export default async function DashboardPage() {
         ))}
       </section>
 
-      <section className="surface-grid surface-grid--split">
-        <div className="panel">
-          <div className="panel__heading">
-            <h2>Repository posture</h2>
-            <span>Latest scans and aggregate risk</span>
+      {hasRepos ? (
+        <section className="surface-grid surface-grid--split">
+          <div className="panel">
+            <div className="panel__heading">
+              <h2>Repository posture</h2>
+              <span>Latest scans and aggregate risk</span>
+            </div>
+            <div className="repo-table">
+              {snapshot.repos.map((repo) => (
+                <article key={repo.name} className="repo-row">
+                  <div>
+                    <h3>{repo.name}</h3>
+                    <p>
+                      {repo.nativeDependencyCount} native dependencies • last scan {repo.lastScanLabel}
+                    </p>
+                  </div>
+                  <strong>{repo.aggregateRiskScore}</strong>
+                  <span className={`status-pill status-pill--${repo.status}`}>{repo.status}</span>
+                </article>
+              ))}
+            </div>
           </div>
-          <div className="repo-table">
-            {snapshot.repos.map((repo) => (
-              <article key={repo.name} className="repo-row">
-                <div>
-                  <h3>{repo.name}</h3>
-                  <p>
-                    {repo.nativeDependencyCount} native dependencies • last scan {repo.lastScanLabel}
-                  </p>
-                </div>
-                <strong>{repo.aggregateRiskScore}</strong>
-                <span className={`status-pill status-pill--${repo.status}`}>{repo.status}</span>
-              </article>
-            ))}
-          </div>
-        </div>
 
-        <div className="panel">
-          <div className="panel__heading">
-            <h2>Recent scans</h2>
-            <span>Pipeline activity</span>
+          <div className="panel">
+            <div className="panel__heading">
+              <h2>Recent scans</h2>
+              <span>Pipeline activity</span>
+            </div>
+            <div className="activity-list">
+              {snapshot.recentScans.length > 0 ? (
+                snapshot.recentScans.map((scan) => (
+                  <article key={`${scan.packageName}-${scan.version}`} className="activity-row">
+                    <div>
+                      <strong>
+                        {scan.packageName}@{scan.version}
+                      </strong>
+                      <p>
+                        {scan.status} • {scan.timestampLabel}
+                      </p>
+                    </div>
+                    <RiskBadge level={scan.riskLevel as "none" | "low" | "medium" | "high" | "critical"} score={scoreForLevel(scan.riskLevel)} />
+                  </article>
+                ))
+              ) : (
+                <p>No recent scan activity.</p>
+              )}
+            </div>
           </div>
-          <div className="activity-list">
-            {snapshot.recentScans.map((scan) => (
-              <article key={`${scan.packageName}-${scan.version}`} className="activity-row">
-                <div>
-                  <strong>
-                    {scan.packageName}@{scan.version}
-                  </strong>
-                  <p>
-                    {scan.status} • {scan.timestampLabel}
-                  </p>
-                </div>
-                <RiskBadge level={scan.riskLevel as "none" | "low" | "medium" | "high" | "critical"} score={scoreForLevel(scan.riskLevel)} />
-              </article>
-            ))}
+        </section>
+      ) : (
+        <section className="surface-grid">
+          <div className="panel">
+            <div className="panel__heading">
+              <h2>Connect your first repository</h2>
+              <span>Get started</span>
+            </div>
+            <p>
+              No repositories are connected yet. Add a repository to start monitoring native binary dependencies
+              across your codebase.
+            </p>
+            <Link href="/docs/api" className="button-link" style={{ marginTop: "1rem", display: "inline-block" }}>
+              View setup guide
+            </Link>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
     </main>
   );
 }

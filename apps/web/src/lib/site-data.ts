@@ -607,7 +607,60 @@ export async function getBinaryWorkspace(
   };
 }
 
-export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
+export async function getDashboardSnapshot(orgId?: string): Promise<DashboardSnapshot> {
+  // When orgId is provided, try to fetch real data from Supabase directly
+  if (orgId) {
+    try {
+      const { createServiceRoleClient } = await import("./supabase");
+      const admin = createServiceRoleClient();
+
+      const { data: repos } = await admin
+        .from("repos")
+        .select("id, org_id, github_repo, native_dep_count, aggregate_risk_score, last_scan_at")
+        .eq("org_id", orgId);
+
+      const { data: scans } = await admin
+        .from("repo_scans")
+        .select("id, status, scanned_at, repos(github_repo)")
+        .eq("org_id", orgId)
+        .order("created_at", { ascending: false })
+        .limit(5);
+
+      const repoItems = repos ?? [];
+      const totalBinaries = repoItems.reduce((sum, r) => sum + (r.native_dep_count ?? 0), 0);
+      const reviewCount = repoItems.filter((r) => (r.aggregate_risk_score ?? 0) >= 40).length;
+
+      return {
+        mode: "live",
+        metrics: [
+          { label: "Repos monitored", value: String(repoItems.length), detail: "Connected repositories" },
+          { label: "Native binaries", value: String(totalBinaries || 0), detail: "Across active manifests" },
+          { label: "Open reviews", value: String(reviewCount), detail: "Requiring follow-up" },
+          { label: "Alert coverage", value: "Email", detail: "Watchlist notifications enabled" }
+        ],
+        repos: repoItems.map((repo, index) => ({
+          name: repo.github_repo,
+          ecosystem: "npm" as Ecosystem,
+          nativeDependencyCount: repo.native_dep_count ?? 0,
+          aggregateRiskScore: repo.aggregate_risk_score ?? 0,
+          status: (repo.aggregate_risk_score ?? 0) >= 40 ? "review" : index === 1 ? "watch" : "healthy",
+          lastScanLabel: repo.last_scan_at ? formatRelative(repo.last_scan_at) : "never"
+        })),
+        watchlist: [],
+        recentScans: (scans ?? []).map((scan) => ({
+          packageName: (scan.repos as unknown as { github_repo: string })?.github_repo ?? "unknown",
+          version: "latest",
+          riskLevel: "low",
+          status: scan.status === "complete" ? "complete" as AnalysisStatus : "analyzing" as AnalysisStatus,
+          timestampLabel: scan.scanned_at ? formatRelative(scan.scanned_at) : "recently"
+        }))
+      };
+    } catch {
+      // Fall through to demo data on error
+    }
+  }
+
+  // Fallback: try the public API, then demo data
   const reposResponse = await fetchJson<{ items: RepoRecord[] }>("/orgs/demo/repos");
   const repoItems = reposResponse?.items?.length
     ? reposResponse.items
@@ -702,7 +755,66 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
   };
 }
 
-export async function getWatchlistSnapshot() {
+export async function getWatchlistSnapshot(orgId?: string) {
+  // When orgId is provided, try to fetch real watchlist data from Supabase
+  if (orgId) {
+    try {
+      const { createServiceRoleClient } = await import("./supabase");
+      const admin = createServiceRoleClient();
+
+      const { data: watchlists } = await admin
+        .from("watchlists")
+        .select("id, name, channel, destination, created_at")
+        .eq("org_id", orgId)
+        .order("created_at", { ascending: false });
+
+      if (watchlists && watchlists.length > 0) {
+        // Fetch packages for each watchlist
+        const watchlistIds = watchlists.map((w) => w.id);
+        const { data: watchlistPackages } = await admin
+          .from("watchlist_packages")
+          .select("id, watchlist_id, ecosystem, package_name, version")
+          .in("watchlist_id", watchlistIds);
+
+        const items: WatchlistItem[] = (watchlistPackages ?? []).map((wp) => ({
+          packageName: wp.package_name,
+          ecosystem: wp.ecosystem as Ecosystem,
+          currentVersion: wp.version ?? "latest",
+          previousVersion: "unknown",
+          riskChange: 0,
+          channel: (watchlists.find((w) => w.id === wp.watchlist_id)?.channel ?? "email") as "email" | "slack" | "webhook",
+          status: "active" as const,
+          note: `Tracked in ${watchlists.find((w) => w.id === wp.watchlist_id)?.name ?? "watchlist"}`
+        }));
+
+        // Derive channel availability from watchlist configurations
+        const channels = new Set(watchlists.map((w) => w.channel));
+        return {
+          mode: "live" as DataMode,
+          items,
+          alertChannels: [
+            { name: "Email", enabled: channels.has("email"), detail: channels.has("email") ? "Active watchlist channel" : "Not configured" },
+            { name: "Slack", enabled: channels.has("slack"), detail: channels.has("slack") ? "Active watchlist channel" : "Not configured" },
+            { name: "Webhook", enabled: channels.has("webhook"), detail: channels.has("webhook") ? "Active watchlist channel" : "Not configured" }
+          ]
+        };
+      }
+
+      // No watchlists found -- return empty state
+      return {
+        mode: "live" as DataMode,
+        items: [] as WatchlistItem[],
+        alertChannels: [
+          { name: "Email", enabled: false, detail: "Not configured" },
+          { name: "Slack", enabled: false, detail: "Not configured" },
+          { name: "Webhook", enabled: false, detail: "Not configured" }
+        ]
+      };
+    } catch {
+      // Fall through to demo data
+    }
+  }
+
   const dashboard = await getDashboardSnapshot();
 
   return {
@@ -716,7 +828,82 @@ export async function getWatchlistSnapshot() {
   };
 }
 
-export async function getBillingSnapshot(): Promise<BillingSnapshot> {
+export async function getBillingSnapshot(orgId?: string): Promise<BillingSnapshot> {
+  // When orgId is provided, try to fetch real subscription data from Supabase
+  if (orgId) {
+    try {
+      const { createServiceRoleClient } = await import("./supabase");
+      const admin = createServiceRoleClient();
+
+      const { data: subscription } = await admin
+        .from("subscriptions")
+        .select("id, plan, status, provider, current_period_end, cancel_at_period_end, created_at")
+        .eq("org_id", orgId)
+        .maybeSingle();
+
+      const { data: members } = await admin
+        .from("organization_members")
+        .select("id")
+        .eq("org_id", orgId);
+
+      const seatCount = members?.length ?? 1;
+
+      if (subscription) {
+        // Determine plan limits based on subscription plan
+        const planLimits: Record<string, { seats: number; scans: number }> = {
+          free: { seats: 3, scans: 100 },
+          pro: { seats: 5, scans: 500 },
+          team: { seats: 15, scans: 2000 },
+          enterprise: { seats: 100, scans: 10000 }
+        };
+        const limits = planLimits[subscription.plan] ?? planLimits.free;
+
+        // Count monthly scan jobs for usage
+        const monthStart = new Date();
+        monthStart.setDate(1);
+        monthStart.setHours(0, 0, 0, 0);
+
+        const { count: scanCount } = await admin
+          .from("analysis_jobs")
+          .select("id", { count: "exact", head: true })
+          .eq("org_id", orgId)
+          .gte("requested_at", monthStart.toISOString());
+
+        return {
+          mode: "live",
+          plan: subscription.plan.charAt(0).toUpperCase() + subscription.plan.slice(1),
+          billingInterval: "Monthly",
+          seatCount,
+          seatLimit: limits.seats,
+          monthlyUsage: scanCount ?? 0,
+          monthlyLimit: limits.scans,
+          paymentMethod: subscription.provider === "stripe" ? "Stripe" : "Manual",
+          invoices: [
+            // Keep invoices as demo for now (Stripe integration separate)
+            { id: "INV-1024", dateLabel: "Mar 1", amount: "$499", status: "paid" as const },
+            { id: "INV-1025", dateLabel: "Apr 1", amount: "$499", status: "open" as const },
+            { id: "INV-1026", dateLabel: "May 1", amount: "$499", status: "draft" as const }
+          ]
+        };
+      }
+
+      // No subscription found -- show Free plan
+      return {
+        mode: "live",
+        plan: "Free",
+        billingInterval: "None",
+        seatCount,
+        seatLimit: 3,
+        monthlyUsage: 0,
+        monthlyLimit: 100,
+        paymentMethod: "No payment method",
+        invoices: []
+      };
+    } catch {
+      // Fall through to demo data
+    }
+  }
+
   return {
     mode: dataMode,
     plan: rawApiBaseUrl ? "Team" : "Launch Preview",
@@ -734,7 +921,71 @@ export async function getBillingSnapshot(): Promise<BillingSnapshot> {
   };
 }
 
-export async function getSettingsSnapshot(): Promise<SettingsSnapshot> {
+export async function getSettingsSnapshot(orgId?: string, userEmail?: string): Promise<SettingsSnapshot> {
+  // When orgId is provided, try to fetch real data from Supabase
+  if (orgId) {
+    try {
+      const { createServiceRoleClient } = await import("./supabase");
+      const admin = createServiceRoleClient();
+
+      // Fetch org details
+      const { data: org } = await admin
+        .from("organizations")
+        .select("id, name, slug")
+        .eq("id", orgId)
+        .maybeSingle();
+
+      // Fetch API keys (non-revoked)
+      const { data: apiKeys } = await admin
+        .from("api_keys")
+        .select("id, label, prefix, created_at, last_used_at, revoked_at")
+        .eq("org_id", orgId)
+        .is("revoked_at", null)
+        .order("created_at", { ascending: false });
+
+      // Fetch the user's role in the org
+      const { data: membership } = await admin
+        .from("organization_members")
+        .select("role")
+        .eq("org_id", orgId)
+        .limit(1)
+        .maybeSingle();
+
+      // Fetch recent billing events for audit trail
+      const { data: events } = await admin
+        .from("billing_events")
+        .select("event_type, created_at")
+        .eq("org_id", orgId)
+        .order("created_at", { ascending: false })
+        .limit(5);
+
+      const keyList = (apiKeys ?? []).map((key) => ({
+        label: key.label,
+        maskedKey: `${key.prefix}${"•".repeat(12)}`,
+        lastUsedLabel: key.last_used_at ? formatRelative(key.last_used_at) : "never used"
+      }));
+
+      const auditItems = (events ?? []).map((evt) => {
+        const dateStr = new Date(evt.created_at).toLocaleDateString();
+        return `${evt.event_type} — ${dateStr}`;
+      });
+
+      return {
+        orgName: org?.name ?? "My Organization",
+        orgSlug: org?.slug ?? "my-org",
+        contactEmail: userEmail ?? "unknown",
+        role: membership?.role === "owner" ? "Owner" : membership?.role === "admin" ? "Admin" : "Member",
+        apiKeys: keyList.length > 0 ? keyList : [],
+        alertPreferences: ["Email on new binary behavior", "Daily digest", "Critical findings only"],
+        auditTrail: auditItems.length > 0
+          ? auditItems
+          : ["No recent account events"]
+      };
+    } catch {
+      // Fall through to demo data
+    }
+  }
+
   return {
     orgName: "Ashlr AI",
     orgSlug: "ashlrai",

@@ -2,7 +2,7 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { createServerClient } from "../../lib/supabase";
+import { createServerClient, getOrgContext } from "../../lib/supabase";
 import { getDashboardSnapshot } from "../../lib/site-data";
 
 const navItems = [
@@ -24,14 +24,18 @@ export default async function DashboardLayout({ children }: { children: React.Re
     redirect("/login");
   }
 
-  const snapshot = await getDashboardSnapshot();
+  // Look up the user's organization from Supabase
+  const orgCtx = await getOrgContext(user.id);
+  const orgId = orgCtx?.orgId;
+
+  const snapshot = await getDashboardSnapshot(orgId);
 
   return (
     <div className="dashboard-layout">
       <aside className="dashboard-sidebar">
         <div className="dashboard-sidebar__hero">
           <p className="eyebrow">Authenticated workspace</p>
-          <h1>Org dashboard</h1>
+          <h1>{orgCtx?.orgName ?? "Org dashboard"}</h1>
           <p>Team-level visibility for repositories, package watchlists, billing, and settings.</p>
           <p className="dashboard-user-info">
             Signed in as <strong>{user.email ?? user.user_metadata?.user_name ?? "user"}</strong>

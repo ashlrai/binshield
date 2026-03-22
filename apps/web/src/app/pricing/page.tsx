@@ -2,22 +2,13 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { pricingCopy } from "@binshield/config";
+import { CheckoutButton } from "../../components/checkout-button";
 
 export const metadata: Metadata = {
   title: "Pricing",
   description:
     "Choose the BinShield plan that fits your security needs — from free open-source scanning to enterprise-grade compliance controls."
 };
-
-const tiers = pricingCopy.map((t) => ({
-  ...t,
-  cta:
-    t.plan === "free"
-      ? { label: "Get started free", href: "/login" }
-      : t.plan === "enterprise"
-        ? { label: "Contact sales", href: "mailto:mason@ashlr.ai?subject=BinShield%20Enterprise" }
-        : { label: "Start trial", href: "/login" }
-}));
 
 type Feature = {
   name: string;
@@ -37,6 +28,29 @@ const features: Feature[] = [
   { name: "Support", values: ["Community", "Email", "Email", "Dedicated"] }
 ];
 
+function TierCta({ plan }: { plan: string }) {
+  if (plan === "free") {
+    return (
+      <Link href="/login" className="button-link button-link--ghost">
+        Get started free
+      </Link>
+    );
+  }
+
+  if (plan === "enterprise") {
+    return (
+      <a
+        href="mailto:mason@ashlr.ai?subject=BinShield%20Enterprise"
+        className="button-link button-link--ghost"
+      >
+        Contact sales
+      </a>
+    );
+  }
+
+  return <CheckoutButton plan={plan} label="Start trial" />;
+}
+
 export default function PricingPage() {
   return (
     <div className="browse-page">
@@ -52,21 +66,12 @@ export default function PricingPage() {
       </section>
 
       <div className="surface-grid pricing-grid">
-        {tiers.map((tier) => (
+        {pricingCopy.map((tier) => (
           <div key={tier.plan} className="panel pricing-card">
             <p className="eyebrow">{tier.plan}</p>
             <p className="pricing-card__price">{tier.price}</p>
             <p className="pricing-card__headline">{tier.headline}</p>
-            <Link
-              href={tier.cta.href}
-              className={
-                tier.plan === "free" || tier.plan === "enterprise"
-                  ? "button-link button-link--ghost"
-                  : "button-link"
-              }
-            >
-              {tier.cta.label}
-            </Link>
+            <TierCta plan={tier.plan} />
           </div>
         ))}
       </div>

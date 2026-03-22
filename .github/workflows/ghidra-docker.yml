@@ -1,0 +1,28 @@
+name: Build Ghidra Docker Image
+
+on:
+  push:
+    paths: ['docker/ghidra/**']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: docker/ghidra
+          push: true
+          tags: ghcr.io/ashlrai/binshield-ghidra:latest

@@ -58,6 +58,8 @@ async function runDaemon() {
     supabaseServiceRoleKey,
     pollIntervalMs: Number(process.env.BINSHIELD_POLL_INTERVAL_MS ?? 5000),
     maxConcurrent: Number(process.env.BINSHIELD_MAX_CONCURRENT ?? 2),
+    resendApiKey: process.env.RESEND_API_KEY ?? env.resendApiKey ?? "",
+    fromEmail: process.env.BINSHIELD_SMTP_FROM_EMAIL ?? env.smtpFromEmail ?? "alerts@binshield.dev",
   });
 
   await daemon.start();

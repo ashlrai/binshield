@@ -1,0 +1,10 @@
+{
+  "name": "@binshield/cli",
+  "version": "0.1.0",
+  "description": "CLI for BinShield binary supply-chain security",
+  "bin": { "binshield": "dist/index.js" },
+  "type": "module",
+  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": {},
+  "keywords": ["security", "supply-chain", "binary-analysis", "npm", "cli"]
+}

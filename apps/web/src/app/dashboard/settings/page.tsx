@@ -1,17 +1,33 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 
 import { PageHeader } from "../../../components/page-header";
 import { getSettingsSnapshot } from "../../../lib/site-data";
+import { createServerClient, getOrgContext } from "../../../lib/supabase";
 
 export default async function SettingsPage() {
-  const settings = await getSettingsSnapshot();
+  const cookieStore = await cookies();
+  const supabase = createServerClient(cookieStore);
+  const {
+    data: { user }
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    redirect("/login");
+  }
+
+  const orgCtx = await getOrgContext(user.id);
+  const settings = await getSettingsSnapshot(orgCtx?.orgId, user.email ?? undefined);
+
+  const hasApiKeys = settings.apiKeys.length > 0;
 
   return (
     <main className="dashboard-page">
       <PageHeader
         eyebrow="Settings"
         title="Org profile and API access"
-        description="Manage API keys, contact details, and alert preferences for the Ashlr AI org."
+        description={`Manage API keys, contact details, and alert preferences for the ${settings.orgName} org.`}
         actions={<Link href="/dashboard/billing" className="button-link">Billing</Link>}
       />
 
@@ -42,17 +58,26 @@ export default async function SettingsPage() {
             <h2>API keys</h2>
             <span>CI and automation</span>
           </div>
-          <div className="key-list">
-            {settings.apiKeys.map((key) => (
-              <article key={key.label} className="key-row">
-                <div>
-                  <strong>{key.label}</strong>
-                  <p>{key.maskedKey}</p>
-                </div>
-                <span>{key.lastUsedLabel}</span>
-              </article>
-            ))}
-          </div>
+          {hasApiKeys ? (
+            <div className="key-list">
+              {settings.apiKeys.map((key) => (
+                <article key={key.label} className="key-row">
+                  <div>
+                    <strong>{key.label}</strong>
+                    <p>{key.maskedKey}</p>
+                  </div>
+                  <span>{key.lastUsedLabel}</span>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div>
+              <p>No API keys have been created yet.</p>
+              <Link href="/docs/api" className="button-link" style={{ marginTop: "1rem", display: "inline-block" }}>
+                Create your first API key
+              </Link>
+            </div>
+          )}
         </div>
       </section>
 

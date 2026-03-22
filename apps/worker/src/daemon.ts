@@ -2,6 +2,7 @@ import type { QueuedJob, SupabaseWorkerConfig } from "./supabase-store";
 import { SupabaseWorkerStore } from "./supabase-store";
 import { WorkerRuntime } from "./pipeline";
 import { createLiveClassifierProvider, createLiveDecompilerProvider } from "./providers";
+import { checkAndSendAlerts } from "./alerts";
 import type { WorkerScanRequest } from "./types";
 
 export interface DaemonConfig extends SupabaseWorkerConfig {
@@ -9,6 +10,10 @@ export interface DaemonConfig extends SupabaseWorkerConfig {
   pollIntervalMs: number;
   /** Maximum number of jobs processed concurrently. Default 2. */
   maxConcurrent: number;
+  /** Resend API key for email alerts. Empty string disables alerts. */
+  resendApiKey: string;
+  /** From address for alert emails. */
+  fromEmail: string;
 }
 
 function log(message: string) {
@@ -142,6 +147,23 @@ export class WorkerDaemon {
       const outcome = await this.runtime.run(request);
       const analysisId = await this.store.persistAnalysis(outcome.analysis);
       await this.store.completeJob(job.id, analysisId);
+
+      // Fire-and-forget: send watchlist alerts (never blocks job completion)
+      checkAndSendAlerts(
+        {
+          supabaseUrl: this.config.supabaseUrl,
+          supabaseServiceRoleKey: this.config.supabaseServiceRoleKey,
+          resendApiKey: this.config.resendApiKey,
+          fromEmail: this.config.fromEmail,
+        },
+        job.packageName,
+        job.ecosystem,
+        job.version,
+        outcome.analysis,
+      ).catch((alertError) => {
+        logError(`Job ${job.id}: alert check failed`, alertError);
+      });
+
       log(
         `Job ${job.id}: completed (risk=${outcome.analysis.riskLevel}, binaries=${outcome.analysis.binaryCount})`,
       );
