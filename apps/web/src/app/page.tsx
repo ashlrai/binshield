@@ -39,15 +39,15 @@ export default async function HomePage() {
         <div className="hero-card">
           <div className="hero-card__terminal">
             <span>$</span>
-            <code>binshield scan bcrypt@5.1.1</code>
+            <code className="typing-text">binshield scan bcrypt@6.0.0</code>
           </div>
           <div className="hero-card__result">
-            <RiskBadge level="low" score={12} />
-            <p>Expected bcrypt hashing behavior. No suspicious network activity detected.</p>
+            <RiskBadge level="medium" score={52} />
+            <p>10 native binaries detected. Crypto operations, filesystem access, and process spawning identified.</p>
             <div className="hero-card__stats">
-              <span>1 binary</span>
-              <span>17 imports</span>
-              <span>high confidence</span>
+              <span>10 binaries</span>
+              <span>52 risk score</span>
+              <span>AI classified</span>
             </div>
           </div>
         </div>
@@ -73,8 +73,8 @@ export default async function HomePage() {
           }
         />
         <div className="featured-grid">
-          {featured.map((item) => (
-            <Link key={item.packageName} href={`/packages/${item.packageName}`} className="package-tile">
+          {featured.map((item, i) => (
+            <Link key={item.packageName} href={`/packages/${item.packageName}`} className="package-tile" style={{ animationDelay: `${0.1 + i * 0.08}s` }}>
               <div className="package-tile__header">
                 <div>
                   <p className="eyebrow">{item.ecosystem}</p>

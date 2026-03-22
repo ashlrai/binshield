@@ -1,0 +1,16 @@
+{
+  "name": "BinShield",
+  "short_name": "BinShield",
+  "description": "Binary supply-chain security for npm dependencies",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050d18",
+  "theme_color": "#5ffbbd",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
