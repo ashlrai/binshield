@@ -20,7 +20,7 @@ export default function TermsPage() {
         <h2>1. Acceptance of Terms</h2>
         <p>
           By accessing or using BinShield (the &quot;Service&quot;), operated by
-          Ashlr AI (Evero LLC), you agree to be bound by these Terms of Service.
+          Ashlr AI (AshlrAI Inc.), you agree to be bound by these Terms of Service.
           If you do not agree, do not use the Service.
         </p>
 
@@ -71,7 +71,7 @@ export default function TermsPage() {
         <h2>7. Intellectual Property</h2>
         <p>
           The Service, including its design, code, algorithms, and documentation,
-          is owned by Ashlr AI (Evero LLC) and protected by intellectual property
+          is owned by Ashlr AI (AshlrAI Inc.) and protected by intellectual property
           laws. You retain ownership of the packages and data you submit for
           analysis.
         </p>
@@ -94,7 +94,7 @@ export default function TermsPage() {
 
         <h2>10. Limitation of Liability</h2>
         <p>
-          To the maximum extent permitted by law, Ashlr AI (Evero LLC) shall not
+          To the maximum extent permitted by law, Ashlr AI (AshlrAI Inc.) shall not
           be liable for any indirect, incidental, special, consequential, or
           punitive damages, or any loss of profits or revenue, whether incurred
           directly or indirectly. Our total liability shall not exceed the amount
@@ -103,7 +103,7 @@ export default function TermsPage() {
 
         <h2>11. Indemnification</h2>
         <p>
-          You agree to indemnify and hold harmless Ashlr AI (Evero LLC) from any
+          You agree to indemnify and hold harmless Ashlr AI (AshlrAI Inc.) from any
           claims, damages, or expenses arising from your use of the Service or
           violation of these Terms.
         </p>
@@ -140,7 +140,7 @@ export default function TermsPage() {
           .
         </p>
         <p>
-          Ashlr AI (Evero LLC)
+          Ashlr AI (AshlrAI Inc.)
         </p>
       </article>
     </div>

@@ -19,7 +19,7 @@ export default function PrivacyPage() {
       <article className="panel legal-content">
         <h2>1. Introduction</h2>
         <p>
-          BinShield is a product of Ashlr AI, operated by Evero LLC (&quot;we,&quot;
+          BinShield is a product of Ashlr AI, operated by AshlrAI Inc. (&quot;we,&quot;
           &quot;us,&quot; or &quot;our&quot;). This Privacy Policy describes how we collect,
           use, disclose, and safeguard your information when you use the BinShield
           platform, website, APIs, and related services (collectively, the
@@ -126,7 +126,7 @@ export default function PrivacyPage() {
           .
         </p>
         <p>
-          Ashlr AI (Evero LLC)
+          Ashlr AI (AshlrAI Inc.)
         </p>
       </article>
     </div>

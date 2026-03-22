@@ -21,24 +21,29 @@ export default async function HomePage() {
     <main className="home-page">
       <section className="hero">
         <div className="hero__copy">
-          <p className="eyebrow">Binary compliance &amp; visibility</p>
+          <p className="eyebrow">For security &amp; compliance teams</p>
           <h1>
             The <span>binary-level evidence</span> your auditors are asking for.
           </h1>
           <p className="hero-copy">
-            Every npm install ships native binaries that no security tool documents. BinShield decompiles them,
-            classifies behavior with AI, and generates audit-ready CycloneDX SBOMs — the compliance evidence
-            SOC 2, ISO 27001, and the EU Cyber Resilience Act require.
+            Every npm install ships compiled native binaries that no security tool checks. BinShield decompiles them,
+            classifies behavior with AI, and generates the audit-ready CycloneDX SBOMs that SOC 2, ISO 27001,
+            and EU Cyber Resilience Act compliance require.
           </p>
+          <div className="hero__who">
+            <span className="hero__who-pill">DevSecOps</span>
+            <span className="hero__who-pill">Compliance teams</span>
+            <span className="hero__who-pill">AppSec engineers</span>
+          </div>
           <form className="hero-search" action="/search">
             <input name="q" placeholder="Search bcrypt, sharp, sqlite3..." aria-label="Search packages" />
             <button type="submit">Search database</button>
           </form>
           <div className="hero__meta">
             <span className={`status-pill status-pill--${mode === "live" ? "healthy" : "watch"}`}>
-              {mode === "live" ? "Live API connected" : "Demo data fallback"}
+              {mode === "live" ? "Live" : "Demo"}
             </span>
-            <span className="hero__meta-note">{counts.packages} packages surfaced, {counts.binaries} binaries tracked</span>
+            <span className="hero__meta-note">{counts.packages} packages · {counts.binaries} binaries analyzed</span>
           </div>
         </div>
         <HeroViz />
@@ -49,9 +54,9 @@ export default async function HomePage() {
       <DemoVideo />
 
       <section className="metrics-grid">
-        <MetricCard label="Compiled code visibility" value="Binary-first" detail="Inspect native package artifacts, not just manifests." />
-        <MetricCard label="Version diffs" value="Drift-aware" detail="Track behavior changes between package releases." tone="warning" />
-        <MetricCard label="CI policy enforcement" value="Action-ready" detail="Reuse the same scan contract in GitHub Actions." tone="accent" />
+        <MetricCard label="The problem" value="Zero visibility" detail="Native .node binaries execute on your servers. Snyk, Socket, and npm audit only check source code — not compiled machine code." tone="danger" />
+        <MetricCard label="The solution" value="AI decompilation" detail="BinShield decompiles binaries, classifies 6 behavior categories with Grok AI, and generates CycloneDX SBOMs for compliance." tone="accent" />
+        <MetricCard label="The result" value="Audit-ready evidence" detail="Binary-level documentation that SOC 2, ISO 27001, and EU Cyber Resilience Act auditors require. No other tool produces this." tone="warning" />
       </section>
 
       <section className="surface-grid">
@@ -98,38 +103,37 @@ export default async function HomePage() {
       <section className="surface-grid surface-grid--split">
         <div className="panel">
           <div className="panel__heading">
-            <h2>Launch surfaces</h2>
-            <span>Built for product discovery and team adoption</span>
+            <h2>Who is this for?</h2>
+            <span>Built for security and compliance teams</span>
           </div>
           <div className="launch-link-grid">
-            <Link href="/dashboard" className="launch-link">
-              <strong>Dashboard</strong>
-              <span>Repository coverage, risk posture, and scan history.</span>
+            <Link href="/use-cases/compliance" className="launch-link">
+              <strong>Compliance officers</strong>
+              <span>Generate binary-level SBOMs for SOC 2, ISO 27001, and EU CRA audits.</span>
             </Link>
-            <Link href="/dashboard/watchlists" className="launch-link">
-              <strong>Watchlists</strong>
-              <span>Track package versions and receive email alerts.</span>
+            <Link href="/use-cases/ci-cd" className="launch-link">
+              <strong>DevSecOps engineers</strong>
+              <span>Block risky native binaries in CI with a GitHub Action.</span>
             </Link>
-            <Link href="/dashboard/billing" className="launch-link">
-              <strong>Billing</strong>
-              <span>Plan usage, invoices, and customer portal handoff.</span>
+            <Link href="/use-cases/threat-intelligence" className="launch-link">
+              <strong>AppSec teams</strong>
+              <span>Monitor packages for behavioral changes in compiled code.</span>
             </Link>
-            <Link href="/dashboard/settings" className="launch-link">
-              <strong>Settings</strong>
-              <span>API keys, org profile, and audit trail.</span>
+            <Link href="/pricing" className="launch-link">
+              <strong>Get started free</strong>
+              <span>Public database, 3 repos, 50 scans/month. No credit card needed.</span>
             </Link>
           </div>
         </div>
         <div className="panel">
           <div className="panel__heading">
             <h2>How it works</h2>
-            <span>Data flow</span>
+            <span>3 steps to binary visibility</span>
           </div>
           <ol className="timeline">
-            <li>Discover native binaries in npm package tarballs.</li>
-            <li>Decompile and classify behavior through queued workers.</li>
-            <li>Store immutable package results and surface them in the app.</li>
-            <li>Use the same API in CI, dashboard, and future integrations.</li>
+            <li><strong>Scan</strong> — Point BinShield at your npm dependencies via GitHub Action, CLI, or API.</li>
+            <li><strong>Classify</strong> — AI decompiles every native binary and classifies behavior across 6 categories.</li>
+            <li><strong>Document</strong> — Get audit-ready risk scores, behavior reports, and CycloneDX SBOMs.</li>
           </ol>
         </div>
       </section>

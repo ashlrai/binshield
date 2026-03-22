@@ -2,7 +2,7 @@
  * Email sender using the SendGrid API.
  *
  * Uses native fetch — no SDKs required.
- * Consistent with Koala, Evero, and Probe email infrastructure.
+ * Consistent with AshlrAI email infrastructure (Koala, Probe).
  */
 
 const SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send";

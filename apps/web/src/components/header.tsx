@@ -10,10 +10,15 @@ export async function Header() {
       <div className="site-header__brand">
         <Link href="/" className="wordmark">
           <span className="wordmark__icon" aria-hidden="true">
-            <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
-              <rect x="1" y="1" width="20" height="20" rx="4" stroke="currentColor" strokeWidth="1.5" />
-              <path d="M6 7h4v3H6zM12 7h4v3h-4zM6 12h4v3H6zM12 12h4v3h-4z" fill="currentColor" opacity="0.6" />
-              <circle cx="11" cy="11" r="2" fill="currentColor" />
+            <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+              <rect x="2" y="2" width="28" height="28" rx="5" stroke="currentColor" strokeWidth="1.5" />
+              <rect x="7" y="7" width="7" height="5" rx="1.5" fill="currentColor" opacity="0.5" />
+              <rect x="18" y="7" width="7" height="5" rx="1.5" fill="currentColor" opacity="0.5" />
+              <rect x="7" y="15" width="7" height="5" rx="1.5" fill="currentColor" opacity="0.5" />
+              <rect x="18" y="15" width="7" height="5" rx="1.5" fill="currentColor" opacity="0.5" />
+              <circle cx="16" cy="16" r="4" fill="currentColor" />
+              <path d="M16 13v6M13 16h6" stroke="#050d18" strokeWidth="1.5" strokeLinecap="round" />
+              <rect x="7" y="23" width="18" height="2" rx="1" fill="currentColor" opacity="0.3" />
             </svg>
           </span>
           BinShield
@@ -25,11 +30,10 @@ export async function Header() {
       </div>
       <nav className="site-header__nav">
         <Link href="/packages" className="nav-link">Database</Link>
-        <Link href="/search" className="nav-link">Search</Link>
+        <Link href="/use-cases" className="nav-link">Use Cases</Link>
         <Link href="/pricing" className="nav-link">Pricing</Link>
         <Link href="/docs" className="nav-link">Docs</Link>
-        <Link href="/dashboard" className="nav-link">Dashboard</Link>
-        <Link href="/login" className="nav-link nav-link--cta">Sign in</Link>
+        <Link href="/login" className="nav-link nav-link--cta">Get started</Link>
       </nav>
     </header>
   );

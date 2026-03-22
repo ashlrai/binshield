@@ -65,7 +65,7 @@ export function Footer() {
       </div>
 
       <div className="site-footer__bottom">
-        <p>&copy; {new Date().getFullYear()} Ashlr AI (Evero LLC). All rights reserved.</p>
+        <p>&copy; {new Date().getFullYear()} AshlrAI Inc.. All rights reserved.</p>
       </div>
     </footer>
   );

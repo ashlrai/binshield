@@ -2516,3 +2516,24 @@ dd {
     grid-template-columns: 1fr;
   }
 }
+
+/* ─── Hero Who Pills ─── */
+
+.hero__who {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  animation: fade-up 0.8s var(--ease-out-expo) 0.25s both;
+}
+
+.hero__who-pill {
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: rgba(95, 251, 189, 0.06);
+  border: 1px solid rgba(95, 251, 189, 0.15);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
