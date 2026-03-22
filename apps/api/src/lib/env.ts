@@ -6,6 +6,8 @@ export interface ApiEnv {
   supabaseServiceRoleKey?: string;
   supabaseAnonKey?: string;
   publicAppUrl: string;
+  stripeSecretKey?: string;
+  stripeWebhookSecret?: string;
   defaultFailOn: "critical" | "high" | "medium" | "low" | "never";
 }
 
@@ -22,6 +24,8 @@ export function readApiEnv(source: NodeJS.ProcessEnv = process.env): ApiEnv {
     supabaseServiceRoleKey,
     supabaseAnonKey,
     publicAppUrl: source.BINSHIELD_PUBLIC_APP_URL ?? "http://localhost:3000",
+    stripeSecretKey: source.STRIPE_SECRET_KEY,
+    stripeWebhookSecret: source.STRIPE_WEBHOOK_SECRET,
     defaultFailOn: (source.BINSHIELD_DEFAULT_FAIL_ON as ApiEnv["defaultFailOn"]) ?? "high"
   };
 }

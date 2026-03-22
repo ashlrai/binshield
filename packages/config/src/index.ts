@@ -5,9 +5,16 @@ export interface EnvShape {
   supabaseAnonKey: string;
   supabaseServiceRoleKey: string;
   ghidraImage: string;
+  ghidraTimeoutMs: number;
+  ghidraMemoryLimit: string;
+  ghidraCpuLimit: string;
+  xaiApiKey: string;
+  xaiModel: string;
+  xaiTimeoutMs: number;
   stripeSecretKey: string;
   stripePublishableKey: string;
   stripeWebhookSecret: string;
+  stripePriceIds: Record<string, string>;
   githubActionToken: string;
   smtpFromEmail: string;
   defaultFailOn: "critical" | "high" | "medium" | "low" | "never";
@@ -21,9 +28,20 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): EnvShape {
     supabaseAnonKey: source.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "dev-anon-key",
     supabaseServiceRoleKey: source.SUPABASE_SERVICE_ROLE_KEY ?? "dev-service-role-key",
     ghidraImage: source.BINSHIELD_GHIDRA_IMAGE ?? "ghcr.io/ashlrai/binshield-ghidra:latest",
+    ghidraTimeoutMs: Number(source.BINSHIELD_GHIDRA_TIMEOUT_MS ?? 300000),
+    ghidraMemoryLimit: source.BINSHIELD_GHIDRA_MEMORY_LIMIT ?? "4g",
+    ghidraCpuLimit: source.BINSHIELD_GHIDRA_CPU_LIMIT ?? "2",
+    xaiApiKey: source.XAI_API_KEY ?? "",
+    xaiModel: source.XAI_MODEL ?? "grok-4-1-fast-reasoning",
+    xaiTimeoutMs: Number(source.XAI_TIMEOUT_MS ?? 60000),
     stripeSecretKey: source.STRIPE_SECRET_KEY ?? "sk_test_placeholder",
     stripePublishableKey: source.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY ?? "pk_test_placeholder",
     stripeWebhookSecret: source.STRIPE_WEBHOOK_SECRET ?? "whsec_placeholder",
+    stripePriceIds: {
+      pro: source.STRIPE_PRICE_PRO ?? "price_pro_placeholder",
+      team: source.STRIPE_PRICE_TEAM ?? "price_team_placeholder",
+      enterprise: source.STRIPE_PRICE_ENTERPRISE ?? "price_enterprise_placeholder"
+    },
     githubActionToken: source.GITHUB_TOKEN ?? "dev-github-token",
     smtpFromEmail: source.BINSHIELD_SMTP_FROM_EMAIL ?? "alerts@binshield.dev",
     defaultFailOn: (source.BINSHIELD_DEFAULT_FAIL_ON as EnvShape["defaultFailOn"]) ?? "high"

@@ -8,12 +8,8 @@ import { buildCacheKey, InMemoryAnalysisCache } from "./cache";
 import { FileSystemBinaryExtractor } from "./extractor";
 import { InMemoryJobStore } from "./job-store";
 import {
-  CompositeClassifierProvider,
-  CompositeDecompilerProvider,
-  HttpClassifierProvider,
-  HttpDecompilerProvider,
-  LocalHeuristicClassifierProvider,
-  LocalHeuristicDecompilerProvider
+  createDefaultDecompilerProvider,
+  createDefaultClassifierProvider
 } from "./providers";
 import { LocalDirectoryPackageSource, RegistryPackageSource, createDefaultPackageSource } from "./package-source";
 import type {
@@ -48,14 +44,8 @@ function createDefaultBundle(demoPackageRoot = defaultDemoPackageRoot()): Analys
   return {
     acquisition: createDefaultPackageSource(demoPackageRoot),
     extraction: new FileSystemBinaryExtractor(),
-    decompiler: new CompositeDecompilerProvider([
-      new HttpDecompilerProvider(),
-      new LocalHeuristicDecompilerProvider()
-    ]),
-    classifier: new CompositeClassifierProvider([
-      new HttpClassifierProvider(),
-      new LocalHeuristicClassifierProvider()
-    ]),
+    decompiler: createDefaultDecompilerProvider(),
+    classifier: createDefaultClassifierProvider(),
     cache: new InMemoryAnalysisCache(),
     jobs: new InMemoryJobStore()
   };

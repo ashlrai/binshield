@@ -1,5 +1,8 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 
+import { createServerClient } from "../../lib/supabase";
 import { getDashboardSnapshot } from "../../lib/site-data";
 
 const navItems = [
@@ -10,6 +13,17 @@ const navItems = [
 ];
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
+  const cookieStore = await cookies();
+  const supabase = createServerClient(cookieStore);
+
+  const {
+    data: { user }
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    redirect("/login");
+  }
+
   const snapshot = await getDashboardSnapshot();
 
   return (
@@ -19,6 +33,9 @@ export default async function DashboardLayout({ children }: { children: React.Re
           <p className="eyebrow">Authenticated workspace</p>
           <h1>Org dashboard</h1>
           <p>Team-level visibility for repositories, package watchlists, billing, and settings.</p>
+          <p className="dashboard-user-info">
+            Signed in as <strong>{user.email ?? user.user_metadata?.user_name ?? "user"}</strong>
+          </p>
         </div>
 
         <nav className="dashboard-nav">

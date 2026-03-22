@@ -1,9 +1,14 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { BehaviorFlow } from "../../../components/behavior-flow";
+import { CallGraph } from "../../../components/call-graph";
+import { CodeViewer } from "../../../components/code-viewer";
 import { MetricCard } from "../../../components/metric-card";
+import { MethodologyPanel } from "../../../components/methodology-panel";
 import { PageHeader } from "../../../components/page-header";
 import { RiskBadge } from "../../../components/risk-badge";
+import { RiskTimeline } from "../../../components/risk-timeline";
 import { getPackageSummaryStats, getPackageWorkspace } from "../../../lib/site-data";
 
 export default async function PackagePage({
@@ -91,6 +96,15 @@ export default async function PackagePage({
             <h2>Version history</h2>
             <span>{workspace.versionTimeline.length} analyzed versions</span>
           </div>
+          <RiskTimeline
+            points={workspace.versionTimeline.map((entry) => ({
+              version: entry.version,
+              riskScore: entry.riskScore,
+              riskLevel: entry.riskLevel,
+              binaryCount: entry.binaryCount,
+              active: entry.active
+            }))}
+          />
           <div className="version-pills">
             {workspace.versionTimeline.map((analysis) => (
               <Link
@@ -210,7 +224,26 @@ export default async function PackagePage({
                     <span key={`${binary.id}-${item}`}>{item}</span>
                   ))}
                 </div>
-                <code>{binary.decompiledPreview}</code>
+                <div className="surface-grid surface-grid--split">
+                  <BehaviorFlow
+                    behaviors={workspace.selected.binaries.find((b) => b.id === binary.id)?.behaviors ?? {
+                      network: { detected: false, details: [] },
+                      filesystem: { detected: false, details: [] },
+                      process: { detected: false, details: [] },
+                      crypto: { detected: false, details: [] },
+                      obfuscation: { detected: false, details: [] },
+                      dataExfiltration: { detected: false, details: [] }
+                    }}
+                    binaryName={binary.filename}
+                  />
+                  <CallGraph
+                    imports={binary.imports}
+                    callTargets={binary.imports.slice(0, 6)}
+                    binaryName={binary.filename}
+                    functionCount={workspace.selected.binaries.find((b) => b.id === binary.id)?.functionCount ?? 0}
+                  />
+                </div>
+                <CodeViewer source={binary.decompiledPreview} language="c" />
                 <div className="binary-grid">
                   <div>
                     <strong>Imports</strong>
@@ -269,6 +302,8 @@ export default async function PackagePage({
           </div>
         </div>
       </section>
+
+      <MethodologyPanel currentScore={workspace.selected.riskScore} currentLevel={workspace.selected.riskLevel} />
     </main>
   );
 }

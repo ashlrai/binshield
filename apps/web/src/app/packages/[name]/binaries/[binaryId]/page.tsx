@@ -1,7 +1,11 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { BehaviorFlow } from "../../../../../components/behavior-flow";
+import { CallGraph } from "../../../../../components/call-graph";
+import { CodeViewer } from "../../../../../components/code-viewer";
 import { MetricCard } from "../../../../../components/metric-card";
+import { MethodologyPanel } from "../../../../../components/methodology-panel";
 import { PageHeader } from "../../../../../components/page-header";
 import { RiskBadge } from "../../../../../components/risk-badge";
 import { getBinaryWorkspace } from "../../../../../lib/site-data";
@@ -93,7 +97,7 @@ export default async function BinaryPage({
               <p>{workspace.binary.strings.length ? workspace.binary.strings.join(", ") : "No high-signal strings surfaced."}</p>
             </div>
           </div>
-          <code>{workspace.binary.decompiledPreview}</code>
+          <CodeViewer source={workspace.binary.decompiledPreview} language="c" />
         </div>
 
         <div className="panel">
@@ -115,6 +119,19 @@ export default async function BinaryPage({
             <span>{workspace.diffNarrative.headline}</span>
           </div>
         </div>
+      </section>
+
+      <section className="surface-grid surface-grid--split">
+        <BehaviorFlow
+          behaviors={workspace.rawBinary.behaviors}
+          binaryName={workspace.binary.filename}
+        />
+        <CallGraph
+          imports={workspace.binary.imports}
+          callTargets={workspace.binary.imports.slice(0, 8)}
+          binaryName={workspace.binary.filename}
+          functionCount={workspace.rawBinary.functionCount}
+        />
       </section>
 
       <section className="surface-grid surface-grid--split">
@@ -150,6 +167,8 @@ export default async function BinaryPage({
           </ol>
         </div>
       </section>
+
+      <MethodologyPanel currentScore={workspace.binary.riskScore} currentLevel={workspace.binary.riskLevel} />
     </main>
   );
 }

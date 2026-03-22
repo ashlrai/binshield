@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  ghidra-worker:
+    build:
+      context: ./ghidra
+      dockerfile: Dockerfile
+    image: binshield/ghidra-worker:latest
+    volumes:
+      - ghidra-input:/work/input
+      - ghidra-output:/work/output
+    environment:
+      - GHIDRA_PROJECT_DIR=/work/projects
+      - JAVA_OPTS=-Xmx2g -Xms512m
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4g
+        reservations:
+          cpus: "0.5"
+          memory: 1g
+    # Default entrypoint expects binary and output paths as arguments.
+    # Override command for ad-hoc usage:
+    #   docker compose run ghidra-worker /work/input/binary.so /work/output/result.json
+    restart: "no"
+
+volumes:
+  ghidra-input:
+    driver: local
+  ghidra-output:
+    driver: local

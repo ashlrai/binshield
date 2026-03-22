@@ -103,6 +103,7 @@ export interface BinaryWorkspace {
   packageName: string;
   selectedVersion: string;
   binary: BinaryEvidenceCard;
+  rawBinary: BinaryAnalysis;
   packageSignals: PackageWorkspace["packageSignals"];
   diffNarrative: DiffNarrative;
   breadcrumbs: Array<{
@@ -558,11 +559,14 @@ export async function getBinaryWorkspace(
     return null;
   }
 
+  const rawBinary = workspace.selected.binaries.find((b) => b.id === binaryId) ?? workspace.selected.binaries[0];
+
   return {
     mode: workspace.mode,
     packageName: workspace.packageName,
     selectedVersion: workspace.selected.version,
     binary,
+    rawBinary,
     packageSignals: workspace.packageSignals,
     diffNarrative: workspace.diffNarrative,
     breadcrumbs: [

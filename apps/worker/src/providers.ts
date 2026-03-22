@@ -442,12 +442,36 @@ export class CompositeClassifierProvider implements ClassifierProvider {
 export function createDefaultDecompilerProvider(): DecompilerProvider {
   return new CompositeDecompilerProvider([
     new GhidraCommandDecompilerProvider(),
+    new HttpDecompilerProvider(),
     new LocalHeuristicDecompilerProvider()
   ]);
 }
 
 export function createDefaultClassifierProvider(): ClassifierProvider {
   return new CompositeClassifierProvider([
+    new HttpClassifierProvider(),
+    new LocalHeuristicClassifierProvider()
+  ]);
+}
+
+/**
+ * Creates providers with Ghidra Docker and Grok AI enabled.
+ * Use this in the daemon where real analysis infrastructure is available.
+ */
+export async function createLiveDecompilerProvider(): Promise<DecompilerProvider> {
+  const { GhidraDockerDecompilerProvider } = await import("./ghidra-provider");
+  return new CompositeDecompilerProvider([
+    new GhidraDockerDecompilerProvider(),
+    new GhidraCommandDecompilerProvider(),
+    new HttpDecompilerProvider(),
+    new LocalHeuristicDecompilerProvider()
+  ]);
+}
+
+export async function createLiveClassifierProvider(): Promise<ClassifierProvider> {
+  const { GrokClassifierProvider } = await import("./grok-classifier");
+  return new CompositeClassifierProvider([
+    new GrokClassifierProvider(),
     new HttpClassifierProvider(),
     new LocalHeuristicClassifierProvider()
   ]);

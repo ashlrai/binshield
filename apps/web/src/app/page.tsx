@@ -5,6 +5,7 @@ import { productCopy } from "@binshield/config";
 import { MetricCard } from "../components/metric-card";
 import { PageHeader } from "../components/page-header";
 import { RiskBadge } from "../components/risk-badge";
+import { ScanForm } from "../components/scan-form";
 import { getDataMode, getFeaturedPackages, getPublicBrowseCounts } from "../lib/site-data";
 
 export default async function HomePage() {
@@ -49,6 +50,8 @@ export default async function HomePage() {
           </div>
         </div>
       </section>
+
+      <ScanForm apiBase={process.env.BINSHIELD_API_BASE_URL ?? process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL ?? ""} />
 
       <section className="metrics-grid">
         <MetricCard label="Compiled code visibility" value="Binary-first" detail="Inspect native package artifacts, not just manifests." />

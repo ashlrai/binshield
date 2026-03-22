@@ -4,8 +4,9 @@ import path from "node:path";
 import { readEnv } from "@binshield/config";
 
 import { AnalysisPipeline } from "./pipeline";
+import { WorkerDaemon } from "./daemon";
 
-async function main() {
+async function runCli() {
   const env = readEnv();
   const pipeline = new AnalysisPipeline();
   const packageRoot =
@@ -37,6 +38,39 @@ async function main() {
       2
     )
   );
+}
+
+async function runDaemon() {
+  const env = readEnv();
+
+  const supabaseUrl = process.env.SUPABASE_URL ?? env.supabaseUrl;
+  const supabaseServiceRoleKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ?? env.supabaseServiceRoleKey;
+
+  if (!supabaseUrl || !supabaseServiceRoleKey) {
+    throw new Error(
+      "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set for daemon mode",
+    );
+  }
+
+  const daemon = new WorkerDaemon({
+    supabaseUrl,
+    supabaseServiceRoleKey,
+    pollIntervalMs: Number(process.env.BINSHIELD_POLL_INTERVAL_MS ?? 5000),
+    maxConcurrent: Number(process.env.BINSHIELD_MAX_CONCURRENT ?? 2),
+  });
+
+  await daemon.start();
+}
+
+async function main() {
+  const mode = process.env.BINSHIELD_WORKER_MODE ?? "cli";
+
+  if (mode === "daemon") {
+    await runDaemon();
+  } else {
+    await runCli();
+  }
 }
 
 void main().catch((error) => {

@@ -335,7 +335,25 @@ export function createApp(services = createServices(readApiEnv())) {
   });
 
   app.post("/billing/webhook", async (c) => {
-    return c.json({ ok: true });
+    const { env, repository } = getServices(c);
+    const stripeSecretKey = env.stripeSecretKey;
+    const stripeWebhookSecret = env.stripeWebhookSecret;
+
+    if (!stripeSecretKey || stripeSecretKey === "sk_test_placeholder" || !stripeWebhookSecret || stripeWebhookSecret === "whsec_placeholder") {
+      return c.json({ ok: true, note: "Stripe not configured, webhook ignored" });
+    }
+
+    try {
+      const { constructWebhookEvent, handleWebhookEvent } = await import("./lib/stripe");
+      const payload = await c.req.text();
+      const signature = c.req.header("stripe-signature") ?? "";
+      const config = { secretKey: stripeSecretKey, webhookSecret: stripeWebhookSecret, publishableKey: "", prices: {} };
+      const event = constructWebhookEvent(config, payload, signature);
+      await handleWebhookEvent(event, repository);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : "Webhook processing failed" }, 400);
+    }
   });
 
   return app;
