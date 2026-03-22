@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { productCopy } from "@binshield/config";
 
+import { HeroViz } from "../components/hero-viz";
 import { MetricCard } from "../components/metric-card";
 import { PageHeader } from "../components/page-header";
 import { RiskBadge } from "../components/risk-badge";
@@ -38,21 +39,7 @@ export default async function HomePage() {
             <span className="hero__meta-note">{counts.packages} packages surfaced, {counts.binaries} binaries tracked</span>
           </div>
         </div>
-        <div className="hero-card">
-          <div className="hero-card__terminal">
-            <span>$</span>
-            <code className="typing-text">binshield scan bcrypt@6.0.0</code>
-          </div>
-          <div className="hero-card__result">
-            <RiskBadge level="medium" score={52} />
-            <p>10 native binaries detected. Crypto operations, filesystem access, and process spawning identified.</p>
-            <div className="hero-card__stats">
-              <span>10 binaries</span>
-              <span>52 risk score</span>
-              <span>AI classified</span>
-            </div>
-          </div>
-        </div>
+        <HeroViz />
       </section>
 
       <ScanForm apiBase={process.env.BINSHIELD_API_BASE_URL ?? process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL ?? ""} />
