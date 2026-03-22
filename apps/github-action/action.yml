@@ -1,5 +1,9 @@
-name: "BinShield"
-description: "Scan package binaries through the BinShield API and enforce merge policy."
+name: "BinShield — Binary Supply Chain Scanner"
+description: "Decompile native package binaries, classify behavior with AI, and block risky compiled code in CI."
+author: "Ashlr AI"
+branding:
+  icon: "shield"
+  color: "green"
 inputs:
   api-key:
     description: "BinShield API key"
@@ -10,7 +14,7 @@ inputs:
   api-base-url:
     description: "BinShield API base URL"
     required: false
-    default: "http://localhost:4000"
+    default: "https://binshieldapi-production.up.railway.app"
   working-directory:
     description: "Repository path to inspect"
     required: false

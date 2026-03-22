@@ -1,30 +1,97 @@
 # BinShield GitHub Action
 
-This action scans npm dependencies by discovering packages from `package-lock.json` or `npm-shrinkwrap.json`, submits them to the BinShield API, and renders results in the workflow summary or PR comments.
+Scan your npm dependencies for risky native binaries. BinShield decompiles compiled `.node` files, classifies behavior with AI, and blocks threats before they reach production.
 
-The report format is intentionally security-native:
+**Every `npm install` ships native binaries that no other scanner checks.** BinShield is the first tool that looks inside the machine code your dependencies actually execute.
 
-- each row includes risk, evidence cues, and a remediation hint
-- failures combine scan errors and threshold violations into one actionable message
-- summary output mirrors the PR comment so teams see the same signal in both places
+## Quick Start
+
+```yaml
+name: Binary Dependency Check
+on: [pull_request]
+
+jobs:
+  binshield:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ashlrai/binshield-action@v1
+        with:
+          fail-on: high
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+## What It Does
+
+1. Discovers native dependencies from your `package-lock.json`
+2. Submits each to the BinShield API for binary analysis
+3. Posts a security report as a PR comment or workflow summary
+4. Fails the check if any package exceeds your risk threshold
+
+## Example PR Comment
+
+```
+## BinShield -- Binary Dependency Scan
+
+3 native binaries found in 2 packages
+
+| Package        | Risk     | Evidence                    |
+|----------------|----------|-----------------------------|
+| bcrypt@6.0.0   | MEDIUM   | 10 binaries, crypto, fs     |
+| sharp@0.34.5   | LOW      | 1 binary, filesystem        |
+
+All binaries passed the HIGH threshold.
+```
 
 ## Inputs
 
-- `api-base-url`: BinShield API URL, default `http://localhost:4000`
-- `api-key`: optional API key for authenticated scan submission
-- `github-token`: optional token used when `comment-mode` enables PR comments
-- `working-directory`: repo path to inspect, default `.`
-- `scan-mode`: `native-only` or `all-dependencies`, default `native-only`
-- `include-dev-dependencies`: include dev dependencies from the lockfile, default `false`
-- `fail-on`: `critical`, `high`, `medium`, `low`, or `never`
-- `comment-mode`: `summary`, `pr-comment`, `both`, or `off`
-- `poll-interval-ms`: polling delay, default `1500`
-- `timeout-ms`: polling timeout, default `120000`
-- `max-targets`: cap on discovered dependency targets, default `50`
+| Input | Description | Default |
+|-------|-------------|---------|
+| `api-base-url` | BinShield API URL | `https://binshieldapi-production.up.railway.app` |
+| `api-key` | API key for authenticated scans | - |
+| `github-token` | Token for PR comments | - |
+| `working-directory` | Repo path to inspect | `.` |
+| `scan-mode` | `native-only` or `all-dependencies` | `native-only` |
+| `fail-on` | Risk threshold: `critical`, `high`, `medium`, `low`, `never` | `high` |
+| `comment-mode` | `summary`, `pr-comment`, `both`, `off` | `summary` |
+| `include-dev-dependencies` | Scan devDependencies too | `false` |
+| `poll-interval-ms` | Polling delay in ms | `1500` |
+| `timeout-ms` | Polling timeout in ms | `120000` |
+| `max-targets` | Max packages to scan | `50` |
 
-## Behavior
+## How Scanning Works
 
-- The action prefers lockfile data over hard-coded package names.
-- Native-package detection is heuristic by default, but `scan-mode: all-dependencies` forces all discovered packages to be scanned.
-- PR comments are only posted when `comment-mode` allows them and a `github-token` is available.
-- If a PR comment is requested without a token, the action still writes the summary and emits a warning rather than failing silently.
+- Discovers native packages from lockfile (heuristic: install scripts, gyp files, known native packages)
+- Queries the BinShield public database for instant cached results
+- For unknown packages, queues real-time analysis (decompilation + AI classification)
+- Polls until results are ready or timeout is reached
+- Renders findings with evidence cues and remediation guidance
+
+## Scan Modes
+
+**`native-only`** (default): Only scan packages identified as native binary candidates. Fast, focused on the highest-risk dependencies.
+
+**`all-dependencies`**: Scan every dependency in the lockfile. Use for compliance audits where full coverage is required.
+
+## Risk Levels
+
+| Level | Score | Meaning |
+|-------|-------|---------|
+| `none` | 0 | No binaries or behaviors detected |
+| `low` | 1-29 | Expected behaviors only |
+| `medium` | 30-59 | Review-worthy behaviors present |
+| `high` | 60-79 | Multiple risk signals, manual review required |
+| `critical` | 80-100 | Severe indicators, block until validated |
+
+## SBOM Export
+
+BinShield generates CycloneDX 1.5 SBOMs with binary-level detail:
+
+```bash
+curl https://binshieldapi-production.up.railway.app/packages/npm/bcrypt/versions/6.0.0/sbom
+```
+
+## Support
+
+- Website: [binshield.dev](https://binshield.dev)
+- Issues: [github.com/ashlrai/binshield/issues](https://github.com/ashlrai/binshield/issues)

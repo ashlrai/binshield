@@ -7,3 +7,5 @@ dist
 coverage
 pnpm-lock.yaml
 *.tsbuildinfo
+.vercel
+.env*.local

@@ -6,6 +6,7 @@ import { assertSameOrg, resolvePrincipal } from "./lib/auth";
 import { readApiEnv } from "./lib/env";
 import { createServices } from "./lib/repository";
 import type { AppServices } from "./lib/repository";
+import { generateCycloneDxSbom } from "./lib/sbom";
 import type { AuthPrincipal, Ecosystem } from "./lib/types";
 
 type AppVariables = {
@@ -109,6 +110,22 @@ export function createApp(services = createServices(readApiEnv())) {
     }
 
     return c.json(analysis);
+  });
+
+  app.get("/packages/:ecosystem/:name/versions/:version/sbom", async (c) => {
+    const ecosystem = c.req.param("ecosystem") as Ecosystem;
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+    const analysis = await getServices(c).repository.getPackage(ecosystem, name, version);
+
+    if (!analysis) {
+      return c.json({ error: "Analysis not found" }, 404);
+    }
+
+    const sbom = generateCycloneDxSbom(analysis);
+    c.header("Content-Type", "application/json");
+    c.header("Content-Disposition", `attachment; filename="sbom-${name}-${version}.cdx.json"`);
+    return c.json(sbom);
   });
 
   app.get("/packages/:ecosystem/:name/diff", async (c) => {
