@@ -49,4 +49,4 @@ inputs:
     default: "50"
 runs:
   using: "node20"
-  main: "dist/index.js"
+  main: "dist/apps/github-action/src/index.js"
