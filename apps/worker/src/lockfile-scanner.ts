@@ -331,63 +331,46 @@ export class LockfileScanner {
     let scannedCount = 0;
 
     for (const dep of nativeDeps) {
-      // Check if we already have an analysis
-      const analyses = await this.request<Array<{ risk_score: number; risk_level: string }>>(
-        `/analyses?select=risk_score,risk_level&order=created_at.desc&limit=1` +
-          `&package_id=in.(select id from packages where ecosystem=eq.npm and name=eq.${encodeURIComponent(dep.name)})`,
-        { method: "GET" },
-      ).catch(() => [] as Array<{ risk_score: number; risk_level: string }>);
-
-      // Try direct package lookup instead if subquery failed
       let riskScore: number | undefined;
       let riskLevel: string | undefined;
       let status: "scanned" | "queued" | "unknown" = "unknown";
 
-      if (analyses.length > 0) {
-        riskScore = analyses[0].risk_score;
-        riskLevel = analyses[0].risk_level;
-        status = "scanned";
-        totalRisk += riskScore;
-        if (riskScore > maxRisk) maxRisk = riskScore;
-        scannedCount++;
-      } else {
-        // Look up package directly
-        const pkgs = await this.request<Array<{ id: string }>>(
-          `/packages?select=id&ecosystem=eq.npm&name=eq.${encodeURIComponent(dep.name)}`,
+      // Two-step lookup: find package, then its latest analysis
+      const pkgs = await this.request<Array<{ id: string }>>(
+        `/packages?select=id&ecosystem=eq.npm&name=eq.${encodeURIComponent(dep.name)}`,
+        { method: "GET" },
+      ).catch(() => [] as Array<{ id: string }>);
+
+      if (pkgs.length > 0) {
+        const analysisRows = await this.request<Array<{ risk_score: number; risk_level: string }>>(
+          `/analyses?select=risk_score,risk_level&package_id=eq.${pkgs[0].id}&order=created_at.desc&limit=1`,
           { method: "GET" },
-        ).catch(() => [] as Array<{ id: string }>);
+        ).catch(() => [] as Array<{ risk_score: number; risk_level: string }>);
 
-        if (pkgs.length > 0) {
-          const analysisRows = await this.request<Array<{ risk_score: number; risk_level: string }>>(
-            `/analyses?select=risk_score,risk_level&package_id=eq.${pkgs[0].id}&order=created_at.desc&limit=1`,
-            { method: "GET" },
-          ).catch(() => [] as Array<{ risk_score: number; risk_level: string }>);
-
-          if (analysisRows.length > 0) {
-            riskScore = analysisRows[0].risk_score;
-            riskLevel = analysisRows[0].risk_level;
-            status = "scanned";
-            totalRisk += riskScore;
-            if (riskScore > maxRisk) maxRisk = riskScore;
-            scannedCount++;
-          }
+        if (analysisRows.length > 0) {
+          riskScore = analysisRows[0].risk_score;
+          riskLevel = analysisRows[0].risk_level;
+          status = "scanned";
+          totalRisk += riskScore;
+          if (riskScore > maxRisk) maxRisk = riskScore;
+          scannedCount++;
         }
+      }
 
-        if (status === "unknown") {
-          // Queue for scanning
-          await this.request<unknown>("/analysis_jobs", {
-            method: "POST",
-            headers: { Prefer: "return=minimal" },
-            body: JSON.stringify({
-              org_id: req.orgId,
-              ecosystem: "npm",
-              package_name: dep.name,
-              version: dep.version,
-              status: "queued",
-            }),
-          }).catch(() => { /* non-fatal */ });
-          status = "queued";
-        }
+      if (status === "unknown") {
+        // Queue for scanning
+        await this.request<unknown>("/analysis_jobs", {
+          method: "POST",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({
+            org_id: req.orgId,
+            ecosystem: "npm",
+            package_name: dep.name,
+            version: dep.version,
+            status: "queued",
+          }),
+        }).catch(() => { /* non-fatal */ });
+        status = "queued";
       }
 
       packageResults.push({
