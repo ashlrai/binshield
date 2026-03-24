@@ -97,3 +97,32 @@ export interface RepositoryInfo {
   ready: boolean;
   description: string;
 }
+
+export interface Advisory {
+  id: string;
+  source: string;
+  sourceId: string;
+  title: string;
+  description?: string;
+  severity?: string;
+  cvssScore?: number;
+  cvssVector?: string;
+  cweIds: string[];
+  publishedAt?: string;
+  updatedAt?: string;
+  references: Array<{ type?: string; url: string }>;
+  affectedPackages: Array<{
+    ecosystem: string;
+    packageName: string;
+    vulnerableRange?: string;
+    patchedVersion?: string;
+  }>;
+}
+
+export interface AdvisorySyncResult {
+  ecosystem: string;
+  packageName: string;
+  totalAdvisories: number;
+  newAdvisories: number;
+  sources: Record<string, number>;
+}

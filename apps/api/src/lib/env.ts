@@ -9,6 +9,8 @@ export interface ApiEnv {
   stripeSecretKey?: string;
   stripeWebhookSecret?: string;
   defaultFailOn: "critical" | "high" | "medium" | "low" | "never";
+  githubToken?: string;
+  nvdApiKey?: string;
 }
 
 export function readApiEnv(source: NodeJS.ProcessEnv = process.env): ApiEnv {
@@ -26,6 +28,8 @@ export function readApiEnv(source: NodeJS.ProcessEnv = process.env): ApiEnv {
     publicAppUrl: source.BINSHIELD_PUBLIC_APP_URL ?? "http://localhost:3000",
     stripeSecretKey: source.STRIPE_SECRET_KEY,
     stripeWebhookSecret: source.STRIPE_WEBHOOK_SECRET,
-    defaultFailOn: (source.BINSHIELD_DEFAULT_FAIL_ON as ApiEnv["defaultFailOn"]) ?? "high"
+    defaultFailOn: (source.BINSHIELD_DEFAULT_FAIL_ON as ApiEnv["defaultFailOn"]) ?? "high",
+    githubToken: source.GITHUB_TOKEN || undefined,
+    nvdApiKey: source.NVD_API_KEY || undefined
   };
 }

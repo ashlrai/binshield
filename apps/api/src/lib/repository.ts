@@ -4,6 +4,7 @@ import { getSampleAnalysis, sampleAnalyses, sampleDiff } from "@binshield/analys
 
 import { hashApiKey } from "./auth";
 import type {
+  Advisory,
   BehaviorSummary,
   ApiKeySummary,
   ApiListResponse,
@@ -185,6 +186,18 @@ interface BaseRepository {
   validateApiKey(rawKey: string): Promise<AuthPrincipal | null>;
   getOrganization(orgId: string): Promise<OrganizationSummary | null>;
   createBillingCheckout(orgId: string, plan: string): Promise<CheckoutSession>;
+  getPackageAdvisories(ecosystem: Ecosystem, packageName: string): Promise<Advisory[]>;
+  getRecentAdvisories(limit?: number): Promise<Advisory[]>;
+
+  // Usage tracking
+  getUsageRecord(orgId: string): Promise<{ scanCount: number; repoCount: number; periodStart: string; periodEnd: string } | null>;
+  incrementScanCount(orgId: string): Promise<void>;
+  incrementRepoCount(orgId: string): Promise<void>;
+
+  // Invitations
+  createInvitation(orgId: string, email: string, role: string, invitedBy?: string): Promise<{ id: string; token: string; email: string; expiresAt: string }>;
+  listInvitations(orgId: string): Promise<Array<{ id: string; email: string; role: string; createdAt: string; expiresAt: string; accepted: boolean }>>;
+  acceptInvitation(token: string, userId: string): Promise<{ orgId: string; role: string } | null>;
 }
 
 function now() {
@@ -193,6 +206,36 @@ function now() {
 
 function randomId(prefix: string) {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
+}
+
+function getCurrentPeriod(): { periodStart: string; periodEnd: string } {
+  const now_ = new Date();
+  const periodStart = new Date(Date.UTC(now_.getUTCFullYear(), now_.getUTCMonth(), 1)).toISOString();
+  const periodEnd = new Date(Date.UTC(now_.getUTCFullYear(), now_.getUTCMonth() + 1, 1)).toISOString();
+  return { periodStart, periodEnd };
+}
+
+interface UsageRecordRow {
+  id: string;
+  org_id: string;
+  period_start: string;
+  period_end: string;
+  scan_count: number;
+  repo_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface OrgInvitationRow {
+  id: string;
+  org_id: string;
+  email: string;
+  role: string;
+  token: string;
+  invited_by?: string | null;
+  accepted_at?: string | null;
+  expires_at: string;
+  created_at: string;
 }
 
 function makeSearchResult(analysis: PackageAnalysis): SearchResult {
@@ -225,6 +268,8 @@ class LocalRepository implements BaseRepository {
   private watchlistPackages = new Map<string, WatchlistPackageRow[]>();
   private subscriptions = new Map<string, SubscriptionRow>();
   private jobs = new Map<string, AnalysisJobRow>();
+  private usageRecords = new Map<string, UsageRecordRow>();
+  private invitations = new Map<string, OrgInvitationRow>();
 
   constructor(private readonly env: ApiEnv) {
     const seededOrgId = "org_demo";
@@ -820,6 +865,143 @@ class LocalRepository implements BaseRepository {
       status: "pending" as const
     };
   }
+
+  async getPackageAdvisories(_ecosystem: Ecosystem, _packageName: string): Promise<Advisory[]> {
+    return [];
+  }
+
+  async getRecentAdvisories(_limit?: number): Promise<Advisory[]> {
+    return [];
+  }
+
+  // Usage tracking
+
+  private getOrCreateUsageRecord(orgId: string): UsageRecordRow {
+    const { periodStart, periodEnd } = getCurrentPeriod();
+    const key = `${orgId}:${periodStart}`;
+    let record = this.usageRecords.get(key);
+    if (!record) {
+      record = {
+        id: randomId("usage"),
+        org_id: orgId,
+        period_start: periodStart,
+        period_end: periodEnd,
+        scan_count: 0,
+        repo_count: 0,
+        created_at: now(),
+        updated_at: now()
+      };
+      this.usageRecords.set(key, record);
+    }
+    return record;
+  }
+
+  async getUsageRecord(orgId: string) {
+    const record = this.getOrCreateUsageRecord(orgId);
+    return {
+      scanCount: record.scan_count,
+      repoCount: record.repo_count,
+      periodStart: record.period_start,
+      periodEnd: record.period_end
+    };
+  }
+
+  async incrementScanCount(orgId: string) {
+    const record = this.getOrCreateUsageRecord(orgId);
+    record.scan_count += 1;
+    record.updated_at = now();
+  }
+
+  async incrementRepoCount(orgId: string) {
+    const record = this.getOrCreateUsageRecord(orgId);
+    record.repo_count += 1;
+    record.updated_at = now();
+  }
+
+  // Invitations
+
+  async createInvitation(orgId: string, email: string, role: string, invitedBy?: string) {
+    const token = crypto.randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const row: OrgInvitationRow = {
+      id: randomId("inv"),
+      org_id: orgId,
+      email,
+      role,
+      token,
+      invited_by: invitedBy ?? null,
+      accepted_at: null,
+      expires_at: expiresAt,
+      created_at: now()
+    };
+    this.invitations.set(token, row);
+
+    return {
+      id: row.id,
+      token: row.token,
+      email: row.email,
+      expiresAt: row.expires_at
+    };
+  }
+
+  async listInvitations(orgId: string) {
+    return Array.from(this.invitations.values())
+      .filter((inv) => inv.org_id === orgId)
+      .map((inv) => ({
+        id: inv.id,
+        email: inv.email,
+        role: inv.role,
+        createdAt: inv.created_at,
+        expiresAt: inv.expires_at,
+        accepted: inv.accepted_at !== null
+      }));
+  }
+
+  async acceptInvitation(token: string, userId: string) {
+    const inv = this.invitations.get(token);
+    if (!inv) {
+      return null;
+    }
+
+    if (inv.accepted_at) {
+      return null;
+    }
+
+    if (new Date(inv.expires_at) < new Date()) {
+      return null;
+    }
+
+    inv.accepted_at = now();
+    return { orgId: inv.org_id, role: inv.role };
+  }
+}
+
+interface AdvisoryRow {
+  id: string;
+  source: string;
+  source_id: string;
+  title: string;
+  description?: string | null;
+  severity?: string | null;
+  cvss_score?: number | null;
+  cvss_vector?: string | null;
+  cwe_ids: string[];
+  published_at?: string | null;
+  updated_at?: string | null;
+  withdrawn_at?: string | null;
+  references: Array<{ type?: string; url: string }>;
+  raw_data?: unknown;
+  created_at: string;
+}
+
+interface PackageAdvisoryRow {
+  id: string;
+  advisory_id: string;
+  ecosystem: string;
+  package_name: string;
+  vulnerable_range?: string | null;
+  patched_version?: string | null;
+  created_at: string;
 }
 
 class SupabaseRepository implements BaseRepository {
@@ -1237,6 +1419,220 @@ class SupabaseRepository implements BaseRepository {
       plan,
       status: "pending" as const
     };
+  }
+
+  async getPackageAdvisories(ecosystem: Ecosystem, packageName: string): Promise<Advisory[]> {
+    const packageAdvisoryRows = await this.select<PackageAdvisoryRow>(
+      "package_advisories",
+      `select=*&ecosystem=eq.${encodeURIComponent(ecosystem)}&package_name=eq.${encodeURIComponent(packageName)}`
+    );
+    if (packageAdvisoryRows.length === 0) {
+      return [];
+    }
+    const advisoryIds = [...new Set(packageAdvisoryRows.map((r) => r.advisory_id))];
+    const advisoryRows = await this.select<AdvisoryRow>(
+      "advisories",
+      `select=*&id=in.(${advisoryIds.join(",")})&withdrawn_at=is.null&order=published_at.desc`
+    );
+    return advisoryRows.map((row) => this.mapAdvisory(row, packageAdvisoryRows.filter((pa) => pa.advisory_id === row.id)));
+  }
+
+  async getRecentAdvisories(limit = 50): Promise<Advisory[]> {
+    const advisoryRows = await this.select<AdvisoryRow>(
+      "advisories",
+      `select=*&withdrawn_at=is.null&order=published_at.desc&limit=${limit}`
+    );
+    if (advisoryRows.length === 0) {
+      return [];
+    }
+    const advisoryIds = advisoryRows.map((r) => r.id);
+    const packageAdvisoryRows = await this.select<PackageAdvisoryRow>(
+      "package_advisories",
+      `select=*&advisory_id=in.(${advisoryIds.join(",")})`
+    );
+    return advisoryRows.map((row) => this.mapAdvisory(row, packageAdvisoryRows.filter((pa) => pa.advisory_id === row.id)));
+  }
+
+  private mapAdvisory(row: AdvisoryRow, packageAdvisoryRows: PackageAdvisoryRow[]): Advisory {
+    return {
+      id: row.id,
+      source: row.source,
+      sourceId: row.source_id,
+      title: row.title,
+      description: row.description ?? undefined,
+      severity: row.severity ?? undefined,
+      cvssScore: row.cvss_score ?? undefined,
+      cvssVector: row.cvss_vector ?? undefined,
+      cweIds: row.cwe_ids ?? [],
+      publishedAt: row.published_at ?? undefined,
+      updatedAt: row.updated_at ?? undefined,
+      references: row.references ?? [],
+      affectedPackages: packageAdvisoryRows.map((pa) => ({
+        ecosystem: pa.ecosystem,
+        packageName: pa.package_name,
+        vulnerableRange: pa.vulnerable_range ?? undefined,
+        patchedVersion: pa.patched_version ?? undefined
+      }))
+    };
+  }
+
+  // Usage tracking
+
+  async getUsageRecord(orgId: string) {
+    const { periodStart } = getCurrentPeriod();
+    const rows = await this.select<UsageRecordRow>(
+      "usage_records",
+      `select=*&org_id=eq.${orgId}&period_start=eq.${encodeURIComponent(periodStart)}`
+    );
+    const row = rows[0];
+    if (!row) {
+      return null;
+    }
+    return {
+      scanCount: row.scan_count,
+      repoCount: row.repo_count,
+      periodStart: row.period_start,
+      periodEnd: row.period_end
+    };
+  }
+
+  async incrementScanCount(orgId: string) {
+    const { periodStart, periodEnd } = getCurrentPeriod();
+    // Upsert the usage record, then read-and-increment the counter
+    await this.request<unknown>(
+      `/usage_records?on_conflict=org_id,period_start`,
+      {
+        method: "POST",
+        headers: {
+          Prefer: "resolution=merge-duplicates,return=minimal"
+        },
+        body: JSON.stringify({
+          org_id: orgId,
+          period_start: periodStart,
+          period_end: periodEnd,
+          scan_count: 1,
+          updated_at: now()
+        })
+      }
+    );
+    const rows = await this.select<UsageRecordRow>(
+      "usage_records",
+      `select=*&org_id=eq.${orgId}&period_start=eq.${encodeURIComponent(periodStart)}`
+    );
+    const row = rows[0];
+    if (row) {
+      await this.request<unknown>(
+        `/usage_records?org_id=eq.${orgId}&period_start=eq.${encodeURIComponent(periodStart)}`,
+        {
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({
+            scan_count: row.scan_count + 1,
+            updated_at: now()
+          })
+        }
+      );
+    }
+  }
+
+  async incrementRepoCount(orgId: string) {
+    const { periodStart, periodEnd } = getCurrentPeriod();
+    await this.request<unknown>(
+      `/usage_records?on_conflict=org_id,period_start`,
+      {
+        method: "POST",
+        headers: {
+          Prefer: "resolution=merge-duplicates,return=minimal"
+        },
+        body: JSON.stringify({
+          org_id: orgId,
+          period_start: periodStart,
+          period_end: periodEnd,
+          repo_count: 1,
+          updated_at: now()
+        })
+      }
+    );
+    const rows = await this.select<UsageRecordRow>(
+      "usage_records",
+      `select=*&org_id=eq.${orgId}&period_start=eq.${encodeURIComponent(periodStart)}`
+    );
+    const row = rows[0];
+    if (row) {
+      await this.request<unknown>(
+        `/usage_records?org_id=eq.${orgId}&period_start=eq.${encodeURIComponent(periodStart)}`,
+        {
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({
+            repo_count: row.repo_count + 1,
+            updated_at: now()
+          })
+        }
+      );
+    }
+  }
+
+  // Invitations
+
+  async createInvitation(orgId: string, email: string, role: string, invitedBy?: string) {
+    const token = crypto.randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const [row] = await this.insert<OrgInvitationRow>("org_invitations", {
+      org_id: orgId,
+      email,
+      role,
+      token,
+      invited_by: invitedBy ?? null,
+      expires_at: expiresAt
+    });
+    return {
+      id: row.id,
+      token: row.token,
+      email: row.email,
+      expiresAt: row.expires_at
+    };
+  }
+
+  async listInvitations(orgId: string) {
+    const rows = await this.select<OrgInvitationRow>(
+      "org_invitations",
+      `select=*&org_id=eq.${orgId}&order=created_at.desc`
+    );
+    return rows.map((inv) => ({
+      id: inv.id,
+      email: inv.email,
+      role: inv.role,
+      createdAt: inv.created_at,
+      expiresAt: inv.expires_at,
+      accepted: inv.accepted_at !== null
+    }));
+  }
+
+  async acceptInvitation(token: string, _userId: string) {
+    const rows = await this.select<OrgInvitationRow>(
+      "org_invitations",
+      `select=*&token=eq.${token}&accepted_at=is.null`
+    );
+    const inv = rows[0];
+    if (!inv) {
+      return null;
+    }
+
+    if (new Date(inv.expires_at) < new Date()) {
+      return null;
+    }
+
+    await this.request<unknown>(
+      `/org_invitations?token=eq.${token}`,
+      {
+        method: "PATCH",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify({ accepted_at: now() })
+      }
+    );
+
+    return { orgId: inv.org_id, role: inv.role };
   }
 }
 

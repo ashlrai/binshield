@@ -2,17 +2,21 @@
  * Watchlist alert trigger.
  *
  * After an analysis completes, checks if any watchlist entries match the
- * analyzed package and sends email alerts to the watchlist owners.
+ * analyzed package and sends alerts via the configured channel (email,
+ * Slack, or generic webhook).
  */
 
-import type { PackageAnalysis, Ecosystem, AlertDeliveryStatus } from "@binshield/analysis-types";
+import crypto from "node:crypto";
+
+import type { PackageAnalysis, AlertDeliveryStatus, AlertChannel } from "@binshield/analysis-types";
 import type { SupabaseWorkerConfig } from "./supabase-store";
 import { sendEmail } from "./email";
 import { buildAlertEmail } from "./templates/alert-email";
 
 interface WatchlistMatch {
   watchlistId: string;
-  email: string;
+  channel: AlertChannel;
+  destination: string;
   orgId: string;
 }
 
@@ -24,13 +28,14 @@ interface WatchlistPackageRow {
   watchlists: {
     id: string;
     org_id: string;
-    email: string;
+    channel: AlertChannel;
+    destination: string;
   };
 }
 
 /**
  * Query Supabase for watchlist entries matching the given package, then send
- * email alerts and record delivery status.
+ * alerts via the appropriate channel and record delivery status.
  *
  * This function is intentionally fire-and-forget safe — all errors are caught
  * and logged rather than thrown, so a failed alert never blocks job completion.
@@ -42,10 +47,6 @@ export async function checkAndSendAlerts(
   version: string,
   analysis: PackageAnalysis,
 ): Promise<void> {
-  if (!config.sendgridApiKey) {
-    return;
-  }
-
   const baseUrl = config.supabaseUrl.replace(/\/$/, "");
 
   const headers: Record<string, string> = {
@@ -55,11 +56,11 @@ export async function checkAndSendAlerts(
   };
 
   try {
-    // Query watchlist_packages with a join to watchlists for the destination email
+    // Query watchlist_packages with a join to watchlists for channel + destination
     const queryPath =
       `/rest/v1/watchlist_packages?package_name=eq.${encodeURIComponent(packageName)}` +
       `&ecosystem=eq.${encodeURIComponent(ecosystem)}` +
-      `&select=id,watchlist_id,package_name,ecosystem,watchlists(id,org_id,email)`;
+      `&select=id,watchlist_id,package_name,ecosystem,watchlists(id,org_id,channel,destination)`;
 
     const response = await fetch(`${baseUrl}${queryPath}`, {
       method: "GET",
@@ -78,14 +79,15 @@ export async function checkAndSendAlerts(
       return;
     }
 
-    // Deduplicate by email so we don't send duplicate alerts
+    // Deduplicate by destination so we don't send duplicate alerts
     const matchMap = new Map<string, WatchlistMatch>();
     for (const row of rows) {
-      const email = row.watchlists?.email;
-      if (email && !matchMap.has(email)) {
-        matchMap.set(email, {
+      const destination = row.watchlists?.destination;
+      if (destination && !matchMap.has(destination)) {
+        matchMap.set(destination, {
           watchlistId: row.watchlist_id,
-          email,
+          channel: row.watchlists.channel,
+          destination,
           orgId: row.watchlists.org_id,
         });
       }
@@ -100,39 +102,39 @@ export async function checkAndSendAlerts(
     // Send alerts in parallel
     const results = await Promise.allSettled(
       matches.map(async (match) => {
-        const subject = `[BinShield] ${analysis.riskLevel.toUpperCase()} risk: ${packageName}@${version}`;
-        const html = buildAlertEmail(
-          packageName,
-          version,
-          analysis.riskLevel,
-          analysis.riskScore,
-          analysis.binaryCount,
-          analysis.summary,
-        );
+        let sent = false;
 
-        const sent = await sendEmail(
-          { sendgridApiKey: config.sendgridApiKey, fromEmail: config.fromEmail },
-          match.email,
-          subject,
-          html,
-        );
+        switch (match.channel) {
+          case "email":
+            sent = await deliverEmailAlert(config, match.destination, packageName, version, analysis);
+            break;
+          case "slack":
+            sent = await deliverSlackAlert(match.destination, packageName, version, analysis);
+            break;
+          case "webhook":
+            sent = await deliverWebhookAlert(match.destination, packageName, ecosystem, version, analysis);
+            break;
+          default:
+            console.error(`[BinShield Alerts] Unknown channel: ${match.channel}`);
+        }
 
         const deliveryStatus: AlertDeliveryStatus = sent ? "sent" : "failed";
 
-        // Record the alert in the email_alerts table
+        // Record the alert in the email_alerts table (kept for backwards compatibility)
         await recordAlert(baseUrl, headers, {
           orgId: match.orgId,
           watchlistId: match.watchlistId,
           packageName,
           ecosystem,
           version,
-          email: match.email,
+          channel: match.channel,
+          destination: match.destination,
           deliveryStatus,
           riskLevel: analysis.riskLevel,
           riskScore: analysis.riskScore,
         });
 
-        return { email: match.email, sent };
+        return { destination: match.destination, channel: match.channel, sent };
       }),
     );
 
@@ -149,7 +151,175 @@ export async function checkAndSendAlerts(
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Channel-specific delivery
+// ---------------------------------------------------------------------------
+
+async function deliverEmailAlert(
+  config: { sendgridApiKey: string; fromEmail: string },
+  email: string,
+  packageName: string,
+  version: string,
+  analysis: PackageAnalysis,
+): Promise<boolean> {
+  if (!config.sendgridApiKey) {
+    console.warn("[BinShield Alerts] SENDGRID_API_KEY not configured, skipping email alert");
+    return false;
+  }
+
+  const subject = `[BinShield] ${analysis.riskLevel.toUpperCase()} risk: ${packageName}@${version}`;
+  const html = buildAlertEmail(
+    packageName,
+    version,
+    analysis.riskLevel,
+    analysis.riskScore,
+    analysis.binaryCount,
+    analysis.summary,
+  );
+
+  return sendEmail(
+    { sendgridApiKey: config.sendgridApiKey, fromEmail: config.fromEmail },
+    email,
+    subject,
+    html,
+  );
+}
+
+/**
+ * Send a Slack notification via incoming webhook URL.
+ */
+async function deliverSlackAlert(
+  webhookUrl: string,
+  packageName: string,
+  version: string,
+  analysis: PackageAnalysis,
+): Promise<boolean> {
+  try {
+    const riskEmoji = analysis.riskLevel === "critical" || analysis.riskLevel === "high" ? ":rotating_light:" : ":warning:";
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://binshield.dev";
+    const packageUrl = `${appUrl}/packages/${encodeURIComponent(packageName)}?version=${encodeURIComponent(version)}`;
+
+    const payload = {
+      text: `${riskEmoji} BinShield Alert: ${packageName}@${version} — ${analysis.riskLevel.toUpperCase()} risk (${analysis.riskScore}/100)`,
+      blocks: [
+        {
+          type: "header",
+          text: {
+            type: "plain_text",
+            text: `BinShield Alert: ${packageName}@${version}`,
+            emoji: true,
+          },
+        },
+        {
+          type: "section",
+          fields: [
+            { type: "mrkdwn", text: `*Risk Level:*\n${analysis.riskLevel.toUpperCase()}` },
+            { type: "mrkdwn", text: `*Risk Score:*\n${analysis.riskScore}/100` },
+            { type: "mrkdwn", text: `*Binaries:*\n${analysis.binaryCount}` },
+          ],
+        },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: analysis.summary,
+          },
+        },
+        {
+          type: "actions",
+          elements: [
+            {
+              type: "button",
+              text: { type: "plain_text", text: "View Analysis" },
+              url: packageUrl,
+            },
+          ],
+        },
+      ],
+    };
+
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      console.error(`[BinShield Alerts] Slack webhook failed (${response.status}): ${text}`);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error(
+      `[BinShield Alerts] Slack delivery error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Send a generic webhook notification with HMAC-SHA256 signature.
+ */
+async function deliverWebhookAlert(
+  webhookUrl: string,
+  packageName: string,
+  ecosystem: string,
+  version: string,
+  analysis: PackageAnalysis,
+): Promise<boolean> {
+  try {
+    const payload = JSON.stringify({
+      event: "analysis.complete",
+      timestamp: new Date().toISOString(),
+      package: {
+        ecosystem,
+        name: packageName,
+        version,
+      },
+      risk: {
+        level: analysis.riskLevel,
+        score: analysis.riskScore,
+      },
+      binaryCount: analysis.binaryCount,
+      summary: analysis.summary,
+    });
+
+    // Sign the payload with HMAC-SHA256 using the webhook URL as the key.
+    // In production, a per-watchlist secret would be stored; for now we derive
+    // a deterministic signature so consumers can verify authenticity.
+    const signature = crypto
+      .createHmac("sha256", webhookUrl)
+      .update(payload)
+      .digest("hex");
+
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-BinShield-Signature": signature,
+        "X-BinShield-Event": "analysis.complete",
+      },
+      body: payload,
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      console.error(`[BinShield Alerts] Webhook delivery failed (${response.status}): ${text}`);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error(
+      `[BinShield Alerts] Webhook delivery error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Alert recording
 // ---------------------------------------------------------------------------
 
 interface AlertInsert {
@@ -158,7 +328,8 @@ interface AlertInsert {
   packageName: string;
   ecosystem: string;
   version: string;
-  email: string;
+  channel: AlertChannel;
+  destination: string;
   deliveryStatus: AlertDeliveryStatus;
   riskLevel: string;
   riskScore: number;
@@ -179,7 +350,8 @@ async function recordAlert(
         package_name: alert.packageName,
         ecosystem: alert.ecosystem,
         version: alert.version,
-        email: alert.email,
+        channel: alert.channel,
+        destination: alert.destination,
         delivery_status: alert.deliveryStatus,
         risk_level: alert.riskLevel,
         risk_score: alert.riskScore,
