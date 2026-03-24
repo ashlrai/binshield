@@ -10,6 +10,7 @@
  */
 
 import type { SupabaseWorkerConfig } from "./supabase-store";
+import { isNativePackage } from "./native-indicators";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,50 +50,6 @@ export interface LockfilePackageResult {
   riskScore?: number;
   riskLevel?: string;
   status: "scanned" | "queued" | "unknown";
-}
-
-// ---------------------------------------------------------------------------
-// Native detection patterns
-// ---------------------------------------------------------------------------
-
-/** Known packages that contain native binaries. */
-const KNOWN_NATIVE_PACKAGES = new Set([
-  "bcrypt", "argon2", "sodium-native", "keytar", "sharp", "canvas",
-  "@napi-rs/image", "better-sqlite3", "sqlite3", "pg-native", "lmdb",
-  "leveldown", "rocksdb", "duckdb", "libsql", "esbuild", "@swc/core",
-  "lightningcss", "@biomejs/biome", "node-sass", "fsevents", "turbo",
-  "zeromq", "grpc", "ssh2", "node-pty", "serialport", "usb", "node-hid",
-  "ffi-napi", "ref-napi", "cpu-features", "systeminformation",
-  "@tensorflow/tfjs-node", "onnxruntime-node", "re2", "oniguruma",
-  "msgpackr", "snappy", "lz4", "node-zstd", "zlib-sync",
-  "ffmpeg-static", "@discordjs/opus", "node-opus", "speaker",
-  "node-canvas", "gl", "headless-gl", "node-addon-api",
-  "cld", "node-webrtc", "unix-dgram", "bufferutil", "utf-8-validate",
-]);
-
-/** Prefixes that indicate platform-specific binary distribution packages. */
-const PLATFORM_PREFIXES = [
-  "@esbuild/", "@swc/core-", "@rollup/rollup-", "@biomejs/cli-",
-  "lightningcss-", "@napi-rs/", "turbo-", "@parcel/watcher-",
-  "@next/swc-", "@tailwindcss/oxide-",
-];
-
-/** Dependency names that indicate native addon compilation. */
-const NATIVE_BUILD_DEPS = new Set([
-  "node-gyp", "node-pre-gyp", "prebuild-install", "prebuild",
-  "node-gyp-build", "@mapbox/node-pre-gyp", "cmake-js",
-  "napi-rs", "node-addon-api", "nan",
-]);
-
-function isNativePackage(name: string, dependencies?: Record<string, string>): boolean {
-  if (KNOWN_NATIVE_PACKAGES.has(name)) return true;
-  if (PLATFORM_PREFIXES.some((prefix) => name.startsWith(prefix))) return true;
-  if (dependencies) {
-    for (const dep of Object.keys(dependencies)) {
-      if (NATIVE_BUILD_DEPS.has(dep)) return true;
-    }
-  }
-  return false;
 }
 
 // ---------------------------------------------------------------------------

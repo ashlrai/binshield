@@ -10,6 +10,7 @@
  */
 
 import type { SupabaseWorkerConfig } from "./supabase-store";
+import { hasNativeIndicators as checkNativeIndicators } from "./native-indicators";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,63 +69,12 @@ interface FeedEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Native detection (same logic as lockfile scanner but on raw package.json)
-// ---------------------------------------------------------------------------
-
-const NATIVE_BUILD_DEPS = new Set([
-  "node-gyp", "node-pre-gyp", "prebuild-install", "prebuild",
-  "node-gyp-build", "@mapbox/node-pre-gyp", "cmake-js",
-  "napi-rs", "node-addon-api", "nan",
-]);
-
-const PLATFORM_SUFFIXES = [
-  "-linux-x64-gnu", "-linux-arm64-gnu", "-darwin-arm64", "-darwin-x64",
-  "-win32-x64-msvc", "-linux-x64-musl", "-linux-arm64-musl",
-  "-freebsd-x64", "-android-arm64",
-];
-
-function hasNativeIndicators(doc: NpmVersionDoc): boolean {
-  const name = doc.name;
-
-  // Check name patterns
-  if (name.startsWith("@napi-rs/")) return true;
-  if (name.startsWith("@esbuild/")) return true;
-  if (name.startsWith("@swc/core-")) return true;
-  if (name.startsWith("@rollup/rollup-")) return true;
-  if (name.startsWith("@biomejs/cli-")) return true;
-  if (name.startsWith("lightningcss-")) return true;
-  if (PLATFORM_SUFFIXES.some((s) => name.endsWith(s))) return true;
-
-  // Check gypfile field
-  if (doc.gypfile) return true;
-
-  // Check for binding.gyp in files
-  if (doc.files?.some((f) => f === "binding.gyp" || f.endsWith("/binding.gyp"))) return true;
-
-  // Check for binary field (used by node-pre-gyp)
-  if (doc.binary) return true;
-
-  // Check dependencies for native build tools
-  const allDeps = {
-    ...doc.dependencies,
-    ...doc.devDependencies,
-    ...doc.optionalDependencies,
-  };
-  for (const dep of Object.keys(allDeps)) {
-    if (NATIVE_BUILD_DEPS.has(dep)) return true;
-  }
-
-  // Check install/postinstall scripts for compilation references
-  const scripts = doc.scripts ?? {};
-  const installScript = scripts.install ?? scripts.postinstall ?? "";
-  if (/node-gyp|prebuild|cmake-js|napi/i.test(installScript)) return true;
-
-  return false;
-}
-
-// ---------------------------------------------------------------------------
 // Feed Follower
 // ---------------------------------------------------------------------------
+
+function hasNativeIndicators(doc: NpmVersionDoc): boolean {
+  return checkNativeIndicators(doc);
+}
 
 function log(message: string) {
   console.log(`[BinShield Feed] ${message}`);

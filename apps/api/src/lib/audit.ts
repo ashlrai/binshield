@@ -1,7 +1,7 @@
 /**
  * Lightweight audit logger for BinShield.
  *
- * Records actions to the `audit_logs` table in Supabase. Fire-and-forget safe —
+ * Records actions to the `audit_log` table in Supabase. Fire-and-forget safe —
  * all errors are caught and logged rather than thrown, so a failed audit entry
  * never blocks request processing.
  *
@@ -25,7 +25,7 @@ export async function logAudit(
   const baseUrl = config.supabaseUrl.replace(/\/$/, "");
 
   try {
-    const response = await fetch(`${baseUrl}/rest/v1/audit_logs`, {
+    const response = await fetch(`${baseUrl}/rest/v1/audit_log`, {
       method: "POST",
       headers: {
         apikey: config.supabaseServiceRoleKey,

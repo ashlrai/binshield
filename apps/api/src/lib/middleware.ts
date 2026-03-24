@@ -10,20 +10,9 @@ import type { MiddlewareHandler } from "hono";
 import type { PlanName } from "@binshield/analysis-types";
 import { entitlementForPlan } from "@binshield/analysis-types";
 
-import { checkEntitlement, checkScanQuota, checkRepoQuota } from "./entitlements";
+import { checkEntitlement, checkScanQuota, checkRepoQuota, PLAN_RANK } from "./entitlements";
 import type { AuthPrincipal } from "./types";
 import type { BinShieldRepository } from "./repository";
-
-// ---------------------------------------------------------------------------
-// Plan rank for comparisons
-// ---------------------------------------------------------------------------
-
-const PLAN_RANK: Record<PlanName, number> = {
-  free: 0,
-  pro: 1,
-  team: 2,
-  enterprise: 3,
-};
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -13,6 +13,27 @@ import type { SupabaseWorkerConfig } from "./supabase-store";
 import { sendEmail } from "./email";
 import { buildAlertEmail } from "./templates/alert-email";
 
+/**
+ * Validate that a URL is safe for outbound requests (no SSRF).
+ * Allows only https:// URLs to non-private hostnames.
+ */
+function isValidWebhookUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    const host = parsed.hostname.toLowerCase();
+    // Block private/reserved IPs and localhost
+    if (host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0") return false;
+    if (host.startsWith("10.") || host.startsWith("192.168.")) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return false;
+    if (host === "169.254.169.254" || host.startsWith("169.254.")) return false;
+    if (host.endsWith(".internal") || host.endsWith(".local")) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 interface WatchlistMatch {
   watchlistId: string;
   channel: AlertChannel;
@@ -193,6 +214,10 @@ async function deliverSlackAlert(
   version: string,
   analysis: PackageAnalysis,
 ): Promise<boolean> {
+  if (!isValidWebhookUrl(webhookUrl)) {
+    console.error(`[BinShield Alerts] Blocked Slack webhook to unsafe URL: ${webhookUrl}`);
+    return false;
+  }
   try {
     const riskEmoji = analysis.riskLevel === "critical" || analysis.riskLevel === "high" ? ":rotating_light:" : ":warning:";
     const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://binshield.dev";
@@ -268,6 +293,10 @@ async function deliverWebhookAlert(
   version: string,
   analysis: PackageAnalysis,
 ): Promise<boolean> {
+  if (!isValidWebhookUrl(webhookUrl)) {
+    console.error(`[BinShield Alerts] Blocked webhook to unsafe URL: ${webhookUrl}`);
+    return false;
+  }
   try {
     const payload = JSON.stringify({
       event: "analysis.complete",

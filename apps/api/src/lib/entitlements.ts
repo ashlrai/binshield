@@ -22,7 +22,7 @@ const FEATURE_MIN_PLAN: Record<string, PlanName> = {
 };
 
 /** Ordered plan tiers from lowest to highest. */
-const PLAN_RANK: Record<PlanName, number> = {
+export const PLAN_RANK: Record<PlanName, number> = {
   free: 0,
   pro: 1,
   team: 2,
