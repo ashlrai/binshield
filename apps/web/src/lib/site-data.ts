@@ -1004,6 +1004,282 @@ export async function getSettingsSnapshot(orgId?: string, userEmail?: string): P
   };
 }
 
+/* ------------------------------------------------------------------ */
+/*  Advisory, Feed, Lockfile-scan, and Compliance-report interfaces    */
+/* ------------------------------------------------------------------ */
+
+export interface Advisory {
+  id: string;
+  title: string;
+  severity: "critical" | "high" | "medium" | "low" | "info";
+  source: "OSV" | "NVD" | "GitHub";
+  sourceId: string;
+  description: string;
+  publishedAt: string;
+  affectedPackages: string[];
+  url: string;
+}
+
+export interface FeedEvent {
+  id: string;
+  eventType: "new_package" | "new_version" | "risk_change";
+  packageName: string;
+  version: string;
+  riskLevel: "none" | "low" | "medium" | "high" | "critical";
+  riskScore: number;
+  timestamp: string;
+}
+
+export interface FeedStats {
+  packagesProcessed: number;
+  nativePackagesFound: number;
+  latestEvents: number;
+}
+
+export interface LockfileScan {
+  id: string;
+  filename: string;
+  format: "npm" | "yarn" | "pnpm";
+  totalDeps: number;
+  nativeDeps: number;
+  riskScore: number;
+  riskLevel: "none" | "low" | "medium" | "high" | "critical";
+  status: "complete" | "analyzing" | "queued";
+  scannedAt: string;
+}
+
+export interface ComplianceReport {
+  id: string;
+  reportType: "SOC 2" | "ISO 27001" | "EU CRA" | "Custom";
+  title: string;
+  status: "complete" | "generating" | "queued";
+  generatedAt: string;
+  downloadUrl: string;
+}
+
+export async function getRecentAdvisories(): Promise<Advisory[]> {
+  const response = await fetchJson<{ items: Advisory[] }>("/advisories/recent?limit=50");
+  if (response?.items?.length) {
+    return response.items;
+  }
+
+  // Demo data
+  return [
+    {
+      id: "adv-1",
+      title: "Heap buffer overflow in libwebp",
+      severity: "critical",
+      source: "NVD",
+      sourceId: "CVE-2023-4863",
+      description: "A heap buffer overflow in libwebp allows remote attackers to perform an out-of-bounds memory write via a crafted HTML page, affecting any application that processes WebP images including sharp and other image-processing npm packages.",
+      publishedAt: new Date(Date.now() - 1000 * 60 * 60 * 6).toISOString(),
+      affectedPackages: ["sharp", "libwebp"],
+      url: "https://nvd.nist.gov/vuln/detail/CVE-2023-4863"
+    },
+    {
+      id: "adv-2",
+      title: "Prototype pollution in node-forge",
+      severity: "high",
+      source: "GitHub",
+      sourceId: "GHSA-5rrq-pxf6-6jx5",
+      description: "A prototype pollution vulnerability in node-forge could allow an attacker to inject properties into object prototypes, potentially leading to denial of service or remote code execution in applications using affected versions.",
+      publishedAt: new Date(Date.now() - 1000 * 60 * 60 * 18).toISOString(),
+      affectedPackages: ["node-forge"],
+      url: "https://github.com/advisories/GHSA-5rrq-pxf6-6jx5"
+    },
+    {
+      id: "adv-3",
+      title: "Use-after-free in OpenSSL",
+      severity: "high",
+      source: "OSV",
+      sourceId: "CVE-2024-0727",
+      description: "Processing a maliciously formatted PKCS12 file may lead to OpenSSL crashing, potentially enabling denial of service attacks on applications that use native crypto bindings.",
+      publishedAt: new Date(Date.now() - 1000 * 60 * 60 * 30).toISOString(),
+      affectedPackages: ["node-openssl", "crypto-native"],
+      url: "https://osv.dev/vulnerability/CVE-2024-0727"
+    },
+    {
+      id: "adv-4",
+      title: "Integer overflow in SQLite via better-sqlite3",
+      severity: "medium",
+      source: "NVD",
+      sourceId: "CVE-2023-7104",
+      description: "An integer overflow in certain SQLite queries can cause unexpected behavior in better-sqlite3 and sqlite3 npm packages when processing untrusted input through the native database binding layer.",
+      publishedAt: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
+      affectedPackages: ["better-sqlite3", "sqlite3"],
+      url: "https://nvd.nist.gov/vuln/detail/CVE-2023-7104"
+    },
+    {
+      id: "adv-5",
+      title: "bcrypt timing side-channel in password comparison",
+      severity: "low",
+      source: "GitHub",
+      sourceId: "GHSA-wm7h-9275-46v2",
+      description: "A theoretical timing side-channel in the bcrypt native binding compare function could allow an attacker with precise timing measurement to distinguish password hash comparison outcomes under specific conditions.",
+      publishedAt: new Date(Date.now() - 1000 * 60 * 60 * 72).toISOString(),
+      affectedPackages: ["bcrypt"],
+      url: "https://github.com/advisories/GHSA-wm7h-9275-46v2"
+    }
+  ];
+}
+
+export async function getFeedEvents(): Promise<FeedEvent[]> {
+  const response = await fetchJson<{ items: FeedEvent[] }>("/feed/events?limit=50");
+  if (response?.items?.length) {
+    return response.items;
+  }
+
+  // Demo data
+  return [
+    {
+      id: "evt-1",
+      eventType: "new_version",
+      packageName: "sharp",
+      version: "0.33.3",
+      riskLevel: "low",
+      riskScore: 14,
+      timestamp: new Date(Date.now() - 1000 * 60 * 2).toISOString()
+    },
+    {
+      id: "evt-2",
+      eventType: "risk_change",
+      packageName: "bcrypt",
+      version: "5.1.1",
+      riskLevel: "low",
+      riskScore: 8,
+      timestamp: new Date(Date.now() - 1000 * 60 * 15).toISOString()
+    },
+    {
+      id: "evt-3",
+      eventType: "new_package",
+      packageName: "argon2",
+      version: "0.31.2",
+      riskLevel: "medium",
+      riskScore: 34,
+      timestamp: new Date(Date.now() - 1000 * 60 * 45).toISOString()
+    },
+    {
+      id: "evt-4",
+      eventType: "new_version",
+      packageName: "sqlite3",
+      version: "5.1.7",
+      riskLevel: "medium",
+      riskScore: 41,
+      timestamp: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString()
+    },
+    {
+      id: "evt-5",
+      eventType: "risk_change",
+      packageName: "node-gyp",
+      version: "10.0.1",
+      riskLevel: "high",
+      riskScore: 67,
+      timestamp: new Date(Date.now() - 1000 * 60 * 60 * 4).toISOString()
+    },
+    {
+      id: "evt-6",
+      eventType: "new_package",
+      packageName: "canvas",
+      version: "2.11.2",
+      riskLevel: "low",
+      riskScore: 18,
+      timestamp: new Date(Date.now() - 1000 * 60 * 60 * 8).toISOString()
+    }
+  ];
+}
+
+export async function getFeedStats(): Promise<FeedStats> {
+  const response = await fetchJson<FeedStats>("/feed/stats");
+  if (response) {
+    return response;
+  }
+
+  return {
+    packagesProcessed: 1247,
+    nativePackagesFound: 83,
+    latestEvents: 6
+  };
+}
+
+export async function getLockfileScans(): Promise<LockfileScan[]> {
+  const response = await fetchJson<{ items: LockfileScan[] }>("/lockfile-scans");
+  if (response?.items?.length) {
+    return response.items;
+  }
+
+  // Demo data
+  return [
+    {
+      id: "scan-1",
+      filename: "package-lock.json",
+      format: "npm",
+      totalDeps: 847,
+      nativeDeps: 12,
+      riskScore: 28,
+      riskLevel: "low",
+      status: "complete",
+      scannedAt: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString()
+    },
+    {
+      id: "scan-2",
+      filename: "yarn.lock",
+      format: "yarn",
+      totalDeps: 1203,
+      nativeDeps: 19,
+      riskScore: 45,
+      riskLevel: "medium",
+      status: "complete",
+      scannedAt: new Date(Date.now() - 1000 * 60 * 60 * 26).toISOString()
+    },
+    {
+      id: "scan-3",
+      filename: "pnpm-lock.yaml",
+      format: "pnpm",
+      totalDeps: 562,
+      nativeDeps: 7,
+      riskScore: 15,
+      riskLevel: "low",
+      status: "complete",
+      scannedAt: new Date(Date.now() - 1000 * 60 * 60 * 72).toISOString()
+    }
+  ];
+}
+
+export async function getComplianceReports(): Promise<ComplianceReport[]> {
+  const response = await fetchJson<{ items: ComplianceReport[] }>("/compliance/reports");
+  if (response?.items?.length) {
+    return response.items;
+  }
+
+  // Demo data
+  return [
+    {
+      id: "rpt-1",
+      reportType: "SOC 2",
+      title: "SOC 2 Type II Binary Supply Chain Assessment",
+      status: "complete",
+      generatedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+      downloadUrl: "#"
+    },
+    {
+      id: "rpt-2",
+      reportType: "EU CRA",
+      title: "EU Cyber Resilience Act Compliance Summary",
+      status: "complete",
+      generatedAt: new Date(Date.now() - 1000 * 60 * 60 * 72).toISOString(),
+      downloadUrl: "#"
+    },
+    {
+      id: "rpt-3",
+      reportType: "ISO 27001",
+      title: "ISO 27001 Annex A Native Dependency Audit",
+      status: "generating",
+      generatedAt: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
+      downloadUrl: "#"
+    }
+  ];
+}
+
 export async function getPublicBrowseCounts() {
   const response = await fetchJson<ApiListResponse<SearchResult>>("/packages/search");
   if (response?.items?.length) {
@@ -1029,3 +1305,4 @@ export function getPackageSummaryStats(analysis: PackageAnalysis) {
     { label: "Total size", value: formatKilobytes(analysis.totalBinarySize), detail: "Combined binary payload" }
   ];
 }
+

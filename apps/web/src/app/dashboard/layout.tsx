@@ -8,6 +8,8 @@ import { getDashboardSnapshot } from "../../lib/site-data";
 const navItems = [
   { href: "/dashboard", label: "Overview" },
   { href: "/dashboard/watchlists", label: "Watchlists" },
+  { href: "/dashboard/lockfile-scans", label: "Lockfile Scanner" },
+  { href: "/dashboard/reports", label: "Reports" },
   { href: "/dashboard/billing", label: "Billing" },
   { href: "/dashboard/settings", label: "Settings" }
 ];

@@ -20,6 +20,8 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: `${SITE_URL}/docs/sbom`, lastModified: new Date(), changeFrequency: "monthly", priority: 0.7 },
     { url: `${SITE_URL}/blog`, lastModified: new Date(), changeFrequency: "weekly", priority: 0.6 },
     { url: `${SITE_URL}/blog/decompiled-npm-packages`, lastModified: new Date(), changeFrequency: "monthly", priority: 0.8 },
+    { url: `${SITE_URL}/advisories`, lastModified: new Date(), changeFrequency: "daily", priority: 0.8 },
+    { url: `${SITE_URL}/feed`, lastModified: new Date(), changeFrequency: "hourly", priority: 0.7 },
     { url: `${SITE_URL}/about`, lastModified: new Date(), changeFrequency: "monthly", priority: 0.5 },
     { url: `${SITE_URL}/login`, lastModified: new Date(), changeFrequency: "monthly", priority: 0.3 },
   ];

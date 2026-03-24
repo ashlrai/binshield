@@ -5,7 +5,8 @@ const linkColumns = [
     heading: "Product",
     links: [
       { label: "Database", href: "/packages" },
-      { label: "GitHub Action", href: "/docs" },
+      { label: "Advisories", href: "/advisories" },
+      { label: "Feed", href: "/feed" },
       { label: "Pricing", href: "/pricing" },
       { label: "Docs", href: "/docs" }
     ]

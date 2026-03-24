@@ -100,6 +100,56 @@ export default async function HomePage() {
         </div>
       </section>
 
+      <section className="surface-grid">
+        <PageHeader
+          eyebrow="Platform capabilities"
+          title="Beyond source code scanning"
+          description="BinShield goes deeper than any other supply chain security tool — analyzing compiled binaries, correlating vulnerabilities, and monitoring the ecosystem in real time."
+        />
+        <div className="featured-grid">
+          <Link href="/advisories" className="package-tile">
+            <div className="package-tile__header">
+              <div>
+                <p className="eyebrow">Vulnerability intelligence</p>
+                <h3>Advisory Feed</h3>
+              </div>
+            </div>
+            <p>Aggregated CVE and advisory data from OSV.dev, NVD, and GitHub Advisory Database — correlated with binary behavior analysis.</p>
+            <span className="package-tile__meta">OSV + NVD + GitHub Advisories</span>
+          </Link>
+          <Link href="/feed" className="package-tile">
+            <div className="package-tile__header">
+              <div>
+                <p className="eyebrow">Real-time monitoring</p>
+                <h3>Ecosystem Feed</h3>
+              </div>
+            </div>
+            <p>Live monitoring of the npm registry for newly published native packages. Auto-scans and flags risky binaries before they reach your supply chain.</p>
+            <span className="package-tile__meta">npm changes feed + auto-scanning</span>
+          </Link>
+          <Link href="/docs/github-action" className="package-tile">
+            <div className="package-tile__header">
+              <div>
+                <p className="eyebrow">Supply chain scanning</p>
+                <h3>Lockfile Scanner</h3>
+              </div>
+            </div>
+            <p>Upload package-lock.json, yarn.lock, or pnpm-lock.yaml to get a complete risk assessment of every native dependency in your project.</p>
+            <span className="package-tile__meta">npm + yarn + pnpm support</span>
+          </Link>
+          <Link href="/use-cases/compliance" className="package-tile">
+            <div className="package-tile__header">
+              <div>
+                <p className="eyebrow">Enterprise compliance</p>
+                <h3>Security Reports</h3>
+              </div>
+            </div>
+            <p>Generate audit-ready compliance reports for SOC 2, ISO 27001, and EU Cyber Resilience Act with binary-level evidence and executive summaries.</p>
+            <span className="package-tile__meta">SOC 2 + ISO 27001 + EU CRA</span>
+          </Link>
+        </div>
+      </section>
+
       <section className="surface-grid surface-grid--split">
         <div className="panel">
           <div className="panel__heading">

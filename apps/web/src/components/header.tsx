@@ -30,7 +30,8 @@ export async function Header() {
       </div>
       <nav className="site-header__nav">
         <Link href="/packages" className="nav-link">Database</Link>
-        <Link href="/use-cases" className="nav-link">Use Cases</Link>
+        <Link href="/advisories" className="nav-link">Advisories</Link>
+        <Link href="/feed" className="nav-link">Feed</Link>
         <Link href="/pricing" className="nav-link">Pricing</Link>
         <Link href="/docs" className="nav-link">Docs</Link>
         <Link href="/login" className="nav-link nav-link--cta">Get started</Link>
