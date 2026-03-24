@@ -279,11 +279,10 @@ export class AdvisoryService {
   // -------------------------------------------------------------------------
 
   private async fetchOsv(ecosystem: string, packageName: string): Promise<ParsedAdvisory[]> {
-    const osvEcosystem = ecosystem === "npm" ? "npm" : ecosystem;
     const response = await fetch("https://api.osv.dev/v1/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ package: { name: packageName, ecosystem: osvEcosystem } })
+      body: JSON.stringify({ package: { name: packageName, ecosystem } })
     });
 
     if (!response.ok) {
@@ -416,8 +415,7 @@ export class AdvisoryService {
       return [];
     }
 
-    const ghEcosystem = ecosystem === "npm" ? "npm" : ecosystem;
-    const url = `https://api.github.com/advisories?ecosystem=${encodeURIComponent(ghEcosystem)}&affects=${encodeURIComponent(packageName)}&per_page=100`;
+    const url = `https://api.github.com/advisories?ecosystem=${encodeURIComponent(ecosystem)}&affects=${encodeURIComponent(packageName)}&per_page=100`;
     const response = await fetch(url, {
       headers: {
         accept: "application/vnd.github+json",
@@ -477,9 +475,6 @@ export class AdvisoryService {
     await this.nvdLimiter.acquire();
 
     const params = new URLSearchParams({ keywordSearch: packageName, resultsPerPage: "50" });
-    if (this.config.nvdApiKey) {
-      params.set("apiKey", this.config.nvdApiKey);
-    }
 
     const url = `https://services.nvd.nist.gov/rest/json/cves/2.0?${params.toString()}`;
     const headers: Record<string, string> = { accept: "application/json" };

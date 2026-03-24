@@ -56,7 +56,7 @@ export interface LockfilePackageResult {
 // Lockfile Parsers
 // ---------------------------------------------------------------------------
 
-function detectFormat(filename: string, content: string): LockfileFormat {
+function detectFormat(filename: string): LockfileFormat {
   if (filename === "pnpm-lock.yaml" || filename.endsWith("pnpm-lock.yaml")) {
     return "pnpm";
   }
@@ -203,7 +203,7 @@ export function parseLockfile(filename: string, content: string): {
   format: LockfileFormat;
   dependencies: ParsedDependency[];
 } {
-  const format = detectFormat(filename, content);
+  const format = detectFormat(filename);
   let dependencies: ParsedDependency[];
 
   switch (format) {

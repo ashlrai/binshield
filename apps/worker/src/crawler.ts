@@ -376,6 +376,9 @@ export class PackageCrawler {
       },
     );
 
+    if (!row) {
+      throw new Error("Failed to create crawler_runs record");
+    }
     return row.id;
   }
 

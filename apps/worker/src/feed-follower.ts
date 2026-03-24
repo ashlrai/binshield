@@ -92,6 +92,7 @@ export class FeedFollower {
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
+  private polling = false;
   private lastSeq = "0";
 
   constructor(config: FeedFollowerConfig) {
@@ -214,7 +215,8 @@ export class FeedFollower {
   // ---------------------------------------------------------------------------
 
   private async poll(): Promise<void> {
-    if (this.stopping) return;
+    if (this.stopping || this.polling) return;
+    this.polling = true;
 
     try {
       // Fetch changes from npm registry
@@ -292,6 +294,8 @@ export class FeedFollower {
       }
     } catch (error) {
       logError("Poll cycle failed", error);
+    } finally {
+      this.polling = false;
     }
   }
 

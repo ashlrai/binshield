@@ -220,7 +220,7 @@ export class EnhancedAnalysisPipeline {
       const existing = mergedBehaviors[behaviorKey];
 
       if (yaraSignal.detected) {
-        if (existing.detected) {
+        if (existing?.detected) {
           // Merge details
           const existingDetails = new Set(existing.details);
           for (const detail of yaraSignal.details) {
