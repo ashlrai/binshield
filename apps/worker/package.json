@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
+    "seed": "tsx src/seed.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run src",
     "typecheck": "tsc -p tsconfig.json --noEmit"

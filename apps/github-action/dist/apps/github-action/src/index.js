@@ -63,9 +63,16 @@ async function main() {
     await publishResults(config.commentMode, config.githubToken, outcomes);
     const summary = summarize(outcomes);
     core.info(`Processed ${summary.successful} analyses with ${summary.failures} failures. Highest risk: ${summary.highest}.`);
+    // Set outputs for downstream steps
+    core.setOutput("total-scanned", String(outcomes.length));
+    core.setOutput("highest-risk", summary.highest);
     const failureMessage = buildFailureMessage(outcomes, config.failOn);
     if (failureMessage) {
+        core.setOutput("failed", "true");
         core.setFailed(failureMessage);
+    }
+    else {
+        core.setOutput("failed", "false");
     }
 }
 void main().catch((error) => {

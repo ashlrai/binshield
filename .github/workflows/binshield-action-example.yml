@@ -1,18 +1,31 @@
-name: BinShield Example
+name: BinShield Binary Scan
 
 on:
   pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   binshield:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ./
+
+      - name: Scan native dependencies
+        id: binshield
+        uses: ./
         with:
           api-base-url: https://api.binshield.dev
           github-token: ${{ github.token }}
-          working-directory: .
           scan-mode: native-only
           comment-mode: both
           fail-on: high
+
+      - name: Print results
+        if: always()
+        run: |
+          echo "Scanned: ${{ steps.binshield.outputs.total-scanned }}"
+          echo "Highest risk: ${{ steps.binshield.outputs.highest-risk }}"
+          echo "Failed: ${{ steps.binshield.outputs.failed }}"

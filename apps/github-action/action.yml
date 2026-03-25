@@ -47,6 +47,13 @@ inputs:
     description: "Maximum dependency targets to scan"
     required: false
     default: "50"
+outputs:
+  total-scanned:
+    description: "Number of packages scanned"
+  highest-risk:
+    description: "Highest risk level found (none, low, medium, high, critical)"
+  failed:
+    description: "Whether the action failed due to risk threshold ('true' or 'false')"
 runs:
   using: "node20"
   main: "dist/apps/github-action/src/index.js"
