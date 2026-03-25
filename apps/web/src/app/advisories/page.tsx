@@ -73,11 +73,14 @@ export default async function AdvisoriesPage() {
                 <p>{advisory.description.slice(0, 200)}{advisory.description.length > 200 ? "..." : ""}</p>
                 <div className="tag-list">
                   <span className="tag tag--review">{advisory.sourceId}</span>
-                  {advisory.affectedPackages.slice(0, 3).map((pkg) => (
-                    <Link key={`${advisory.id}-${pkg}`} href={`/packages/${pkg}`} className="tag tag-muted">
-                      {pkg}
-                    </Link>
-                  ))}
+                  {advisory.affectedPackages.slice(0, 3).map((pkg, i) => {
+                    const name = typeof pkg === "string" ? pkg : pkg.packageName;
+                    return (
+                      <Link key={`${advisory.id}-${name}-${i}`} href={`/packages/${name}`} className="tag tag-muted">
+                        {name}
+                      </Link>
+                    );
+                  })}
                 </div>
                 <div className="package-tile__footer">
                   <span>{timeAgo(advisory.publishedAt)}</span>

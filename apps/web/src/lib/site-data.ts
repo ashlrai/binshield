@@ -1012,12 +1012,14 @@ export interface Advisory {
   id: string;
   title: string;
   severity: "critical" | "high" | "medium" | "low" | "info";
-  source: "OSV" | "NVD" | "GitHub";
+  source: string;
   sourceId: string;
   description: string;
   publishedAt: string;
-  affectedPackages: string[];
-  url: string;
+  cweIds?: string[];
+  affectedPackages: Array<string | { ecosystem: string; packageName: string }>;
+  url?: string;
+  references?: Array<{ url: string }>;
 }
 
 export interface FeedEvent {
