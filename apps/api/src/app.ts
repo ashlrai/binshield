@@ -149,7 +149,7 @@ export function createApp(services = createServices(readApiEnv())) {
     return c.json(analysis);
   });
 
-  app.get("/packages/:ecosystem/:name/versions/:version/sbom", requireFeature("sbom_export"), async (c) => {
+  app.get("/packages/:ecosystem/:name/versions/:version/sbom", async (c) => {
     const ecosystem = c.req.param("ecosystem") as Ecosystem;
     const name = c.req.param("name");
     const version = c.req.param("version");
