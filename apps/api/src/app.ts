@@ -5,6 +5,7 @@ import { cors } from "hono/cors";
 import { AdvisoryService } from "./lib/advisory-service";
 import { logAudit } from "./lib/audit";
 import { assertSameOrg, resolvePrincipal } from "./lib/auth";
+import { generateReport } from "./lib/compliance-reports";
 import { readApiEnv } from "./lib/env";
 import { requireFeature, requireRepoQuota, requireScanQuota, trackScanUsage } from "./lib/middleware";
 import { createServices } from "./lib/repository";
@@ -499,6 +500,201 @@ export function createApp(services = createServices(readApiEnv())) {
 
     const result = await advisoryService.syncPackageAdvisories(body.ecosystem, body.packageName);
     return c.json(result);
+  });
+
+  // -----------------------------------------------------------------------
+  // Feed routes (public)
+  // -----------------------------------------------------------------------
+
+  app.get("/feed/events", async (c) => {
+    const limit = Number(c.req.query("limit") ?? 50);
+    const { env } = getServices(c);
+    if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
+      return c.json({ items: [], total: 0 });
+    }
+    try {
+      const response = await fetch(
+        `${env.supabaseUrl.replace(/\/$/, "")}/rest/v1/feed_events?select=*&order=created_at.desc&limit=${limit}`,
+        { headers: { apikey: env.supabaseServiceRoleKey!, authorization: `Bearer ${env.supabaseServiceRoleKey!}` } }
+      );
+      if (!response.ok) return c.json({ items: [], total: 0 });
+      const rows = await response.json() as Array<Record<string, unknown>>;
+      const items = rows.map((r) => ({
+        id: r.id, ecosystem: r.ecosystem, packageName: r.package_name,
+        version: r.version, eventType: r.event_type,
+        riskScore: r.risk_score, riskLevel: r.risk_level,
+        timestamp: r.created_at, metadata: r.metadata,
+      }));
+      return c.json({ items, total: items.length });
+    } catch {
+      return c.json({ items: [], total: 0 });
+    }
+  });
+
+  app.get("/feed/stats", async (c) => {
+    const { env } = getServices(c);
+    if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
+      return c.json({ packagesProcessed: 0, nativePackagesFound: 0, latestEvents: 0 });
+    }
+    try {
+      const response = await fetch(
+        `${env.supabaseUrl.replace(/\/$/, "")}/rest/v1/feed_state?id=eq.npm&select=*`,
+        { headers: { apikey: env.supabaseServiceRoleKey!, authorization: `Bearer ${env.supabaseServiceRoleKey!}` } }
+      );
+      if (!response.ok) return c.json({ packagesProcessed: 0, nativePackagesFound: 0, latestEvents: 0 });
+      const rows = await response.json() as Array<{ packages_processed: number; native_packages_found: number; updated_at: string }>;
+      const state = rows[0];
+      return c.json({
+        packagesProcessed: state?.packages_processed ?? 0,
+        nativePackagesFound: state?.native_packages_found ?? 0,
+        latestEvents: 0,
+        lastUpdated: state?.updated_at,
+      });
+    } catch {
+      return c.json({ packagesProcessed: 0, nativePackagesFound: 0, latestEvents: 0 });
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Lockfile scanning route
+  // -----------------------------------------------------------------------
+
+  app.post("/scans/lockfile", async (c) => {
+    const auth = c.get("auth");
+    if (!auth) {
+      return c.json({ error: "API key required" }, 401);
+    }
+
+    const body = await c.req.json();
+    const validationError = requireBody<{ filename: string; content: string }>(body, ["filename", "content"]);
+    if (validationError) {
+      return c.json({ error: validationError }, 400);
+    }
+
+    if (typeof body.content === "string" && body.content.length > 5 * 1024 * 1024) {
+      return c.json({ error: "Lockfile content exceeds 5MB limit" }, 413);
+    }
+
+    const { env } = getServices(c);
+    if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
+      return c.json({ error: "Lockfile scanning requires Supabase configuration" }, 503);
+    }
+
+    // Store the lockfile scan request in Supabase for the worker to process
+    try {
+      const baseUrl = env.supabaseUrl.replace(/\/$/, "");
+      const headers = {
+        apikey: env.supabaseServiceRoleKey,
+        authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+        "content-type": "application/json",
+        Prefer: "return=representation",
+      };
+      const [scan] = await fetch(`${baseUrl}/rest/v1/lockfile_scans?select=id`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          org_id: auth.orgId,
+          repo_id: body.repoId ?? null,
+          filename: body.filename,
+          format: body.filename.includes("yarn") ? "yarn-v1" : body.filename.includes("pnpm") ? "pnpm" : "npm",
+          status: "processing",
+        }),
+      }).then((r) => r.json() as Promise<Array<{ id: string }>>);
+
+      return c.json({ id: scan.id, status: "processing", filename: body.filename }, 202);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : "Lockfile scan failed" }, 500);
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Compliance report routes
+  // -----------------------------------------------------------------------
+
+  app.post("/orgs/:orgId/reports", async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const body = await c.req.json();
+    const validationError = requireBody<{ reportType: string }>(body, ["reportType"]);
+    if (validationError) {
+      return c.json({ error: validationError }, 400);
+    }
+
+    const { env, repository } = getServices(c);
+    const org = await repository.getOrganization(orgId);
+    const orgName = org?.name ?? "Organization";
+
+    const searchResults = await repository.searchPackages();
+    const analyses = [];
+    for (const item of searchResults.items.slice(0, 100)) {
+      const analysis = await repository.getPackage(item.ecosystem, item.packageName);
+      if (analysis) analyses.push(analysis);
+    }
+
+    const title = body.title ?? `${body.reportType.toUpperCase()} Report — ${new Date().toLocaleDateString()}`;
+    const { summary, html } = generateReport(body.reportType, title, orgName, analyses);
+
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      try {
+        const res = await fetch(
+          `${env.supabaseUrl.replace(/\/$/, "")}/rest/v1/compliance_reports?select=id`,
+          {
+            method: "POST",
+            headers: {
+              apikey: env.supabaseServiceRoleKey,
+              authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+              "content-type": "application/json",
+              Prefer: "return=representation",
+            },
+            body: JSON.stringify({
+              org_id: orgId, report_type: body.reportType, title,
+              status: "ready", scope: body.scope ?? {}, summary,
+              generated_at: new Date().toISOString(),
+            }),
+          }
+        );
+        if (res.ok) {
+          const [row] = await res.json() as Array<{ id: string }>;
+          return c.json({ id: row.id, title, reportType: body.reportType, status: "ready", summary, html }, 201);
+        }
+      } catch { /* fall through */ }
+    }
+
+    return c.json({ title, reportType: body.reportType, status: "ready", summary, html }, 201);
+  });
+
+  app.get("/orgs/:orgId/reports", async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const { env } = getServices(c);
+    if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
+      return c.json({ items: [] });
+    }
+
+    try {
+      const res = await fetch(
+        `${env.supabaseUrl.replace(/\/$/, "")}/rest/v1/compliance_reports?org_id=eq.${orgId}&order=created_at.desc&select=*`,
+        { headers: { apikey: env.supabaseServiceRoleKey, authorization: `Bearer ${env.supabaseServiceRoleKey}` } }
+      );
+      if (!res.ok) return c.json({ items: [] });
+      const rows = await res.json() as Array<Record<string, unknown>>;
+      const items = rows.map((r) => ({
+        id: r.id, reportType: r.report_type, title: r.title,
+        status: r.status, summary: r.summary,
+        createdAt: r.created_at, generatedAt: r.generated_at,
+      }));
+      return c.json({ items });
+    } catch {
+      return c.json({ items: [] });
+    }
   });
 
   // -----------------------------------------------------------------------
