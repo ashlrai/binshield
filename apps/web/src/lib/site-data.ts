@@ -360,7 +360,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T | null>
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2_500);
+  const timeout = setTimeout(() => controller.abort(), 8_000);
   const headers = new Headers(init?.headers);
   headers.set("accept", "application/json");
 
@@ -474,7 +474,7 @@ export async function getDataMode(): Promise<DataMode> {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 1500);
+    const timeout = setTimeout(() => controller.abort(), 5000);
     const res = await fetch(`${normalizeBaseUrl(rawApiBaseUrl)}/health`, {
       signal: controller.signal,
       cache: "no-store"
