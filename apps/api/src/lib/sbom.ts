@@ -40,8 +40,9 @@ export function generateCycloneDxSbom(analysis: PackageAnalysis): object {
   const mainComponentRef = `pkg:${analysis.ecosystem}/${analysis.packageName}@${analysis.version}`;
 
   const binaryComponents = analysis.binaries.map((binary) => {
-    const hashes = binary.fingerprint
-      ? [{ alg: "SHA-256", content: binary.fingerprint.sha256 }]
+    const fp = (binary as { fingerprint?: { sha256?: string } }).fingerprint;
+    const hashes = fp?.sha256
+      ? [{ alg: "SHA-256", content: fp.sha256 }]
       : [];
 
     const properties: { name: string; value: string }[] = [];

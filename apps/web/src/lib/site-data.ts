@@ -155,6 +155,7 @@ export interface SettingsSnapshot {
   contactEmail: string;
   role: string;
   apiKeys: Array<{
+    id?: string;
     label: string;
     maskedKey: string;
     lastUsedLabel: string;
@@ -790,6 +791,13 @@ export async function getWatchlistSnapshot(orgId?: string) {
         .eq("org_id", orgId)
         .order("created_at", { ascending: false });
 
+      const watchlistList = (watchlists ?? []).map((w) => ({
+        id: w.id as string,
+        name: w.name as string,
+        channel: w.channel as string,
+        destination: w.destination as string,
+      }));
+
       if (watchlists && watchlists.length > 0) {
         // Fetch packages for each watchlist
         const watchlistIds = watchlists.map((w) => w.id);
@@ -814,6 +822,7 @@ export async function getWatchlistSnapshot(orgId?: string) {
         return {
           mode: "live" as DataMode,
           items,
+          watchlists: watchlistList,
           alertChannels: [
             { name: "Email", enabled: channels.has("email"), detail: channels.has("email") ? "Active watchlist channel" : "Not configured" },
             { name: "Slack", enabled: channels.has("slack"), detail: channels.has("slack") ? "Active watchlist channel" : "Not configured" },
@@ -826,6 +835,7 @@ export async function getWatchlistSnapshot(orgId?: string) {
       return {
         mode: "live" as DataMode,
         items: [] as WatchlistItem[],
+        watchlists: watchlistList,
         alertChannels: [
           { name: "Email", enabled: false, detail: "Not configured" },
           { name: "Slack", enabled: false, detail: "Not configured" },
@@ -842,6 +852,7 @@ export async function getWatchlistSnapshot(orgId?: string) {
   return {
     mode: dashboard.mode,
     items: dashboard.watchlist,
+    watchlists: [] as Array<{ id: string; name: string; channel: string; destination: string }>,
     alertChannels: [
       { name: "Email", enabled: true, detail: "Primary launch channel" },
       { name: "Slack", enabled: false, detail: "Deferred until team rollout" },
@@ -900,12 +911,7 @@ export async function getBillingSnapshot(orgId?: string): Promise<BillingSnapsho
           monthlyUsage: scanCount ?? 0,
           monthlyLimit: limits.scans,
           paymentMethod: subscription.provider === "stripe" ? "Stripe" : "Manual",
-          invoices: [
-            // Keep invoices as demo for now (Stripe integration separate)
-            { id: "INV-1024", dateLabel: "Mar 1", amount: "$499", status: "paid" as const },
-            { id: "INV-1025", dateLabel: "Apr 1", amount: "$499", status: "open" as const },
-            { id: "INV-1026", dateLabel: "May 1", amount: "$499", status: "draft" as const }
-          ]
+          invoices: []
         };
       }
 
@@ -982,6 +988,7 @@ export async function getSettingsSnapshot(orgId?: string, userEmail?: string): P
         .limit(5);
 
       const keyList = (apiKeys ?? []).map((key) => ({
+        id: key.id,
         label: key.label,
         maskedKey: `${key.prefix}${"•".repeat(12)}`,
         lastUsedLabel: key.last_used_at ? formatRelative(key.last_used_at) : "never used"
@@ -1225,81 +1232,95 @@ export async function getFeedStats(): Promise<FeedStats> {
   };
 }
 
-export async function getLockfileScans(): Promise<LockfileScan[]> {
-  const response = await fetchJson<{ items: LockfileScan[] }>("/lockfile-scans");
-  if (response?.items?.length) {
-    return response.items;
+export async function getLockfileScans(orgId?: string): Promise<LockfileScan[]> {
+  if (orgId) {
+    try {
+      const { createServiceRoleClient } = await import("./supabase");
+      const admin = createServiceRoleClient();
+      const { data: rows } = await admin
+        .from("lockfile_scans")
+        .select("id, filename, format, total_dependencies, native_dependencies, aggregate_risk_score, aggregate_risk_level, status, created_at")
+        .eq("org_id", orgId)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (rows?.length) {
+        return rows.map((r: Record<string, unknown>) => ({
+          id: r.id as string,
+          filename: r.filename as string,
+          format: (r.format ?? "npm") as LockfileScan["format"],
+          totalDeps: (r.total_dependencies ?? 0) as number,
+          nativeDeps: (r.native_dependencies ?? 0) as number,
+          riskScore: (r.aggregate_risk_score ?? 0) as number,
+          riskLevel: (r.aggregate_risk_level ?? "none") as LockfileScan["riskLevel"],
+          status: (r.status ?? "complete") as LockfileScan["status"],
+          scannedAt: r.created_at as string,
+        }));
+      }
+    } catch { /* fall through to demo */ }
   }
 
   // Demo data
   return [
     {
-      id: "scan-1",
-      filename: "package-lock.json",
-      format: "npm",
-      totalDeps: 847,
-      nativeDeps: 12,
-      riskScore: 28,
-      riskLevel: "low",
-      status: "complete",
-      scannedAt: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString()
+      id: "scan-1", filename: "package-lock.json", format: "npm",
+      totalDeps: 847, nativeDeps: 12, riskScore: 28, riskLevel: "low",
+      status: "complete", scannedAt: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString()
     },
     {
-      id: "scan-2",
-      filename: "yarn.lock",
-      format: "yarn",
-      totalDeps: 1203,
-      nativeDeps: 19,
-      riskScore: 45,
-      riskLevel: "medium",
-      status: "complete",
-      scannedAt: new Date(Date.now() - 1000 * 60 * 60 * 26).toISOString()
+      id: "scan-2", filename: "yarn.lock", format: "yarn",
+      totalDeps: 1203, nativeDeps: 19, riskScore: 45, riskLevel: "medium",
+      status: "complete", scannedAt: new Date(Date.now() - 1000 * 60 * 60 * 26).toISOString()
     },
     {
-      id: "scan-3",
-      filename: "pnpm-lock.yaml",
-      format: "pnpm",
-      totalDeps: 562,
-      nativeDeps: 7,
-      riskScore: 15,
-      riskLevel: "low",
-      status: "complete",
-      scannedAt: new Date(Date.now() - 1000 * 60 * 60 * 72).toISOString()
+      id: "scan-3", filename: "pnpm-lock.yaml", format: "pnpm",
+      totalDeps: 562, nativeDeps: 7, riskScore: 15, riskLevel: "low",
+      status: "complete", scannedAt: new Date(Date.now() - 1000 * 60 * 60 * 72).toISOString()
     }
   ];
 }
 
-export async function getComplianceReports(): Promise<ComplianceReport[]> {
-  const response = await fetchJson<{ items: ComplianceReport[] }>("/compliance/reports");
-  if (response?.items?.length) {
-    return response.items;
+export async function getComplianceReports(orgId?: string): Promise<ComplianceReport[]> {
+  if (orgId) {
+    try {
+      const { createServiceRoleClient } = await import("./supabase");
+      const admin = createServiceRoleClient();
+      const { data: rows } = await admin
+        .from("compliance_reports")
+        .select("id, report_type, title, status, created_at, generated_at")
+        .eq("org_id", orgId)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      if (rows?.length) {
+        return rows.map((r: Record<string, unknown>) => ({
+          id: r.id as string,
+          reportType: (r.report_type as string ?? "Custom").toUpperCase() as ComplianceReport["reportType"],
+          title: r.title as string,
+          status: (r.status ?? "complete") as ComplianceReport["status"],
+          generatedAt: (r.generated_at ?? r.created_at) as string,
+          downloadUrl: "#",
+        }));
+      }
+    } catch { /* fall through to demo */ }
   }
 
   // Demo data
   return [
     {
-      id: "rpt-1",
-      reportType: "SOC 2",
+      id: "rpt-1", reportType: "SOC 2",
       title: "SOC 2 Type II Binary Supply Chain Assessment",
-      status: "complete",
-      generatedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
-      downloadUrl: "#"
+      status: "complete", generatedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(), downloadUrl: "#"
     },
     {
-      id: "rpt-2",
-      reportType: "EU CRA",
+      id: "rpt-2", reportType: "EU CRA",
       title: "EU Cyber Resilience Act Compliance Summary",
-      status: "complete",
-      generatedAt: new Date(Date.now() - 1000 * 60 * 60 * 72).toISOString(),
-      downloadUrl: "#"
+      status: "complete", generatedAt: new Date(Date.now() - 1000 * 60 * 60 * 72).toISOString(), downloadUrl: "#"
     },
     {
-      id: "rpt-3",
-      reportType: "ISO 27001",
+      id: "rpt-3", reportType: "ISO 27001",
       title: "ISO 27001 Annex A Native Dependency Audit",
-      status: "generating",
-      generatedAt: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
-      downloadUrl: "#"
+      status: "generating", generatedAt: new Date(Date.now() - 1000 * 60 * 30).toISOString(), downloadUrl: "#"
     }
   ];
 }

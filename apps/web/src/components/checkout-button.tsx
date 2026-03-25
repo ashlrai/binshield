@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+import { apiFetch } from "../lib/api-client";
+
 interface CheckoutButtonProps {
   plan: string;
   label?: string;
@@ -21,20 +23,8 @@ export function CheckoutButton({ plan, label = "Start trial", className }: Check
     setError(null);
 
     try {
-      const apiBase =
-        process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL ??
-        process.env.BINSHIELD_API_BASE_URL ??
-        "";
-
-      if (!apiBase) {
-        setError("API not configured");
-        setLoading(false);
-        return;
-      }
-
-      const response = await fetch(`${apiBase.replace(/\/+$/, "")}/billing/checkout`, {
+      const response = await apiFetch("/billing/checkout", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ plan }),
       });
 

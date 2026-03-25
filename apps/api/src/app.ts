@@ -8,10 +8,12 @@ import { assertSameOrg, resolvePrincipal } from "./lib/auth";
 import { generateReport } from "./lib/compliance-reports";
 import { readApiEnv } from "./lib/env";
 import { requireFeature, requireRepoQuota, requireScanQuota, trackScanUsage } from "./lib/middleware";
+import { rateLimitByIp, rateLimitByAuth } from "./lib/rate-limit";
 import { createServices } from "./lib/repository";
 import type { AppServices } from "./lib/repository";
 import { generateCycloneDxSbom } from "./lib/sbom";
 import type { AuthPrincipal, Ecosystem } from "./lib/types";
+import { detectLockfileFormat, validateEcosystem, validateReportType } from "./lib/validation";
 
 type AppVariables = {
   auth: AuthPrincipal | null;
@@ -82,11 +84,15 @@ export function createApp(services = createServices(readApiEnv())) {
     allowHeaders: ["Content-Type", "Authorization", "X-BinShield-API-Key"],
   }));
 
+  // Rate limiting
+  app.use("*", rateLimitByIp({ windowMs: 60_000, max: 120 }));
+  app.use("/scans/*", rateLimitByAuth({ windowMs: 60_000, max: 30 }));
+
   // Request logging
   app.use("*", async (c, next) => {
     const start = Date.now();
     c.set("services", services);
-    c.set("auth", await resolvePrincipal(services.repository, c));
+    c.set("auth", await resolvePrincipal(services.repository, c, services.env));
     await next();
     console.log(`[BinShield API] ${c.req.method} ${c.req.path} ${c.res.status} ${Date.now() - start}ms`);
   });
@@ -116,8 +122,11 @@ export function createApp(services = createServices(readApiEnv())) {
 
   app.get("/packages/search", async (c) => {
     const query = c.req.query("q") ?? undefined;
+    const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 20), 1), 100);
+    const offset = Math.max(Number(c.req.query("offset") ?? 0), 0);
     const results = await getServices(c).repository.searchPackages(query);
-    return c.json(results);
+    const paged = results.items.slice(offset, offset + limit);
+    return c.json({ items: paged, total: results.total });
   });
 
   app.get("/packages/:ecosystem/:name", async (c) => {
@@ -194,6 +203,10 @@ export function createApp(services = createServices(readApiEnv())) {
     ]);
     if (validationError) {
       return c.json({ error: validationError }, 400);
+    }
+
+    if (!validateEcosystem(body.ecosystem)) {
+      return c.json({ error: "Invalid ecosystem. Must be one of: npm, pypi, crates, go" }, 400);
     }
 
     const job = await getServices(c).repository.submitScan(body, auth);
@@ -338,6 +351,22 @@ export function createApp(services = createServices(readApiEnv())) {
     }
   });
 
+  app.delete("/orgs/:orgId/watchlists/:watchlistId/packages/:packageName", requireFeature("watchlists"), async (c) => {
+    const orgId = c.req.param("orgId");
+    const watchlistId = c.req.param("watchlistId");
+    const packageName = decodeURIComponent(c.req.param("packageName"));
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const removed = await getServices(c).repository.removeWatchlistPackage(orgId, watchlistId, packageName);
+    if (!removed) {
+      return c.json({ error: "Package not found in watchlist" }, 404);
+    }
+    return c.json({ ok: true });
+  });
+
   app.get("/orgs/:orgId/subscription", async (c) => {
     const orgId = c.req.param("orgId");
     const { error } = await getOrgAuth(c, orgId);
@@ -398,6 +427,24 @@ export function createApp(services = createServices(readApiEnv())) {
     });
 
     return c.json(apiKey, 201);
+  });
+
+  app.delete("/orgs/:orgId/api-keys/:keyId", async (c) => {
+    const orgId = c.req.param("orgId");
+    const keyId = c.req.param("keyId");
+    const auth = c.get("auth")!;
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const revoked = await getServices(c).repository.revokeApiKey(orgId, keyId);
+    if (!revoked) {
+      return c.json({ error: "API key not found" }, 404);
+    }
+
+    logAudit(getAuditConfig(c), orgId, "api_key.revoked", "api_key", keyId, auth.userId, {});
+    return c.json({ ok: true });
   });
 
   // -----------------------------------------------------------------------
@@ -477,7 +524,38 @@ export function createApp(services = createServices(readApiEnv())) {
       return c.json({ error: validationError }, 400);
     }
 
-    const checkout = await getServices(c).repository.createBillingCheckout(auth.orgId, body.plan);
+    const { env, repository } = getServices(c);
+
+    // Try real Stripe checkout if configured
+    if (env.stripeSecretKey && env.stripeSecretKey !== "sk_test_placeholder") {
+      try {
+        const { readEnv } = await import("@binshield/config");
+        const config = readEnv();
+        const priceId = config.stripePriceIds[body.plan];
+        if (!priceId || priceId.includes("placeholder")) {
+          return c.json({ error: `No Stripe price configured for plan: ${body.plan}` }, 400);
+        }
+
+        const { createCheckoutSession } = await import("./lib/stripe");
+        const org = await repository.getOrganization(auth.orgId);
+        const session = await createCheckoutSession(
+          { secretKey: env.stripeSecretKey, webhookSecret: env.stripeWebhookSecret ?? "", publishableKey: "", prices: config.stripePriceIds },
+          {
+            orgId: auth.orgId,
+            plan: body.plan,
+            customerEmail: org?.name ? undefined : undefined,
+            successUrl: `${env.publicAppUrl}/dashboard/billing?session_id={CHECKOUT_SESSION_ID}`,
+            cancelUrl: `${env.publicAppUrl}/pricing`,
+          }
+        );
+        return c.json({ checkoutUrl: session.url, sessionId: session.sessionId }, 201);
+      } catch (err) {
+        return c.json({ error: err instanceof Error ? err.message : "Checkout failed" }, 500);
+      }
+    }
+
+    // Fallback to local/demo mode
+    const checkout = await repository.createBillingCheckout(auth.orgId, body.plan);
     return c.json(checkout, 201);
   });
 
@@ -602,6 +680,11 @@ export function createApp(services = createServices(readApiEnv())) {
       return c.json({ error: "Lockfile content exceeds 5MB limit" }, 413);
     }
 
+    const lockfileFormat = detectLockfileFormat(body.filename, body.content ?? "");
+    if (!lockfileFormat) {
+      return c.json({ error: "Unrecognized lockfile format. Supported: package-lock.json, yarn.lock, pnpm-lock.yaml" }, 400);
+    }
+
     const { env } = getServices(c);
     if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
       return c.json({ error: "Lockfile scanning requires Supabase configuration" }, 503);
@@ -623,7 +706,7 @@ export function createApp(services = createServices(readApiEnv())) {
           org_id: auth.orgId,
           repo_id: body.repoId ?? null,
           filename: body.filename,
-          format: body.filename.includes("yarn") ? "yarn-v1" : body.filename.includes("pnpm") ? "pnpm" : "npm",
+          format: lockfileFormat,
           status: "processing",
         }),
       }).then((r) => r.json() as Promise<Array<{ id: string }>>);
@@ -634,11 +717,49 @@ export function createApp(services = createServices(readApiEnv())) {
     }
   });
 
+  app.get("/orgs/:orgId/lockfile-scans", async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const { env } = getServices(c);
+    if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
+      return c.json({ items: [] });
+    }
+
+    try {
+      const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 50), 1), 200);
+      const baseUrl = env.supabaseUrl.replace(/\/$/, "");
+      const res = await fetch(
+        `${baseUrl}/rest/v1/lockfile_scans?org_id=eq.${orgId}&order=created_at.desc&limit=${limit}&select=*`,
+        { headers: { apikey: env.supabaseServiceRoleKey, authorization: `Bearer ${env.supabaseServiceRoleKey}` } }
+      );
+      if (!res.ok) return c.json({ items: [] });
+      const rows = await res.json() as Array<Record<string, unknown>>;
+      const items = rows.map((r) => ({
+        id: r.id,
+        filename: r.filename,
+        format: r.format,
+        totalDeps: r.total_dependencies ?? 0,
+        nativeDeps: r.native_dependencies ?? 0,
+        riskScore: r.aggregate_risk_score ?? 0,
+        riskLevel: r.aggregate_risk_level ?? "none",
+        status: r.status,
+        scannedAt: r.created_at,
+      }));
+      return c.json({ items });
+    } catch {
+      return c.json({ items: [] });
+    }
+  });
+
   // -----------------------------------------------------------------------
   // Compliance report routes
   // -----------------------------------------------------------------------
 
-  app.post("/orgs/:orgId/reports", async (c) => {
+  app.post("/orgs/:orgId/reports", requireFeature("compliance_reports"), async (c) => {
     const orgId = c.req.param("orgId");
     const { error } = await getOrgAuth(c, orgId);
     if (error) {
@@ -651,15 +772,30 @@ export function createApp(services = createServices(readApiEnv())) {
       return c.json({ error: validationError }, 400);
     }
 
+    if (!validateReportType(body.reportType)) {
+      return c.json({ error: "Invalid reportType. Must be one of: soc2, iso27001, cra, custom" }, 400);
+    }
+
     const { env, repository } = getServices(c);
     const org = await repository.getOrganization(orgId);
     const orgName = org?.name ?? "Organization";
 
-    const searchResults = await repository.searchPackages();
     const analyses = [];
-    for (const item of searchResults.items.slice(0, 100)) {
-      const analysis = await repository.getPackage(item.ecosystem, item.packageName);
-      if (analysis) analyses.push(analysis);
+    const scope = body.scope as { packageNames?: string[] } | undefined;
+
+    if (scope?.packageNames?.length) {
+      // Respect scope: only include specific packages
+      for (const name of scope.packageNames.slice(0, 200)) {
+        const analysis = await repository.getPackage("npm", name);
+        if (analysis) analyses.push(analysis);
+      }
+    } else {
+      // Default: scan all known packages (up to 200)
+      const searchResults = await repository.searchPackages();
+      for (const item of searchResults.items.slice(0, 200)) {
+        const analysis = await repository.getPackage(item.ecosystem, item.packageName);
+        if (analysis) analyses.push(analysis);
+      }
     }
 
     const title = body.title ?? `${body.reportType.toUpperCase()} Report — ${new Date().toLocaleDateString()}`;
@@ -727,6 +863,72 @@ export function createApp(services = createServices(readApiEnv())) {
   // -----------------------------------------------------------------------
   // Billing routes
   // -----------------------------------------------------------------------
+
+  app.post("/billing/portal", async (c) => {
+    const auth = c.get("auth");
+    if (!auth) {
+      return c.json({ error: "API key required" }, 401);
+    }
+
+    const { env, repository } = getServices(c);
+    if (!env.stripeSecretKey || env.stripeSecretKey === "sk_test_placeholder") {
+      return c.json({ error: "Stripe not configured" }, 503);
+    }
+
+    const org = await repository.getOrganization(auth.orgId);
+    if (!org) {
+      return c.json({ error: "Organization not found" }, 404);
+    }
+
+    try {
+      // Look up the org's Stripe customer ID
+      // First check the organization table, then fall back to subscriptions
+      let customerId: string | undefined;
+
+      if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+        const baseUrl = env.supabaseUrl.replace(/\/$/, "");
+        const orgRes = await fetch(
+          `${baseUrl}/rest/v1/organizations?id=eq.${auth.orgId}&select=stripe_customer_id`,
+          { headers: { apikey: env.supabaseServiceRoleKey, authorization: `Bearer ${env.supabaseServiceRoleKey}` } }
+        );
+        if (orgRes.ok) {
+          const rows = await orgRes.json() as Array<{ stripe_customer_id?: string | null }>;
+          customerId = rows[0]?.stripe_customer_id ?? undefined;
+        }
+      }
+
+      if (!customerId) {
+        // Fall back to checking subscriptions table
+        if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+          const baseUrl = env.supabaseUrl.replace(/\/$/, "");
+          const subRes = await fetch(
+            `${baseUrl}/rest/v1/subscriptions?org_id=eq.${auth.orgId}&provider=eq.stripe&select=customer_id&limit=1`,
+            { headers: { apikey: env.supabaseServiceRoleKey, authorization: `Bearer ${env.supabaseServiceRoleKey}` } }
+          );
+          if (subRes.ok) {
+            const rows = await subRes.json() as Array<{ customer_id?: string | null }>;
+            customerId = rows[0]?.customer_id ?? undefined;
+          }
+        }
+      }
+
+      if (!customerId) {
+        return c.json({
+          error: "No Stripe subscription found. Subscribe to a plan first.",
+          redirectUrl: `${env.publicAppUrl}/pricing`,
+        }, 400);
+      }
+
+      const { createPortalSession } = await import("./lib/stripe");
+      const config = { secretKey: env.stripeSecretKey, webhookSecret: env.stripeWebhookSecret ?? "", publishableKey: "", prices: {} };
+      const body = await c.req.json().catch(() => ({})) as { returnUrl?: string };
+      const returnUrl = body.returnUrl ?? `${env.publicAppUrl}/dashboard/billing`;
+      const session = await createPortalSession(config, customerId, returnUrl);
+      return c.json({ url: session.url });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : "Failed to create portal session" }, 500);
+    }
+  });
 
   app.post("/billing/webhook", async (c) => {
     const { env, repository } = getServices(c);

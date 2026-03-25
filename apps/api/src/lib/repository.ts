@@ -189,6 +189,10 @@ interface BaseRepository {
   getPackageAdvisories(ecosystem: Ecosystem, packageName: string): Promise<Advisory[]>;
   getRecentAdvisories(limit?: number): Promise<Advisory[]>;
 
+  // Revocation & removal
+  revokeApiKey(orgId: string, keyId: string): Promise<boolean>;
+  removeWatchlistPackage(orgId: string, watchlistId: string, packageName: string): Promise<boolean>;
+
   // Usage tracking
   getUsageRecord(orgId: string): Promise<{ scanCount: number; repoCount: number; periodStart: string; periodEnd: string } | null>;
   incrementScanCount(orgId: string): Promise<void>;
@@ -808,6 +812,24 @@ class LocalRepository implements BaseRepository {
     };
   }
 
+  async revokeApiKey(orgId: string, keyId: string): Promise<boolean> {
+    const key = this.apiKeys.get(keyId);
+    if (!key || key.org_id !== orgId || key.revoked_at) return false;
+    key.revoked_at = now();
+    return true;
+  }
+
+  async removeWatchlistPackage(orgId: string, watchlistId: string, packageName: string): Promise<boolean> {
+    const watchlist = Array.from(this.watchlists.values()).find((w) => w.id === watchlistId && w.org_id === orgId);
+    if (!watchlist) return false;
+    const packages = this.watchlistPackages.get(watchlistId) ?? [];
+    const idx = packages.findIndex((p) => p.package_name === packageName);
+    if (idx === -1) return false;
+    packages.splice(idx, 1);
+    this.watchlistPackages.set(watchlistId, packages);
+    return true;
+  }
+
   async validateApiKey(rawKey: string) {
     const hashed = hashApiKey(rawKey);
     const key = Array.from(this.apiKeys.values()).find((row) => row.hashed_key === hashed && !row.revoked_at);
@@ -866,12 +888,57 @@ class LocalRepository implements BaseRepository {
     };
   }
 
-  async getPackageAdvisories(_ecosystem: Ecosystem, _packageName: string): Promise<Advisory[]> {
-    return [];
+  private readonly sampleAdvisories: Advisory[] = [
+    {
+      id: "adv_1", source: "osv", sourceId: "GHSA-3vjf-4m89-5hcr",
+      title: "bcrypt timing attack in comparison function",
+      description: "Versions of bcrypt prior to 5.1.1 are vulnerable to timing attacks when comparing hashes, potentially allowing attackers to determine password validity.",
+      severity: "medium", cvssScore: 5.3, cweIds: ["CWE-208"],
+      publishedAt: "2025-11-15T00:00:00Z", references: [{ type: "advisory", url: "https://github.com/advisories/GHSA-3vjf-4m89-5hcr" }],
+      affectedPackages: [{ ecosystem: "npm", packageName: "bcrypt", vulnerableRange: "<5.1.1", patchedVersion: "5.1.1" }]
+    },
+    {
+      id: "adv_2", source: "ghsa", sourceId: "GHSA-qhvf-7gv8-xr9m",
+      title: "sharp libvips heap buffer overflow via crafted image",
+      description: "The sharp image processing library uses libvips which has a heap buffer overflow vulnerability when processing specially crafted images.",
+      severity: "high", cvssScore: 7.5, cweIds: ["CWE-122"],
+      publishedAt: "2025-12-03T00:00:00Z", references: [{ type: "advisory", url: "https://github.com/advisories/GHSA-qhvf-7gv8-xr9m" }],
+      affectedPackages: [{ ecosystem: "npm", packageName: "sharp", vulnerableRange: "<0.33.2", patchedVersion: "0.33.2" }]
+    },
+    {
+      id: "adv_3", source: "nvd", sourceId: "CVE-2025-1234",
+      title: "sqlite3 use-after-free in FTS5 extension",
+      description: "SQLite versions before 3.45.1 contain a use-after-free vulnerability in the FTS5 full-text search extension that could be exploited for code execution.",
+      severity: "critical", cvssScore: 9.8, cweIds: ["CWE-416"],
+      publishedAt: "2026-01-20T00:00:00Z", references: [{ type: "advisory", url: "https://nvd.nist.gov/vuln/detail/CVE-2025-1234" }],
+      affectedPackages: [{ ecosystem: "npm", packageName: "sqlite3", vulnerableRange: "<5.1.8", patchedVersion: "5.1.8" }]
+    },
+    {
+      id: "adv_4", source: "osv", sourceId: "GHSA-wm63-7627-ch33",
+      title: "node-canvas out-of-bounds write via SVG parsing",
+      description: "node-canvas versions before 2.11.3 are vulnerable to an out-of-bounds write when parsing malicious SVG content via cairo.",
+      severity: "high", cvssScore: 8.1, cweIds: ["CWE-787"],
+      publishedAt: "2026-02-10T00:00:00Z", references: [{ type: "advisory", url: "https://github.com/advisories/GHSA-wm63-7627-ch33" }],
+      affectedPackages: [{ ecosystem: "npm", packageName: "canvas", vulnerableRange: "<2.11.3", patchedVersion: "2.11.3" }]
+    },
+    {
+      id: "adv_5", source: "ghsa", sourceId: "GHSA-5g9f-524r-2jhl",
+      title: "argon2 integer overflow in memory allocation",
+      description: "The argon2 npm package has an integer overflow in the memory parameter handling that could lead to denial of service or reduced security.",
+      severity: "medium", cvssScore: 6.5, cweIds: ["CWE-190"],
+      publishedAt: "2026-03-01T00:00:00Z", references: [{ type: "advisory", url: "https://github.com/advisories/GHSA-5g9f-524r-2jhl" }],
+      affectedPackages: [{ ecosystem: "npm", packageName: "argon2", vulnerableRange: "<0.41.0", patchedVersion: "0.41.0" }]
+    }
+  ];
+
+  async getPackageAdvisories(ecosystem: Ecosystem, packageName: string): Promise<Advisory[]> {
+    return this.sampleAdvisories.filter((a) =>
+      a.affectedPackages?.some((ap) => ap.ecosystem === ecosystem && ap.packageName === packageName)
+    );
   }
 
-  async getRecentAdvisories(_limit?: number): Promise<Advisory[]> {
-    return [];
+  async getRecentAdvisories(limit = 50): Promise<Advisory[]> {
+    return this.sampleAdvisories.slice(0, limit);
   }
 
   // Usage tracking
@@ -1366,6 +1433,37 @@ class SupabaseRepository implements BaseRepository {
       },
       plaintextKey
     };
+  }
+
+  async revokeApiKey(orgId: string, keyId: string): Promise<boolean> {
+    try {
+      await this.request<unknown>(
+        `/api_keys?id=eq.${keyId}&org_id=eq.${orgId}&revoked_at=is.null`,
+        {
+          method: "PATCH",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify({ revoked_at: now() })
+        }
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async removeWatchlistPackage(orgId: string, watchlistId: string, packageName: string): Promise<boolean> {
+    // Verify the watchlist belongs to this org
+    const watchlists = await this.select<WatchlistRow>("watchlists", `select=id&id=eq.${watchlistId}&org_id=eq.${orgId}`);
+    if (!watchlists.length) return false;
+    try {
+      await this.request<unknown>(
+        `/watchlist_packages?watchlist_id=eq.${watchlistId}&package_name=eq.${encodeURIComponent(packageName)}`,
+        { method: "DELETE" }
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async validateApiKey(rawKey: string) {

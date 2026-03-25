@@ -1,10 +1,14 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
+
+import { apiFetch } from "../lib/api-client";
 
 export function LockfileUpload({ apiBase }: { apiBase: string }) {
   const [status, setStatus] = useState<"idle" | "uploading" | "done" | "error">("idle");
   const [result, setResult] = useState<string>("");
+  const router = useRouter();
 
   async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -19,9 +23,8 @@ export function LockfileUpload({ apiBase }: { apiBase: string }) {
         return;
       }
 
-      const res = await fetch(`${apiBase}/scans/lockfile`, {
+      const res = await apiFetch("/scans/lockfile", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ filename: file.name, content }),
       });
 
@@ -35,6 +38,7 @@ export function LockfileUpload({ apiBase }: { apiBase: string }) {
       const data = await res.json();
       setStatus("done");
       setResult(`Scan submitted (ID: ${data.id}). Status: ${data.status}`);
+      router.refresh();
     } catch {
       setStatus("error");
       setResult("Network error — check your connection");

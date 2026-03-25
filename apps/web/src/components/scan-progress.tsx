@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback } from "react";
 
+import { apiFetch } from "../lib/api-client";
+
 export type ScanStage = "queued" | "ingest" | "extract" | "decompile" | "classify" | "persist" | "complete" | "failed";
 
 interface ScanProgressProps {
@@ -36,7 +38,7 @@ export function ScanProgress({ jobId, apiBase = "", onComplete, onError }: ScanP
 
   const poll = useCallback(async () => {
     try {
-      const res = await fetch(`${apiBase}/scans/${jobId}`);
+      const res = await apiFetch(`/scans/${jobId}`);
       if (!res.ok) {
         setError(`Server error: ${res.status}`);
         onError?.(`Server error: ${res.status}`);

@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 
 import { PageHeader } from "../../../components/page-header";
 import { RiskBadge } from "../../../components/risk-badge";
+import { WatchlistManager } from "../../../components/watchlist-manager";
 import { getWatchlistSnapshot } from "../../../lib/site-data";
 import { createServerClient, getOrgContext } from "../../../lib/supabase";
 
@@ -21,6 +22,7 @@ export default async function WatchlistsPage() {
   const orgCtx = await getOrgContext(user.id);
   const watchlist = await getWatchlistSnapshot(orgCtx?.orgId);
 
+  const orgId = orgCtx?.orgId ?? "";
   const hasItems = watchlist.items.length > 0;
 
   return (
@@ -38,8 +40,9 @@ export default async function WatchlistsPage() {
             <h2>Tracked packages</h2>
             <span>{watchlist.items.length} active</span>
           </div>
+          <WatchlistManager orgId={orgId} items={watchlist.items} watchlists={watchlist.watchlists ?? []} />
           {hasItems ? (
-            <div className="watchlist-list">
+            <div className="watchlist-list" style={{ marginTop: "var(--gap-md)" }}>
               {watchlist.items.map((item) => (
                 <article key={item.packageName} className="watchlist-row">
                   <div>
@@ -60,14 +63,7 @@ export default async function WatchlistsPage() {
                 </article>
               ))}
             </div>
-          ) : (
-            <div>
-              <p>No packages are being tracked yet. Create a watchlist to monitor package behavior changes.</p>
-              <Link href="/docs/api" className="button-link" style={{ marginTop: "1rem", display: "inline-block" }}>
-                Create your first watchlist
-              </Link>
-            </div>
-          )}
+          ) : null}
         </div>
 
         <div className="panel">

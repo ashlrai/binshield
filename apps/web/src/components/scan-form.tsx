@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import type { Ecosystem, PackageAnalysis } from "@binshield/analysis-types";
 
+import { apiFetch } from "../lib/api-client";
 import { ScanProgress } from "./scan-progress";
 
 interface ScanFormProps {
@@ -46,9 +47,8 @@ export function ScanForm({ apiBase, onComplete }: ScanFormProps) {
     setResult(null);
 
     try {
-      const res = await fetch(`${apiBase}/scans/packages`, {
+      const res = await apiFetch("/scans/packages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ecosystem,
           packageName: packageName.trim(),

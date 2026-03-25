@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+import { apiFetch } from "../lib/api-client";
+
 /**
  * Client component that creates a Stripe billing portal session
  * and redirects the user to manage their subscription.
@@ -15,20 +17,8 @@ export function ManageSubscriptionButton() {
     setError(null);
 
     try {
-      const apiBase =
-        process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL ??
-        process.env.BINSHIELD_API_BASE_URL ??
-        "";
-
-      if (!apiBase) {
-        setError("API not configured");
-        setLoading(false);
-        return;
-      }
-
-      const response = await fetch(`${apiBase.replace(/\/+$/, "")}/billing/portal`, {
+      const response = await apiFetch("/billing/portal", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           returnUrl: window.location.href,
         }),

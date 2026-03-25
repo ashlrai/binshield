@@ -1,6 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
+
+import { apiFetch } from "../lib/api-client";
 
 const reportTypes = [
   { id: "soc2", label: "SOC 2 Type II", desc: "Binary supply chain controls evidence for Trust Service Criteria (CC6, CC7, CC8)." },
@@ -9,23 +12,24 @@ const reportTypes = [
   { id: "custom", label: "Custom Report", desc: "Generate a security assessment with your own scope and parameters." }
 ];
 
-export function ReportGenerator({ apiBase }: { apiBase: string }) {
+export function ReportGenerator({ orgId }: { orgId: string }) {
   const [generating, setGenerating] = useState<string | null>(null);
   const [result, setResult] = useState<{ type: string; html: string } | null>(null);
+  const router = useRouter();
 
   async function generate(reportType: string) {
     setGenerating(reportType);
     setResult(null);
     try {
-      const res = await fetch(`${apiBase}/orgs/00000000-0000-0000-0000-000000000001/reports`, {
+      const res = await apiFetch(`/orgs/${orgId}/reports`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reportType }),
       });
       if (res.ok) {
         const data = await res.json();
         if (data.html) {
           setResult({ type: reportType, html: data.html });
+          router.refresh();
         }
       }
     } catch { /* ignore */ }
