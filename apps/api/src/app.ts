@@ -59,6 +59,16 @@ function getAuditConfig(c: AppContext) {
 export function createApp(services = createServices(readApiEnv())) {
   const app = new Hono<{ Variables: AppVariables }>();
 
+  // Global error handler
+  app.onError((err, c) => {
+    console.error(`[BinShield API] Unhandled error: ${err.message}`, err.stack);
+    const statusCode = "statusCode" in err ? (err as { statusCode: number }).statusCode : 500;
+    return c.json(
+      { error: statusCode === 500 ? "Internal server error" : err.message },
+      statusCode >= 400 && statusCode < 600 ? (statusCode as 400 | 401 | 403 | 404 | 500) : 500
+    );
+  });
+
   app.use("*", cors());
   app.use("*", async (c, next) => {
     c.set("services", services);

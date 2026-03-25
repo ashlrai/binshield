@@ -3,6 +3,7 @@ import { SupabaseWorkerStore } from "./supabase-store";
 import { WorkerRuntime } from "./pipeline";
 import { createLiveClassifierProvider, createLiveDecompilerProvider } from "./providers";
 import { checkAndSendAlerts } from "./alerts";
+import { YaraScanner } from "./yara-scanner";
 import type { WorkerScanRequest } from "./types";
 
 export interface DaemonConfig extends SupabaseWorkerConfig {
@@ -34,6 +35,7 @@ export class WorkerDaemon {
   private readonly store: SupabaseWorkerStore;
   private readonly runtime: WorkerRuntime;
   private readonly config: DaemonConfig;
+  private readonly yara = new YaraScanner();
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private activeJobs = 0;
@@ -145,6 +147,27 @@ export class WorkerDaemon {
 
     try {
       const outcome = await this.runtime.run(request);
+
+      // Post-process: run YARA scanning on discovered artifacts (fire-and-forget enrichment)
+      for (const artifact of outcome.artifacts) {
+        try {
+          const yaraResult = await this.yara.scan(artifact);
+          if (yaraResult.findings.length > 0) {
+            // Merge YARA findings into the matching binary analysis
+            const binary = outcome.analysis.binaries.find((b) => b.filename === artifact.filename);
+            if (binary) {
+              for (const finding of yaraResult.findings) {
+                if (!binary.findings.some((f) => f.title === finding.title)) {
+                  binary.findings.push(finding);
+                }
+              }
+            }
+          }
+        } catch {
+          // YARA scan failure is non-fatal — continue with base analysis
+        }
+      }
+
       const analysisId = await this.store.persistAnalysis(outcome.analysis);
       await this.store.completeJob(job.id, analysisId);
 
