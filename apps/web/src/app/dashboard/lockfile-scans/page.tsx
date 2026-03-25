@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 
+import { LockfileUpload } from "../../../components/lockfile-upload";
 import { MetricCard } from "../../../components/metric-card";
 import { PageHeader } from "../../../components/page-header";
 
@@ -23,10 +24,7 @@ export default function LockfileScanPage() {
       </section>
       <section className="featured-section">
         <div className="panel__heading"><h2>Upload lockfile</h2><span>Supported: npm, yarn, pnpm</span></div>
-        <div className="panel" style={{ padding: "var(--gap-lg)", textAlign: "center" }}>
-          <p style={{ marginBottom: "var(--gap-md)", color: "var(--text-muted)" }}>Drag and drop a lockfile or click to browse. Supported formats: package-lock.json, yarn.lock, pnpm-lock.yaml</p>
-          <label className="button-link" style={{ cursor: "pointer", display: "inline-block" }}>Select lockfile<input type="file" accept=".json,.lock,.yaml,.yml" style={{ display: "none" }} /></label>
-        </div>
+        <LockfileUpload apiBase={process.env.BINSHIELD_API_BASE_URL ?? process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL ?? ""} />
       </section>
       <section className="featured-section">
         <div className="panel__heading"><h2>Scan history</h2><span>{demoScans.length} scans</span></div>

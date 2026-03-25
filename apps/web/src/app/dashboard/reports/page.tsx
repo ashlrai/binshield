@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 
 import { MetricCard } from "../../../components/metric-card";
 import { PageHeader } from "../../../components/page-header";
+import { ReportGenerator } from "../../../components/report-generator";
 
 export const metadata: Metadata = { title: "Compliance Reports", description: "Generate audit-ready security reports for SOC 2, ISO 27001, and EU CRA compliance." };
 
@@ -28,15 +29,7 @@ export default function ReportsPage() {
       </section>
       <section className="featured-section">
         <div className="panel__heading"><h2>Generate report</h2><span>Select a framework</span></div>
-        <div className="browse-grid">
-          {reportTypes.map((rt) => (
-            <article key={rt.id} className="package-tile package-tile--stacked">
-              <div className="package-tile__header"><div><p className="eyebrow">Report template</p><h3>{rt.label}</h3></div></div>
-              <p>{rt.desc}</p>
-              <div className="package-tile__footer"><button className="button-link" type="button">Generate</button></div>
-            </article>
-          ))}
-        </div>
+        <ReportGenerator apiBase={process.env.BINSHIELD_API_BASE_URL ?? process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL ?? ""} />
       </section>
       <section className="featured-section">
         <div className="panel__heading"><h2>Report history</h2><span>{demoReports.length} reports</span></div>

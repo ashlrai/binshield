@@ -384,6 +384,28 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T | null>
   }
 }
 
+/** Cached fetch — uses Next.js ISR with 5-minute revalidation. Good for homepage data. */
+async function fetchJsonCached<T>(path: string, revalidateSeconds = 300): Promise<T | null> {
+  if (!rawApiBaseUrl) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(`${normalizeBaseUrl(rawApiBaseUrl)}${path}`, {
+      headers: { accept: "application/json" },
+      next: { revalidate: revalidateSeconds },
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    return (await response.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
 function buildVersionTimeline(versions: PackageAnalysis[], selectedVersion: string): VersionTimelineEntry[] {
   const reference = versions.find((entry) => entry.version === selectedVersion) ?? versions[0];
 
@@ -489,7 +511,7 @@ export async function getDataMode(): Promise<DataMode> {
 }
 
 export async function getFeaturedPackages(limit = 6): Promise<PublicPackageCard[]> {
-  const response = await fetchJson<ApiListResponse<SearchResult>>("/packages/search");
+  const response = await fetchJsonCached<ApiListResponse<SearchResult>>("/packages/search", 300);
   if (response?.items?.length) {
     // Sort by risk score descending to show most interesting packages first
     const sorted = [...response.items].sort((a, b) => b.riskScore - a.riskScore);
@@ -1283,7 +1305,7 @@ export async function getComplianceReports(): Promise<ComplianceReport[]> {
 }
 
 export async function getPublicBrowseCounts() {
-  const response = await fetchJson<ApiListResponse<SearchResult>>("/packages/search");
+  const response = await fetchJsonCached<ApiListResponse<SearchResult>>("/packages/search", 300);
   if (response?.items?.length) {
     return {
       packages: response.items.length,
