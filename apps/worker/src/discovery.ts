@@ -757,7 +757,7 @@ export class PackageDiscoveryEngine {
       try {
         // PostgREST upsert: POST with Prefer: resolution=merge-duplicates
         // Requires a unique constraint on (ecosystem, name)
-        await this.supabaseRequest<unknown>(`/discovered_packages`, {
+        await this.supabaseRequest<unknown>(`/discovered_packages?on_conflict=ecosystem,name`, {
           method: "POST",
           headers: {
             Prefer: "resolution=merge-duplicates,return=minimal",
