@@ -578,7 +578,11 @@ export class AdvisoryService {
     if (response.status === 204) {
       return undefined as T;
     }
-    return (await response.json()) as T;
+    const text = await response.text();
+    if (!text) {
+      return undefined as T;
+    }
+    return JSON.parse(text) as T;
   }
 
   private async dbSelect<T>(table: string, query = ""): Promise<T[]> {
