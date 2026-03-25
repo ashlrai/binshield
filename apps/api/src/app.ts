@@ -69,11 +69,22 @@ export function createApp(services = createServices(readApiEnv())) {
     );
   });
 
-  app.use("*", cors());
+  app.use("*", cors({
+    origin: (services.env.publicAppUrl && services.env.publicAppUrl !== "http://localhost:3000")
+      ? [services.env.publicAppUrl, "https://binshield.dev"]
+      : "*",
+    credentials: true,
+    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowHeaders: ["Content-Type", "Authorization", "X-BinShield-API-Key"],
+  }));
+
+  // Request logging
   app.use("*", async (c, next) => {
+    const start = Date.now();
     c.set("services", services);
     c.set("auth", await resolvePrincipal(services.repository, c));
     await next();
+    console.log(`[BinShield API] ${c.req.method} ${c.req.path} ${c.res.status} ${Date.now() - start}ms`);
   });
   app.use("/scans/*", async (c, next) => {
     if (!c.get("auth")) {
@@ -249,7 +260,9 @@ export function createApp(services = createServices(readApiEnv())) {
     const repo = await getServices(c).repository.createRepo(orgId, body.githubRepo);
 
     // Track repo usage and audit
-    getServices(c).repository.incrementRepoCount(orgId).catch(() => {});
+    getServices(c).repository.incrementRepoCount(orgId).catch((err) => {
+      console.error("[BinShield API] Failed to increment repo count:", err instanceof Error ? err.message : err);
+    });
     logAudit(getAuditConfig(c), orgId, "repo.created", "repo", repo.id, auth.userId, {
       githubRepo: body.githubRepo
     });
