@@ -30,8 +30,8 @@ function timeAgo(dateStr: string): string {
 
 export default async function AdvisoriesPage() {
   const advisories = await getRecentAdvisories();
-  const criticalCount = advisories.filter((a) => a.severity === "critical").length;
-  const highCount = advisories.filter((a) => a.severity === "high").length;
+  const criticalCount = advisories.filter((a) => a.severity?.toLowerCase() === "critical").length;
+  const highCount = advisories.filter((a) => a.severity?.toLowerCase() === "high").length;
 
   return (
     <main className="browse-page">
@@ -66,11 +66,11 @@ export default async function AdvisoriesPage() {
                     <p className="eyebrow">{advisory.source.toUpperCase()}</p>
                     <h3>{advisory.title}</h3>
                   </div>
-                  <span className={`risk-badge ${severityColors[advisory.severity] ?? "risk-none"}`}>
-                    {advisory.severity.toUpperCase()}
+                  <span className={`risk-badge ${severityColors[advisory.severity?.toLowerCase() ?? "none"] ?? "risk-none"}`}>
+                    {(advisory.severity ?? "UNKNOWN").toUpperCase()}
                   </span>
                 </div>
-                <p>{advisory.description.slice(0, 200)}{advisory.description.length > 200 ? "..." : ""}</p>
+                <p>{(advisory.description ?? "").slice(0, 200)}{(advisory.description?.length ?? 0) > 200 ? "..." : ""}</p>
                 <div className="tag-list">
                   <span className="tag tag--review">{advisory.sourceId}</span>
                   {advisory.affectedPackages.slice(0, 3).map((pkg, i) => {

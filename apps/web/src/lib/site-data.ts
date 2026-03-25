@@ -1011,7 +1011,7 @@ export async function getSettingsSnapshot(orgId?: string, userEmail?: string): P
 export interface Advisory {
   id: string;
   title: string;
-  severity: "critical" | "high" | "medium" | "low" | "info";
+  severity?: string;
   source: string;
   sourceId: string;
   description: string;
