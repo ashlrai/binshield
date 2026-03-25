@@ -73,6 +73,13 @@ export default async function PackagePage({
             <Link href="/packages" className="button-link">
               Back to browser
             </Link>
+            <a
+              href={`${process.env.BINSHIELD_API_BASE_URL ?? process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL ?? "https://api.binshield.dev"}/packages/${workspace.selected.ecosystem}/${workspace.selected.packageName}/versions/${encodeURIComponent(workspace.selected.version)}/sbom`}
+              className="button-link button-link--ghost"
+              download
+            >
+              Export SBOM
+            </a>
             <Link href={`#binary-${workspace.evidenceCards[0]?.id ?? "evidence"}`} className="button-link button-link--ghost">
               Jump to evidence
             </Link>
