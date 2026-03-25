@@ -488,6 +488,7 @@ function buildEvidenceSummary(selected: PackageAnalysis): PackageWorkspace["evid
 
 let verifiedDataMode: DataMode | null = null;
 let verifiedAt = 0;
+let inflightProbe: Promise<DataMode> | null = null;
 const DATA_MODE_TTL_MS = 5 * 60 * 1000; // Re-probe every 5 minutes
 
 export async function getDataMode(): Promise<DataMode> {
@@ -499,22 +500,28 @@ export async function getDataMode(): Promise<DataMode> {
     verifiedAt = Date.now();
     return "demo";
   }
+  // Deduplicate concurrent probes
+  if (inflightProbe) return inflightProbe;
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(`${normalizeBaseUrl(rawApiBaseUrl)}/health`, {
-      signal: controller.signal,
-      cache: "no-store"
-    });
-    clearTimeout(timeout);
-    verifiedDataMode = res.ok ? "live" : "demo";
-  } catch {
-    verifiedDataMode = "demo";
-  }
+  inflightProbe = (async () => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`${normalizeBaseUrl(rawApiBaseUrl)}/health`, {
+        signal: controller.signal,
+        cache: "no-store"
+      });
+      clearTimeout(timeout);
+      verifiedDataMode = res.ok ? "live" : "demo";
+    } catch {
+      verifiedDataMode = "demo";
+    }
+    verifiedAt = Date.now();
+    inflightProbe = null;
+    return verifiedDataMode!;
+  })();
 
-  verifiedAt = Date.now();
-  return verifiedDataMode;
+  return inflightProbe;
 }
 
 export async function getFeaturedPackages(limit = 6): Promise<PublicPackageCard[]> {

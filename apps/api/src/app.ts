@@ -782,18 +782,23 @@ export function createApp(services = createServices(readApiEnv())) {
 
     const scope = body.scope as { packageNames?: string[] } | undefined;
 
+    // Fetch packages in batches of 20 to avoid exhausting Supabase connection pool
+    async function fetchInBatches(items: Array<{ ecosystem: Ecosystem; name: string }>): Promise<PackageAnalysis[]> {
+      const results: PackageAnalysis[] = [];
+      for (let i = 0; i < items.length; i += 20) {
+        const batch = items.slice(i, i + 20);
+        const fetched = await Promise.all(batch.map((item) => repository.getPackage(item.ecosystem, item.name)));
+        for (const a of fetched) { if (a) results.push(a); }
+      }
+      return results;
+    }
+
     let analyses: PackageAnalysis[];
     if (scope?.packageNames?.length) {
-      const results = await Promise.all(
-        scope.packageNames.slice(0, 200).map((name) => repository.getPackage("npm", name))
-      );
-      analyses = results.filter((a): a is PackageAnalysis => a !== null);
+      analyses = await fetchInBatches(scope.packageNames.slice(0, 200).map((name) => ({ ecosystem: "npm" as Ecosystem, name })));
     } else {
       const searchResults = await repository.searchPackages();
-      const results = await Promise.all(
-        searchResults.items.slice(0, 200).map((item) => repository.getPackage(item.ecosystem, item.packageName))
-      );
-      analyses = results.filter((a): a is PackageAnalysis => a !== null);
+      analyses = await fetchInBatches(searchResults.items.slice(0, 200).map((item) => ({ ecosystem: item.ecosystem, name: item.packageName })));
     }
 
     const title = body.title ?? `${body.reportType.toUpperCase()} Report — ${new Date().toLocaleDateString()}`;
