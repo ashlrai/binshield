@@ -34,6 +34,8 @@ pnpm typecheck        # TypeScript check all packages
 pnpm --filter @binshield/web dev
 pnpm --filter @binshield/api dev
 BINSHIELD_WORKER_MODE=daemon pnpm --filter @binshield/worker dev
+BINSHIELD_WORKER_MODE=feed pnpm --filter @binshield/worker dev
+BINSHIELD_WORKER_MODE=crawl pnpm --filter @binshield/worker dev
 ```
 
 ## Tech Stack
@@ -50,18 +52,30 @@ BINSHIELD_WORKER_MODE=daemon pnpm --filter @binshield/worker dev
 
 1. User/Action submits scan → API writes job to Supabase `analysis_jobs`
 2. Worker daemon polls `analysis_jobs` → claims job → downloads package → extracts binaries
-3. Worker runs decompilation (Ghidra or heuristic) → AI classification (Grok)
+3. Worker runs decompilation (Ghidra or heuristic) → YARA pattern matching → AI classification (Grok)
 4. Worker writes results to `packages`, `analyses`, `binaries` tables
-5. API serves results → Web/Action displays them
+5. Feed follower tails npm registry changes feed → discovers new native packages → queues scans
+6. Crawler proactively discovers and seeds popular native packages for analysis
+7. Advisory sync aggregates vulnerability data from OSV, NVD, and GitHub Security Advisories
+8. API serves results, advisories, feed events, lockfile scans, and compliance reports → Web/Action displays them
 
 ## Key Files
 
 - `packages/analysis-types/src/index.ts` — All domain types (PackageAnalysis, BinaryAnalysis, etc.)
 - `packages/risk-engine/src/index.ts` — Deterministic scoring algorithm
-- `apps/api/src/app.ts` — All API routes
+- `apps/api/src/app.ts` — All API routes (31 endpoints)
 - `apps/api/src/lib/repository.ts` — Supabase + local repository implementations
+- `apps/api/src/lib/advisory-service.ts` — OSV/NVD/GitHub advisory aggregation
+- `apps/api/src/lib/middleware.ts` — Quota enforcement, feature gates, usage tracking
+- `apps/api/src/lib/compliance-reports.ts` — SOC 2/ISO 27001/EU CRA report generation
 - `apps/worker/src/pipeline.ts` — Analysis orchestration
 - `apps/worker/src/providers.ts` — Decompiler + classifier provider chain
+- `apps/worker/src/discovery.ts` — Native binary detection in package tarballs
+- `apps/worker/src/crawler.ts` — Proactive package discovery and seeding
+- `apps/worker/src/lockfile-scanner.ts` — Lockfile parsing and dependency extraction
+- `apps/worker/src/feed-follower.ts` — npm registry changes feed tailer
+- `apps/worker/src/yara-scanner.ts` — YARA rule matching on extracted binaries
+- `apps/worker/src/native-indicators.ts` — Heuristic native binary detection
 - `apps/web/src/lib/site-data.ts` — Web data layer (live API + demo fallback)
 
 ## Conventions
@@ -71,13 +85,15 @@ BINSHIELD_WORKER_MODE=daemon pnpm --filter @binshield/worker dev
 - Fonts: JetBrains Mono (display/code) + Instrument Sans (body)
 - All API auth via `x-binshield-api-key` header or `Authorization: Bearer`
 - Supabase uses service role key for worker/API (bypasses RLS)
-- Worker supports two modes: `cli` (one-shot) and `daemon` (polling)
+- Worker supports four modes: `cli` (one-shot), `daemon` (polling), `feed` (registry changes tailer), `crawl` (proactive package discovery)
+- CORS is restricted to production origins (`binshield.dev` + `publicAppUrl`); falls back to `*` in local dev
+- Global error handler catches unhandled exceptions and returns structured JSON errors
 
 ## Validation Gate
 
 Before any commit, ensure:
 ```bash
 pnpm typecheck  # Must pass
-pnpm test       # Must pass (25 tests)
+pnpm test       # Must pass (28 tests)
 pnpm build      # Must pass
 ```

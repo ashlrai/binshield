@@ -4,7 +4,7 @@ import Link from "next/link";
 export const metadata: Metadata = {
   title: "API Reference",
   description:
-    "BinShield REST API reference — endpoints for packages, scans, organizations, and billing with example requests.",
+    "BinShield REST API reference — endpoints for packages, scans, advisories, feed, compliance reports, organizations, and billing with example requests.",
   alternates: { canonical: "https://binshield.dev/docs/api" }
 };
 
@@ -16,33 +16,82 @@ const groups = [
     endpoints: [
       {
         method: "GET",
+        path: "/health",
+        description: "Service health check and configuration.",
+        curl: `curl "${API}/health"`
+      },
+      {
+        method: "GET",
         path: "/packages/search?q={query}",
         description: "Search the public package database by name or keyword.",
         curl: `curl "${API}/packages/search?q=bcrypt"`
       },
       {
         method: "GET",
-        path: "/packages/{ecosystem}/{name}",
-        description: "Retrieve full analysis for a specific package.",
+        path: "/packages/:ecosystem/:name",
+        description: "List all analyzed versions of a package.",
         curl: `curl "${API}/packages/npm/bcrypt"`
       },
       {
         method: "GET",
-        path: "/packages/{ecosystem}/{name}/versions/{version}",
-        description: "Retrieve analysis for a specific version of a package.",
-        curl: `curl "${API}/packages/npm/bcrypt/versions/6.0.0"`
+        path: "/packages/:ecosystem/:name/versions/:version",
+        description: "Retrieve full analysis for a specific version of a package.",
+        curl: `curl "${API}/packages/npm/bcrypt/versions/5.1.1"`
       },
       {
         method: "GET",
-        path: "/packages/{ecosystem}/{name}/versions/{version}/sbom",
+        path: "/packages/:ecosystem/:name/versions/:version/sbom",
         description: "Export a CycloneDX 1.5 SBOM for a specific package version.",
-        curl: `curl "${API}/packages/npm/bcrypt/versions/6.0.0/sbom"`
+        curl: `curl "${API}/packages/npm/bcrypt/versions/5.1.1/sbom"`
       },
       {
         method: "GET",
-        path: "/packages/browse",
-        description: "Browse all surfaced packages with pagination and filters.",
-        curl: `curl "${API}/packages/browse?limit=20&offset=0"`
+        path: "/packages/:ecosystem/:name/diff?from={v1}&to={v2}",
+        description: "Binary behavior diff between two versions of a package.",
+        curl: `curl "${API}/packages/npm/bcrypt/diff?from=5.1.0&to=5.1.1"`
+      }
+    ]
+  },
+  {
+    name: "Advisories",
+    endpoints: [
+      {
+        method: "GET",
+        path: "/packages/:ecosystem/:name/advisories",
+        description: "Get known vulnerability advisories for a package (OSV, NVD, GitHub).",
+        curl: `curl "${API}/packages/npm/bcrypt/advisories"`
+      },
+      {
+        method: "GET",
+        path: "/advisories/recent",
+        description: "List recently published advisories across all packages.",
+        curl: `curl "${API}/advisories/recent?limit=20"`
+      },
+      {
+        method: "POST",
+        path: "/advisories/sync",
+        description: "Trigger advisory sync for a specific package from upstream sources.",
+        curl: `curl -X POST "${API}/advisories/sync" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
+  -d '{"ecosystem":"npm","packageName":"bcrypt"}'`
+      }
+    ]
+  },
+  {
+    name: "Feed",
+    endpoints: [
+      {
+        method: "GET",
+        path: "/feed/events",
+        description: "Live stream of ecosystem analysis events (new packages, version updates, risk changes).",
+        curl: `curl "${API}/feed/events?limit=50"`
+      },
+      {
+        method: "GET",
+        path: "/feed/stats",
+        description: "Feed processing statistics — packages processed, native packages found.",
+        curl: `curl "${API}/feed/stats"`
       }
     ]
   },
@@ -51,26 +100,33 @@ const groups = [
     endpoints: [
       {
         method: "POST",
-        path: "/scans",
-        description: "Submit a new binary scan. Returns a scan ID for polling.",
-        curl: `curl -X POST "${API}/scans" \\
+        path: "/scans/packages",
+        description: "Submit a package for binary analysis. Returns a job ID for polling.",
+        curl: `curl -X POST "${API}/scans/packages" \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
-  -d '{"ecosystem":"npm","package":"bcrypt","version":"6.0.0"}'`
+  -d '{"ecosystem":"npm","packageName":"bcrypt","version":"5.1.1"}'`
       },
       {
         method: "GET",
-        path: "/scans/{scanId}",
-        description: "Poll scan status and results. Status progresses: queued -> processing -> complete.",
+        path: "/scans/:id",
+        description: "Poll scan job status and results. Status: queued → processing → complete.",
         curl: `curl "${API}/scans/scan_abc123" \\
   -H "Authorization: Bearer $BINSHIELD_API_KEY"`
-      },
+      }
+    ]
+  },
+  {
+    name: "Lockfile Scanning",
+    endpoints: [
       {
-        method: "GET",
-        path: "/scans/{scanId}/report",
-        description: "Retrieve the full structured report for a completed scan.",
-        curl: `curl "${API}/scans/scan_abc123/report" \\
-  -H "Authorization: Bearer $BINSHIELD_API_KEY"`
+        method: "POST",
+        path: "/scans/lockfile",
+        description: "Submit a lockfile for dependency-level risk scanning (package-lock.json, yarn.lock, pnpm-lock.yaml).",
+        curl: `curl -X POST "${API}/scans/lockfile" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
+  -d '{"filename":"package-lock.json","content":"..."}'`
       }
     ]
   },
@@ -79,26 +135,133 @@ const groups = [
     endpoints: [
       {
         method: "GET",
-        path: "/orgs/me",
-        description: "Retrieve the authenticated organization profile and usage summary.",
-        curl: `curl "${API}/orgs/me" \\
+        path: "/orgs/:orgId",
+        description: "Retrieve organization profile and usage summary.",
+        curl: `curl "${API}/orgs/org_abc123" \\
   -H "Authorization: Bearer $BINSHIELD_API_KEY"`
       },
       {
         method: "GET",
-        path: "/orgs/me/api-keys",
-        description: "List API keys for the authenticated organization.",
-        curl: `curl "${API}/orgs/me/api-keys" \\
+        path: "/orgs/:orgId/repos",
+        description: "List monitored repositories for an organization.",
+        curl: `curl "${API}/orgs/org_abc123/repos" \\
   -H "Authorization: Bearer $BINSHIELD_API_KEY"`
       },
       {
         method: "POST",
-        path: "/orgs/me/watchlists",
-        description: "Add a package to the organization watchlist for version-change alerts.",
-        curl: `curl -X POST "${API}/orgs/me/watchlists" \\
+        path: "/orgs/:orgId/repos",
+        description: "Add a repository to the organization for monitoring.",
+        curl: `curl -X POST "${API}/orgs/org_abc123/repos" \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
-  -d '{"ecosystem":"npm","package":"sharp"}'`
+  -d '{"githubRepo":"owner/repo"}'`
+      },
+      {
+        method: "GET",
+        path: "/orgs/:orgId/watchlists",
+        description: "List watchlists for version-change alerts.",
+        curl: `curl "${API}/orgs/org_abc123/watchlists" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY"`
+      },
+      {
+        method: "POST",
+        path: "/orgs/:orgId/watchlists",
+        description: "Create a new watchlist with notification channel.",
+        curl: `curl -X POST "${API}/orgs/org_abc123/watchlists" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
+  -d '{"name":"Critical deps","channel":"slack","destination":"#security"}'`
+      },
+      {
+        method: "POST",
+        path: "/orgs/:orgId/watchlists/:watchlistId/packages",
+        description: "Add a package to a watchlist.",
+        curl: `curl -X POST "${API}/orgs/org_abc123/watchlists/wl_123/packages" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
+  -d '{"ecosystem":"npm","packageName":"sharp"}'`
+      },
+      {
+        method: "GET",
+        path: "/orgs/:orgId/subscription",
+        description: "Get subscription details and plan limits.",
+        curl: `curl "${API}/orgs/org_abc123/subscription" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY"`
+      },
+      {
+        method: "POST",
+        path: "/orgs/:orgId/subscription",
+        description: "Update subscription plan and status.",
+        curl: `curl -X POST "${API}/orgs/org_abc123/subscription" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
+  -d '{"plan":"pro","status":"active"}'`
+      },
+      {
+        method: "GET",
+        path: "/orgs/:orgId/api-keys",
+        description: "List API keys for the organization.",
+        curl: `curl "${API}/orgs/org_abc123/api-keys" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY"`
+      },
+      {
+        method: "POST",
+        path: "/orgs/:orgId/api-keys",
+        description: "Create a new API key.",
+        curl: `curl -X POST "${API}/orgs/org_abc123/api-keys" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
+  -d '{"label":"CI pipeline"}'`
+      }
+    ]
+  },
+  {
+    name: "Compliance Reports",
+    endpoints: [
+      {
+        method: "POST",
+        path: "/orgs/:orgId/reports",
+        description: "Generate a compliance report (SOC 2, ISO 27001, or EU CRA).",
+        curl: `curl -X POST "${API}/orgs/org_abc123/reports" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
+  -d '{"reportType":"soc2"}'`
+      },
+      {
+        method: "GET",
+        path: "/orgs/:orgId/reports",
+        description: "List previously generated compliance reports.",
+        curl: `curl "${API}/orgs/org_abc123/reports" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY"`
+      }
+    ]
+  },
+  {
+    name: "Invitations",
+    endpoints: [
+      {
+        method: "POST",
+        path: "/orgs/:orgId/invitations",
+        description: "Invite a user to join the organization.",
+        curl: `curl -X POST "${API}/orgs/org_abc123/invitations" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
+  -d '{"email":"user@example.com","role":"member"}'`
+      },
+      {
+        method: "GET",
+        path: "/orgs/:orgId/invitations",
+        description: "List pending invitations for the organization.",
+        curl: `curl "${API}/orgs/org_abc123/invitations" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY"`
+      },
+      {
+        method: "POST",
+        path: "/invitations/:token/accept",
+        description: "Accept an organization invitation using the invitation token.",
+        curl: `curl -X POST "${API}/invitations/inv_token_abc/accept" \\
+  -H "Content-Type: application/json" \\
+  -d '{"userId":"user_123"}'`
       }
     ]
   },
@@ -106,18 +269,19 @@ const groups = [
     name: "Billing",
     endpoints: [
       {
-        method: "GET",
-        path: "/billing/usage",
-        description: "Current billing period usage, scan counts, and plan limits.",
-        curl: `curl "${API}/billing/usage" \\
-  -H "Authorization: Bearer $BINSHIELD_API_KEY"`
+        method: "POST",
+        path: "/billing/checkout",
+        description: "Create a Stripe checkout session for plan upgrade.",
+        curl: `curl -X POST "${API}/billing/checkout" \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer $BINSHIELD_API_KEY" \\
+  -d '{"plan":"pro"}'`
       },
       {
         method: "POST",
-        path: "/billing/portal",
-        description: "Generate a Stripe customer portal link for plan management.",
-        curl: `curl -X POST "${API}/billing/portal" \\
-  -H "Authorization: Bearer $BINSHIELD_API_KEY"`
+        path: "/billing/webhook",
+        description: "Stripe webhook handler for subscription lifecycle events.",
+        curl: `# Handled automatically by Stripe`
       }
     ]
   }

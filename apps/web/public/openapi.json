@@ -3,7 +3,7 @@
   "info": {
     "title": "BinShield API",
     "version": "1.0.0",
-    "description": "BinShield analyzes native binaries inside open-source packages (npm, PyPI) to detect hidden behaviors, supply-chain risks, and malicious code. Submit scans, retrieve analysis results, compare versions, and export SBOMs.",
+    "description": "BinShield is a supply chain binary security platform. Decompile native package binaries, classify behaviors with AI, correlate with vulnerability advisories (OSV/NVD/GitHub), scan lockfiles for supply chain risk, monitor the npm ecosystem in real time, and generate compliance reports for SOC 2, ISO 27001, and EU CRA.",
     "contact": {
       "name": "BinShield Support",
       "url": "https://binshield.dev",
@@ -36,6 +36,26 @@
     {
       "name": "Organizations",
       "description": "Manage organizations, repos, watchlists, and API keys"
+    },
+    {
+      "name": "Advisories",
+      "description": "Vulnerability advisories from OSV.dev, NVD, and GitHub Advisory Database"
+    },
+    {
+      "name": "Feed",
+      "description": "Real-time npm ecosystem monitoring feed"
+    },
+    {
+      "name": "Lockfile",
+      "description": "Lockfile scanning for supply chain risk assessment"
+    },
+    {
+      "name": "Reports",
+      "description": "Compliance report generation (SOC 2, ISO 27001, EU CRA)"
+    },
+    {
+      "name": "Invitations",
+      "description": "Organization team invitations"
     },
     {
       "name": "Billing",
@@ -1288,6 +1308,217 @@
             }
           }
         }
+      }
+    },
+    "/packages/{ecosystem}/{name}/advisories": {
+      "get": {
+        "operationId": "getPackageAdvisories",
+        "summary": "Get advisories for a package",
+        "description": "Returns all known security advisories (from OSV.dev, NVD, and GitHub Advisory Database) that affect the specified package.",
+        "tags": ["Advisories"],
+        "parameters": [
+          { "name": "ecosystem", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Advisory list" }
+        }
+      }
+    },
+    "/advisories/recent": {
+      "get": {
+        "operationId": "getRecentAdvisories",
+        "summary": "Recent security advisories",
+        "description": "Returns the most recent security advisories across all tracked packages, ordered by published date.",
+        "tags": ["Advisories"],
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "Advisory list" }
+        }
+      }
+    },
+    "/advisories/sync": {
+      "post": {
+        "operationId": "syncAdvisories",
+        "summary": "Sync advisories for a package",
+        "description": "Triggers a fresh advisory sync from OSV.dev, NVD, and GitHub Advisory Database for the specified package.",
+        "tags": ["Advisories"],
+        "security": [{ "apiKeyAuth": [] }, { "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["ecosystem", "packageName"],
+                "properties": {
+                  "ecosystem": { "type": "string" },
+                  "packageName": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Sync result with advisory counts per source" }
+        }
+      }
+    },
+    "/feed/events": {
+      "get": {
+        "operationId": "getFeedEvents",
+        "summary": "Ecosystem feed events",
+        "description": "Returns recent events from the live npm ecosystem feed — newly published packages, version updates, and risk changes for packages with native binaries.",
+        "tags": ["Feed"],
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "Feed event list" }
+        }
+      }
+    },
+    "/feed/stats": {
+      "get": {
+        "operationId": "getFeedStats",
+        "summary": "Feed follower statistics",
+        "description": "Returns aggregate statistics from the npm feed follower: total packages processed, native packages found, and last update timestamp.",
+        "tags": ["Feed"],
+        "responses": {
+          "200": { "description": "Feed statistics" }
+        }
+      }
+    },
+    "/scans/lockfile": {
+      "post": {
+        "operationId": "submitLockfileScan",
+        "summary": "Scan a lockfile",
+        "description": "Upload a package-lock.json, yarn.lock, or pnpm-lock.yaml to identify all native binary dependencies and assess their supply chain risk.",
+        "tags": ["Lockfile"],
+        "security": [{ "apiKeyAuth": [] }, { "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["filename", "content"],
+                "properties": {
+                  "filename": { "type": "string", "description": "Lockfile name (e.g., package-lock.json)" },
+                  "content": { "type": "string", "description": "Lockfile content (max 5MB)" },
+                  "repoId": { "type": "string", "description": "Optional repo ID to associate" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": { "description": "Lockfile scan accepted" },
+          "413": { "description": "Content exceeds 5MB limit" }
+        }
+      }
+    },
+    "/orgs/{orgId}/reports": {
+      "get": {
+        "operationId": "listReports",
+        "summary": "List compliance reports",
+        "description": "List all generated compliance reports for the organization.",
+        "tags": ["Reports"],
+        "security": [{ "apiKeyAuth": [] }, { "bearerAuth": [] }],
+        "parameters": [
+          { "name": "orgId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Report list" } }
+      },
+      "post": {
+        "operationId": "generateReport",
+        "summary": "Generate compliance report",
+        "description": "Generate an audit-ready compliance report (SOC 2, ISO 27001, EU CRA) with binary-level evidence and executive summary.",
+        "tags": ["Reports"],
+        "security": [{ "apiKeyAuth": [] }, { "bearerAuth": [] }],
+        "parameters": [
+          { "name": "orgId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["reportType"],
+                "properties": {
+                  "reportType": { "type": "string", "enum": ["soc2", "iso27001", "cra", "custom"] },
+                  "title": { "type": "string" },
+                  "scope": { "type": "object" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Generated report with HTML content" } }
+      }
+    },
+    "/orgs/{orgId}/invitations": {
+      "get": {
+        "operationId": "listInvitations",
+        "summary": "List org invitations",
+        "tags": ["Invitations"],
+        "security": [{ "apiKeyAuth": [] }, { "bearerAuth": [] }],
+        "parameters": [
+          { "name": "orgId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Invitation list" } }
+      },
+      "post": {
+        "operationId": "createInvitation",
+        "summary": "Invite team member",
+        "tags": ["Invitations"],
+        "security": [{ "apiKeyAuth": [] }, { "bearerAuth": [] }],
+        "parameters": [
+          { "name": "orgId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email"],
+                "properties": {
+                  "email": { "type": "string" },
+                  "role": { "type": "string", "enum": ["member", "admin"], "default": "member" }
+                }
+              }
+            }
+          }
+        },
+        "responses": { "201": { "description": "Invitation created" } }
+      }
+    },
+    "/invitations/{token}/accept": {
+      "post": {
+        "operationId": "acceptInvitation",
+        "summary": "Accept team invitation",
+        "description": "Accept an organization invitation using the token from the invitation email. No authentication required.",
+        "tags": ["Invitations"],
+        "parameters": [
+          { "name": "token", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["userId"],
+                "properties": { "userId": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Invitation accepted" } }
       }
     },
     "/billing/webhook": {

@@ -8,11 +8,16 @@ BinShield is a security platform that analyzes the compiled binary blobs inside 
 
 - Ghidra headless decompilation of native binaries (.node, .so, .dylib, .dll, .wasm)
 - AI-powered behavior classification across 6 categories: network, filesystem, process, crypto, obfuscation, data exfiltration
+- YARA pattern matching on extracted binaries
 - Risk scoring (0-100) with severity levels: none, low, medium, high, critical
+- Vulnerability intelligence aggregated from OSV, NVD, and GitHub Security Advisories
 - Version-over-version binary behavior diffing
+- Lockfile scanning for dependency-level risk assessment
+- Live ecosystem feed tracking npm registry changes in real time
 - CycloneDX 1.5 SBOM export with binary-level detail
+- Compliance reports for SOC 2, ISO 27001, and EU CRA frameworks
 - GitHub Action for CI/CD gate enforcement
-- Watchlist alerts via email, Slack, or webhook
+- Watchlist alerts via email, Slack, or webhook (multi-channel notifications)
 - Free public database of pre-analyzed top packages
 
 ## Quick Start
@@ -52,9 +57,21 @@ Public endpoints (health, package search, package details, SBOM) do not require 
 - GET /packages/:ecosystem/:name/versions/:version/sbom -- CycloneDX SBOM export
 - GET /packages/:ecosystem/:name/diff?from={v1}&to={v2} -- Binary behavior diff between versions
 
+### Advisories (public)
+- GET /packages/:ecosystem/:name/advisories -- Get advisories for a specific package
+- GET /advisories/recent -- List recently published advisories
+
+### Advisories (auth required)
+- POST /advisories/sync -- Trigger advisory sync for a package from OSV/NVD/GitHub
+
+### Feed (public)
+- GET /feed/events -- Live stream of ecosystem analysis events
+- GET /feed/stats -- Feed processing statistics
+
 ### Scans (auth required)
 - POST /scans/packages -- Submit a package for analysis
 - GET /scans/:id -- Check scan job status
+- POST /scans/lockfile -- Submit a lockfile for dependency scanning
 
 ### Organization Management (auth required)
 - GET /orgs/:orgId -- Get organization details
@@ -67,6 +84,17 @@ Public endpoints (health, package search, package details, SBOM) do not require 
 - POST /orgs/:orgId/subscription -- Update subscription
 - GET /orgs/:orgId/api-keys -- List API keys
 - POST /orgs/:orgId/api-keys -- Create an API key
+
+### Compliance Reports (auth required)
+- POST /orgs/:orgId/reports -- Generate a compliance report (SOC 2, ISO 27001, EU CRA)
+- GET /orgs/:orgId/reports -- List generated compliance reports
+
+### Invitations (auth required)
+- POST /orgs/:orgId/invitations -- Invite a user to an organization
+- GET /orgs/:orgId/invitations -- List pending invitations
+
+### Invitations (no auth — validates by token)
+- POST /invitations/:token/accept -- Accept an organization invitation
 
 ### Billing (auth required)
 - POST /billing/checkout -- Create a Stripe checkout session
