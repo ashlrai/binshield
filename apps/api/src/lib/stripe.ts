@@ -106,12 +106,12 @@ function verifySignature(
     .update(signedPayload)
     .digest("hex");
 
-  const isValid = signatures.some((sig) =>
-    crypto.timingSafeEqual(
-      Buffer.from(expectedSignature, "hex"),
-      Buffer.from(sig, "hex")
-    )
-  );
+  const expectedBuf = Buffer.from(expectedSignature, "hex");
+  const isValid = signatures.some((sig) => {
+    const sigBuf = Buffer.from(sig, "hex");
+    if (sigBuf.length !== expectedBuf.length) return false;
+    return crypto.timingSafeEqual(expectedBuf, sigBuf);
+  });
 
   if (!isValid) {
     throw new Error("Webhook signature verification failed");

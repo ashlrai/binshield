@@ -487,11 +487,16 @@ function buildEvidenceSummary(selected: PackageAnalysis): PackageWorkspace["evid
 }
 
 let verifiedDataMode: DataMode | null = null;
+let verifiedAt = 0;
+const DATA_MODE_TTL_MS = 5 * 60 * 1000; // Re-probe every 5 minutes
 
 export async function getDataMode(): Promise<DataMode> {
-  if (verifiedDataMode !== null) return verifiedDataMode;
+  if (verifiedDataMode !== null && Date.now() - verifiedAt < DATA_MODE_TTL_MS) {
+    return verifiedDataMode;
+  }
   if (!rawApiBaseUrl) {
     verifiedDataMode = "demo";
+    verifiedAt = Date.now();
     return "demo";
   }
 
@@ -508,6 +513,7 @@ export async function getDataMode(): Promise<DataMode> {
     verifiedDataMode = "demo";
   }
 
+  verifiedAt = Date.now();
   return verifiedDataMode;
 }
 

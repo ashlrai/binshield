@@ -12,7 +12,7 @@ import { rateLimitByIp, rateLimitByAuth } from "./lib/rate-limit";
 import { createServices } from "./lib/repository";
 import type { AppServices } from "./lib/repository";
 import { generateCycloneDxSbom } from "./lib/sbom";
-import type { AuthPrincipal, Ecosystem } from "./lib/types";
+import type { AuthPrincipal, Ecosystem, PackageAnalysis } from "./lib/types";
 import { detectLockfileFormat, validateEcosystem, validateReportType } from "./lib/validation";
 
 type AppVariables = {
@@ -84,11 +84,7 @@ export function createApp(services = createServices(readApiEnv())) {
     allowHeaders: ["Content-Type", "Authorization", "X-BinShield-API-Key"],
   }));
 
-  // Rate limiting
-  app.use("*", rateLimitByIp({ windowMs: 60_000, max: 120 }));
-  app.use("/scans/*", rateLimitByAuth({ windowMs: 60_000, max: 30 }));
-
-  // Request logging
+  // Auth resolution (must run before rate limiting so rateLimitByAuth can key on orgId)
   app.use("*", async (c, next) => {
     const start = Date.now();
     c.set("services", services);
@@ -96,6 +92,10 @@ export function createApp(services = createServices(readApiEnv())) {
     await next();
     console.log(`[BinShield API] ${c.req.method} ${c.req.path} ${c.res.status} ${Date.now() - start}ms`);
   });
+
+  // Rate limiting (after auth so rateLimitByAuth can use orgId)
+  app.use("*", rateLimitByIp({ windowMs: 60_000, max: 120 }));
+  app.use("/scans/*", rateLimitByAuth({ windowMs: 60_000, max: 30 }));
   app.use("/scans/*", async (c, next) => {
     if (!c.get("auth")) {
       return c.json({ error: "API key required" }, 401);
@@ -543,7 +543,7 @@ export function createApp(services = createServices(readApiEnv())) {
           {
             orgId: auth.orgId,
             plan: body.plan,
-            customerEmail: org?.name ? undefined : undefined,
+            customerEmail: undefined,
             successUrl: `${env.publicAppUrl}/dashboard/billing?session_id={CHECKOUT_SESSION_ID}`,
             cancelUrl: `${env.publicAppUrl}/pricing`,
           }
@@ -780,22 +780,20 @@ export function createApp(services = createServices(readApiEnv())) {
     const org = await repository.getOrganization(orgId);
     const orgName = org?.name ?? "Organization";
 
-    const analyses = [];
     const scope = body.scope as { packageNames?: string[] } | undefined;
 
+    let analyses: PackageAnalysis[];
     if (scope?.packageNames?.length) {
-      // Respect scope: only include specific packages
-      for (const name of scope.packageNames.slice(0, 200)) {
-        const analysis = await repository.getPackage("npm", name);
-        if (analysis) analyses.push(analysis);
-      }
+      const results = await Promise.all(
+        scope.packageNames.slice(0, 200).map((name) => repository.getPackage("npm", name))
+      );
+      analyses = results.filter((a): a is PackageAnalysis => a !== null);
     } else {
-      // Default: scan all known packages (up to 200)
       const searchResults = await repository.searchPackages();
-      for (const item of searchResults.items.slice(0, 200)) {
-        const analysis = await repository.getPackage(item.ecosystem, item.packageName);
-        if (analysis) analyses.push(analysis);
-      }
+      const results = await Promise.all(
+        searchResults.items.slice(0, 200).map((item) => repository.getPackage(item.ecosystem, item.packageName))
+      );
+      analyses = results.filter((a): a is PackageAnalysis => a !== null);
     }
 
     const title = body.title ?? `${body.reportType.toUpperCase()} Report — ${new Date().toLocaleDateString()}`;
