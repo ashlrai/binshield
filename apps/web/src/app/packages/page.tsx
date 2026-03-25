@@ -6,6 +6,8 @@ import { PageHeader } from "../../components/page-header";
 import { RiskBadge } from "../../components/risk-badge";
 import { getPublicBrowseCounts, searchPackages } from "../../lib/site-data";
 
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "Package Database",
   description:

@@ -10,6 +10,8 @@ import { RiskBadge } from "../components/risk-badge";
 import { ScanForm } from "../components/scan-form";
 import { getDataMode, getFeaturedPackages, getPublicBrowseCounts } from "../lib/site-data";
 
+export const dynamic = "force-dynamic";
+
 export default async function HomePage() {
   const [featured, counts, mode] = await Promise.all([
     getFeaturedPackages(),

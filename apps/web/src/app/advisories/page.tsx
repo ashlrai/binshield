@@ -12,6 +12,8 @@ export const metadata: Metadata = {
   alternates: { canonical: "https://binshield.dev/advisories" }
 };
 
+export const dynamic = "force-dynamic";
+
 const severityColors: Record<string, string> = {
   critical: "risk-critical", high: "risk-high", medium: "risk-medium", low: "risk-low", none: "risk-none"
 };
