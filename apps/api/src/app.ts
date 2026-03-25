@@ -61,6 +61,10 @@ export function createApp(services = createServices(readApiEnv())) {
 
   // Global error handler
   app.onError((err, c) => {
+    // JSON parse errors from malformed request bodies → 400
+    if (err instanceof SyntaxError && err.message.includes("JSON")) {
+      return c.json({ error: "Invalid JSON in request body" }, 400);
+    }
     console.error(`[BinShield API] Unhandled error: ${err.message}`, err.stack);
     const statusCode = "statusCode" in err ? (err as { statusCode: number }).statusCode : 500;
     return c.json(
