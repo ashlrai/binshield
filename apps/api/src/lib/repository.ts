@@ -1125,12 +1125,39 @@ class SupabaseRepository implements BaseRepository {
   }
 
   async searchPackages(query?: string) {
-    const rows = await this.select<PackageRow>("packages", query ? `select=*&name=ilike.*${encodeURIComponent(query)}*` : "select=*");
+    // Optimized: fetch packages with their latest analysis in 2 queries instead of N+1
+    const packageFilter = query ? `select=*&name=ilike.*${encodeURIComponent(query)}*` : "select=*";
+    const rows = await this.select<PackageRow>("packages", packageFilter);
+    if (rows.length === 0) return { items: [], total: 0 };
+
+    // Batch-fetch latest analysis for all packages in one query
+    const packageIds = rows.map((r) => r.id);
+    const allAnalyses = await this.select<AnalysisRow>(
+      "analyses",
+      `select=*&package_id=in.(${packageIds.join(",")})&order=created_at.desc`
+    );
+
+    // Group analyses by package_id, take the latest for each
+    const latestByPackage = new Map<string, AnalysisRow>();
+    for (const a of allAnalyses) {
+      if (!latestByPackage.has(a.package_id)) {
+        latestByPackage.set(a.package_id, a);
+      }
+    }
+
     const items: SearchResult[] = [];
     for (const pkg of rows) {
-      const analysis = await this.getPackage(pkg.ecosystem, pkg.name, pkg.latest_analyzed_version ?? undefined);
+      const analysis = latestByPackage.get(pkg.id);
       if (analysis) {
-        items.push(makeSearchResult(analysis));
+        items.push({
+          ecosystem: pkg.ecosystem,
+          packageName: pkg.name,
+          latestVersion: analysis.version,
+          riskLevel: analysis.risk_level as SearchResult["riskLevel"],
+          riskScore: analysis.risk_score,
+          summary: analysis.summary,
+          binaryCount: analysis.binary_count,
+        });
       }
     }
     return { items, total: items.length };
