@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "seed": "tsx src/seed.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
@@ -14,9 +15,8 @@
   "dependencies": {
     "@binshield/analysis-types": "workspace:*",
     "@binshield/config": "workspace:*",
-    "@binshield/risk-engine": "workspace:*"
-  },
-  "devDependencies": {
+    "@binshield/risk-engine": "workspace:*",
     "tsx": "^4.19.3"
-  }
+  },
+  "devDependencies": {}
 }
