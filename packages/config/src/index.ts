@@ -33,7 +33,7 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): EnvShape {
     ghidraMemoryLimit: source.BINSHIELD_GHIDRA_MEMORY_LIMIT ?? "4g",
     ghidraCpuLimit: source.BINSHIELD_GHIDRA_CPU_LIMIT ?? "2",
     xaiApiKey: source.XAI_API_KEY ?? "",
-    xaiModel: source.XAI_MODEL ?? "grok-4-1-fast-reasoning",
+    xaiModel: source.XAI_MODEL ?? "grok-4.3",
     xaiTimeoutMs: Number(source.XAI_TIMEOUT_MS ?? 60000),
     stripeSecretKey: source.STRIPE_SECRET_KEY ?? "sk_test_placeholder",
     stripePublishableKey: source.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY ?? "pk_test_placeholder",

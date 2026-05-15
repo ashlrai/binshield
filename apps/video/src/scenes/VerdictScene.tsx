@@ -221,7 +221,7 @@ export const VerdictScene: React.FC = () => {
               marginTop: 14,
             }}
           >
-            Classified by grok-4-1-fast-reasoning in 4.2s
+            Classified by grok-4.3 in 4.2s
           </div>
         </div>
       </div>

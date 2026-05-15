@@ -23,7 +23,7 @@ import { buildAnalysisPrompt } from "./prompts/binary-analysis";
 // ---------------------------------------------------------------------------
 
 const XAI_BASE_URL = "https://api.x.ai/v1/chat/completions";
-const DEFAULT_MODEL = "grok-4-1-fast-reasoning";
+const DEFAULT_MODEL = "grok-4.3";
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_RETRIES = 3;
 const INITIAL_BACKOFF_MS = 1_000;

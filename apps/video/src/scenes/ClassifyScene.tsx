@@ -82,7 +82,7 @@ export const ClassifyScene: React.FC = () => {
           gap: 8,
         }}
       >
-        <span style={{ color: `${ACCENT}88` }}>Model:</span> grok-4-1-fast-reasoning
+        <span style={{ color: `${ACCENT}88` }}>Model:</span> grok-4.3
         <span style={{ color: `${MUTED}66` }}>|</span>
         <span>Analyzing decompiled output...</span>
       </div>

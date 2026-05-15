@@ -43,7 +43,7 @@ BINSHIELD_WORKER_MODE=crawl pnpm --filter @binshield/worker dev
 - **Frontend:** Next.js 15, React 19, CSS (no Tailwind)
 - **API:** Hono on Node.js
 - **Database:** Supabase (PostgreSQL + Auth + RLS)
-- **AI Classification:** xAI grok-4-1-fast-reasoning
+- **AI Classification:** xAI grok-4.3
 - **Binary Analysis:** Ghidra Docker containers + heuristic fallback
 - **Billing:** Stripe (test mode)
 - **Deployment:** Vercel (web) + Railway (API + worker)
