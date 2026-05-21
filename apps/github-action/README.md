@@ -91,6 +91,51 @@ BinShield generates CycloneDX 1.5 SBOMs with binary-level detail:
 curl https://binshieldapi-production.up.railway.app/packages/npm/bcrypt/versions/6.0.0/sbom
 ```
 
+## GitHub Code Scanning (SARIF)
+
+BinShield can emit a SARIF 2.1.0 file so findings appear in the **Security > Code scanning** tab on GitHub. Pass the `sarif-file` input and follow up with `github/codeql-action/upload-sarif`:
+
+```yaml
+name: BinShield + Code Scanning
+on: [pull_request, push]
+
+permissions:
+  security-events: write   # required for upload-sarif
+  contents: read
+
+jobs:
+  binshield:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: BinShield binary scan
+        id: binshield
+        uses: ashlrai/binshield-action@v1
+        with:
+          api-key: ${{ secrets.BINSHIELD_API_KEY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on: high
+          sarif-file: binshield.sarif      # relative to working-directory
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()                        # upload even when the action fails
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.binshield.outputs.sarif-file }}
+          category: binshield
+```
+
+Once uploaded, every binary and install-script finding surfaces as an alert in **Security > Code scanning alerts** with severity, rule description, and the affected package as the artifact path.
+
+### SARIF severity mapping
+
+| BinShield severity | SARIF level |
+|--------------------|-------------|
+| `critical`, `high` | `error`     |
+| `medium`           | `warning`   |
+| `low`, `info`      | `note`      |
+
 ## Support
 
 - Website: [binshield.dev](https://binshield.dev)

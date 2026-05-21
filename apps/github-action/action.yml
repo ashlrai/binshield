@@ -51,6 +51,9 @@ inputs:
     description: "Maximum dependency targets to scan"
     required: false
     default: "50"
+  sarif-file:
+    description: "Path where BinShield should write a SARIF 2.1.0 results file. When set, the file is written and the sarif-file output is populated so a subsequent github/codeql-action/upload-sarif step can upload findings to GitHub's Security tab."
+    required: false
 outputs:
   total-scanned:
     description: "Number of packages scanned"
@@ -58,6 +61,8 @@ outputs:
     description: "Highest risk level found (none, low, medium, high, critical)"
   failed:
     description: "Whether the action failed due to risk threshold ('true' or 'false')"
+  sarif-file:
+    description: "Absolute path to the written SARIF 2.1.0 file (populated only when the sarif-file input is set)"
 runs:
   using: "node20"
   main: "dist/apps/github-action/src/index.js"

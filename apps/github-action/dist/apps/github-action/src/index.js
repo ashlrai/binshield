@@ -1,10 +1,12 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
+import fs from "node:fs";
 import path from "node:path";
 import { BinShieldClient, scanTarget } from "./client";
 import { discoverTargets } from "./discovery";
 import { publishResults } from "./github";
 import { buildFailureMessage, summarize } from "./report";
+import { buildSarif } from "./sarif";
 function readIntInput(name, fallback) {
     const raw = core.getInput(name);
     if (!raw) {
@@ -78,6 +80,15 @@ async function main() {
     // Set outputs for downstream steps
     core.setOutput("total-scanned", String(outcomes.length));
     core.setOutput("highest-risk", summary.highest);
+    // Optional SARIF output for GitHub code-scanning / Security tab
+    const sarifFilePath = core.getInput("sarif-file");
+    if (sarifFilePath) {
+        const resolvedSarif = path.resolve(config.workingDirectory, sarifFilePath);
+        const sarifDoc = buildSarif(outcomes);
+        fs.writeFileSync(resolvedSarif, JSON.stringify(sarifDoc, null, 2), "utf8");
+        core.setOutput("sarif-file", resolvedSarif);
+        core.info(`BinShield wrote SARIF results to ${resolvedSarif}`);
+    }
     const failureMessage = buildFailureMessage(outcomes, config.failOn);
     if (failureMessage) {
         core.setOutput("failed", "true");
