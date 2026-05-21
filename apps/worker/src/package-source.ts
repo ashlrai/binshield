@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -156,6 +156,76 @@ export class InstallPackageSource implements PackageAcquisitionService {
     } catch (error) {
       await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
       throw new Error(`Failed to install ${spec}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+/**
+ * Acquires a PyPI package by downloading its source distribution (sdist) from
+ * the PyPI JSON API and extracting it. The sdist contains setup.py /
+ * pyproject.toml — the Python that runs at `pip install` time, which the
+ * manifest analyzer inspects. npm-style `scripts` do not exist for PyPI, so a
+ * minimal manifest is synthesized.
+ */
+export class PyPiPackageSource implements PackageAcquisitionService {
+  readonly name = "pypi-registry";
+
+  async acquire(request: WorkerScanRequest): Promise<AcquiredPackage> {
+    const spec = `${request.packageName}@${request.version}`;
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "binshield-pypi-"));
+    const extractDir = path.join(tempRoot, "package");
+    await mkdir(extractDir, { recursive: true });
+
+    try {
+      const metaUrl = `https://pypi.org/pypi/${encodeURIComponent(request.packageName)}/${encodeURIComponent(
+        request.version
+      )}/json`;
+      const metaResponse = await fetch(metaUrl);
+      if (!metaResponse.ok) {
+        throw new Error(`PyPI metadata request returned ${metaResponse.status}`);
+      }
+
+      const meta = (await metaResponse.json()) as {
+        urls?: Array<{ packagetype: string; url: string; filename: string }>;
+      };
+      const sdist = meta.urls?.find((entry) => entry.packagetype === "sdist");
+      if (!sdist) {
+        throw new Error(`No source distribution published for ${spec}`);
+      }
+
+      const tarballResponse = await fetch(sdist.url);
+      if (!tarballResponse.ok) {
+        throw new Error(`PyPI sdist download returned ${tarballResponse.status}`);
+      }
+      const tarballPath = path.join(tempRoot, sdist.filename);
+      await writeFile(tarballPath, Buffer.from(await tarballResponse.arrayBuffer()));
+
+      if (sdist.filename.endsWith(".zip")) {
+        await execFileAsync("unzip", ["-q", tarballPath, "-d", extractDir]);
+      } else {
+        await execFileAsync("tar", ["-xzf", tarballPath, "-C", extractDir]);
+      }
+
+      const nestedRoot = await findPackageRoot(extractDir);
+      const manifest: PackageManifest = {
+        name: request.packageName,
+        version: request.version,
+        scripts: {},
+        dependencies: {},
+        optionalDependencies: {}
+      };
+
+      return {
+        sourceKind: "tarball",
+        packageRoot: nestedRoot,
+        packageJsonPath: path.join(nestedRoot, "package.json"),
+        manifest
+      };
+    } catch (error) {
+      await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+      throw new Error(
+        `Failed to acquire ${spec} from PyPI: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 }

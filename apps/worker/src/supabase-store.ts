@@ -187,6 +187,8 @@ export class SupabaseWorkerStore {
           binary_count: analysis.binaryCount,
           total_binary_size: analysis.totalBinarySize,
           ai_model: analysis.aiModel,
+          manifest_analysis: analysis.manifestAnalysis ?? null,
+          script_findings: analysis.manifestAnalysis?.findings ?? [],
         }),
       },
     );

@@ -1,0 +1,5 @@
+{
+  "name": "binshield-fixture-pypi-worm",
+  "version": "0.0.1",
+  "description": "TEST FIXTURE — placeholder manifest so the local directory acquirer can load this PyPI fixture. The real payload is in setup.py."
+}

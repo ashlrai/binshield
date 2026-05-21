@@ -1,10 +1,14 @@
 import type {
+  BehaviorSignal,
   BehaviorSummary,
   BinaryAnalysis,
   Finding,
   FindingSeverity,
+  ManifestAnalysis,
   PackageAnalysis,
-  RiskLevel
+  RiskLevel,
+  ScriptFinding,
+  ScriptThreatSummary
 } from "@binshield/analysis-types";
 
 const severityWeight: Record<FindingSeverity, number> = {
@@ -24,14 +28,40 @@ const behaviorWeight: Record<keyof BehaviorSummary, number> = {
   dataExfiltration: 28
 };
 
+/**
+ * Install-script threat weights. Heavier than binary behaviors because
+ * install-time RCE / credential theft is the npm/PyPI worm vector — a
+ * malicious postinstall hook is strictly worse than, say, a binary that
+ * merely touches the filesystem.
+ */
+const scriptThreatWeight: Record<keyof ScriptThreatSummary, number> = {
+  installHook: 6,
+  scriptInjection: 24,
+  environmentTheft: 34,
+  dependencyConfusion: 20,
+  wiper: 40,
+  reverseShell: 40,
+  remoteCodeExecution: 38
+};
+
 export function scoreFindings(findings: Finding[]): number {
   return findings.reduce((total, finding) => total + severityWeight[finding.severity], 0);
 }
 
+export function scoreScriptFindings(findings: ScriptFinding[]): number {
+  return findings.reduce((total, finding) => total + severityWeight[finding.severity], 0);
+}
+
 export function scoreBehaviors(behaviors: BehaviorSummary): number {
-  return (Object.entries(behaviors) as [keyof BehaviorSummary, BehaviorSummary[keyof BehaviorSummary]][])
+  return (Object.entries(behaviors) as [keyof BehaviorSummary, BehaviorSignal][])
     .filter(([, signal]) => signal.detected)
     .reduce((total, [key, signal]) => total + behaviorWeight[key] + Math.min(signal.details.length, 3), 0);
+}
+
+export function scoreScriptThreats(threats: ScriptThreatSummary): number {
+  return (Object.entries(threats) as [keyof ScriptThreatSummary, BehaviorSignal][])
+    .filter(([, signal]) => signal.detected)
+    .reduce((total, [key, signal]) => total + scriptThreatWeight[key] + Math.min(signal.details.length, 3), 0);
 }
 
 export function normalizeRisk(score: number): number {
@@ -68,6 +98,23 @@ export function scoreBinary(binary: Pick<BinaryAnalysis, "behaviors" | "findings
   };
 }
 
+/**
+ * Score a manifest / install-script analysis. A confirmed known-malware match
+ * forces a maximum-severity verdict — a package on a malware advisory must
+ * never score "low" just because its visible script happened to look benign.
+ */
+export function scoreManifest(manifest: ManifestAnalysis): { riskScore: number; riskLevel: RiskLevel } {
+  if (manifest.knownMalwareAdvisoryIds.length > 0) {
+    return { riskScore: 100, riskLevel: "critical" };
+  }
+
+  const score = normalizeRisk(scoreScriptFindings(manifest.findings) + scoreScriptThreats(manifest.threats));
+  return {
+    riskScore: score,
+    riskLevel: riskLevelFromScore(score)
+  };
+}
+
 export function aggregatePackageRisk(binaries: BinaryAnalysis[]) {
   if (binaries.length === 0) {
     return {
@@ -86,10 +133,48 @@ export function aggregatePackageRisk(binaries: BinaryAnalysis[]) {
   };
 }
 
+/**
+ * Overall package risk combining native-binary analysis with install-script
+ * analysis. Uses `max` (not an average) so a clean set of binaries cannot
+ * dilute a malicious install script — and vice versa. This is the change that
+ * lets a no-binary supply-chain worm score above "none".
+ */
+export function aggregatePackageRiskWithManifest(
+  binaries: BinaryAnalysis[],
+  manifest?: ManifestAnalysis
+): { riskScore: number; riskLevel: RiskLevel } {
+  const binaryAggregate = aggregatePackageRisk(binaries);
+  if (!manifest) {
+    return binaryAggregate;
+  }
+
+  if (manifest.knownMalwareAdvisoryIds.length > 0) {
+    return { riskScore: 100, riskLevel: "critical" };
+  }
+
+  const manifestScore = scoreManifest(manifest);
+  const score = Math.max(binaryAggregate.riskScore, manifestScore.riskScore);
+  return {
+    riskScore: score,
+    riskLevel: riskLevelFromScore(score)
+  };
+}
+
 export function summarizePackage(analysis: PackageAnalysis): string {
   const behaviors = new Set<string>();
   for (const binary of analysis.binaries) {
-    for (const [name, signal] of Object.entries(binary.behaviors) as [keyof BehaviorSummary, BehaviorSummary[keyof BehaviorSummary]][]) {
+    for (const [name, signal] of Object.entries(binary.behaviors) as [keyof BehaviorSummary, BehaviorSignal][]) {
+      if (signal.detected) {
+        behaviors.add(name);
+      }
+    }
+  }
+
+  if (analysis.manifestAnalysis) {
+    for (const [name, signal] of Object.entries(analysis.manifestAnalysis.threats) as [
+      keyof ScriptThreatSummary,
+      BehaviorSignal
+    ][]) {
       if (signal.detected) {
         behaviors.add(name);
       }

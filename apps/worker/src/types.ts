@@ -4,6 +4,7 @@ import type {
   BinaryFormat,
   Ecosystem,
   Finding,
+  ManifestAnalysis,
   PackageAnalysis,
   RiskLevel,
   ScanRequest
@@ -104,6 +105,7 @@ export interface AnalysisServiceBundle {
   extraction: BinaryExtractor;
   decompiler: DecompilerProvider;
   classifier: ClassifierProvider;
+  scriptAnalyzer: ScriptAnalyzerProvider;
   cache: AnalysisCache;
   jobs: JobStore;
 }
@@ -134,6 +136,22 @@ export interface ClassifierProvider {
     artifact: FingerprintedArtifact;
     decompiled: DecompiledArtifact;
   }): Promise<ClassifiedArtifact>;
+}
+
+export interface ScriptAnalysisInput {
+  packageRequest: WorkerScanRequest;
+  packageRoot: string;
+  manifest: PackageManifest;
+}
+
+/**
+ * Analyzes a package's manifest and install scripts for supply-chain worm
+ * behavior. The second analysis path alongside `DecompilerProvider` +
+ * `ClassifierProvider`, which only cover native binaries.
+ */
+export interface ScriptAnalyzerProvider {
+  readonly name: string;
+  analyze(input: ScriptAnalysisInput): Promise<ManifestAnalysis>;
 }
 
 export interface AnalysisCache {

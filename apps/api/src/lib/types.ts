@@ -4,12 +4,14 @@ import type {
   AnalysisStatus,
   Ecosystem,
   Finding,
+  ManifestAnalysis,
   PackageAnalysis,
   PackageDiff,
   RepoRecord,
   RiskLevel,
   ScanJob,
   ScanRequest,
+  ScriptFinding,
   SearchResult
 } from "@binshield/analysis-types";
 
@@ -19,12 +21,14 @@ export type {
   BehaviorSummary,
   Ecosystem,
   Finding,
+  ManifestAnalysis,
   PackageAnalysis,
   PackageDiff,
   RepoRecord,
   RiskLevel,
   ScanJob,
   ScanRequest,
+  ScriptFinding,
   SearchResult
 };
 
@@ -102,6 +106,8 @@ export interface Advisory {
   id: string;
   source: string;
   sourceId: string;
+  /** 'vulnerability' = a CVE-style flaw; 'malware' = the package itself is malicious. */
+  advisoryType?: "vulnerability" | "malware";
   title: string;
   description?: string;
   severity?: string;

@@ -34,7 +34,10 @@ export interface NativeIndicators {
   hasNativeAddonDep?: boolean;
   hasNapiRs?: boolean;
   hasBinaryDistribution?: boolean;
+  /** Install script that references a native build toolchain (node-gyp etc.). */
   hasInstallScript?: boolean;
+  /** Any auto-run lifecycle hook (preinstall/install/postinstall/prepare) — the supply-chain worm vector. */
+  hasLifecycleHook?: boolean;
   nativeDependencies?: string[];
 }
 
@@ -158,6 +161,7 @@ function calculatePriorityScore(
     indicators.hasNapiRs,
     indicators.hasBinaryDistribution,
     indicators.hasInstallScript,
+    indicators.hasLifecycleHook,
   ].filter(Boolean).length;
 
   const indicatorScore = indicatorCount * 10;
@@ -438,13 +442,15 @@ export class PackageDiscoveryEngine {
       latestVersion,
     );
 
-    // Only return if at least one native signal is present
+    // Only return if at least one signal is present — a native binary
+    // indicator, or an install-time lifecycle hook (the worm vector).
     const hasSignal =
       indicators.hasBindingGyp ||
       indicators.hasNativeAddonDep ||
       indicators.hasNapiRs ||
       indicators.hasBinaryDistribution ||
-      indicators.hasInstallScript;
+      indicators.hasInstallScript ||
+      indicators.hasLifecycleHook;
 
     if (!hasSignal) return null;
 
@@ -573,6 +579,19 @@ export class PackageDiscoveryEngine {
     // 5. Check for binary field (node-pre-gyp)
     if (version.binary) {
       indicators.hasBinaryDistribution = true;
+    }
+
+    // 6. Check for install-time lifecycle hooks. Any package that runs code
+    //    on `npm install` is worth analyzing — this is the worm vector that
+    //    the native-only filter previously missed.
+    const lifecycleHooks = ["preinstall", "install", "postinstall", "prepare"];
+    if (
+      lifecycleHooks.some((hook) => {
+        const body = version.scripts?.[hook];
+        return typeof body === "string" && body.trim().length > 0;
+      })
+    ) {
+      indicators.hasLifecycleHook = true;
     }
 
     return indicators;

@@ -10,7 +10,7 @@
  */
 
 import type { SupabaseWorkerConfig } from "./supabase-store";
-import { hasNativeIndicators as checkNativeIndicators } from "./native-indicators";
+import { hasNativeIndicators as checkNativeIndicators, hasInstallScripts } from "./native-indicators";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -250,9 +250,15 @@ export class FeedFollower {
         const latestVersion = doc.versions[latestTag];
         if (!latestVersion) continue;
 
-        // Check for native indicators
-        if (hasNativeIndicators(latestVersion)) {
-          nativeCount++;
+        // Queue packages that ship native binaries OR run install scripts.
+        // Install-script packages are the npm supply-chain worm vector and
+        // were previously ignored by the native-only filter.
+        const isNative = hasNativeIndicators(latestVersion);
+        const hasScripts = hasInstallScripts(latestVersion);
+        if (isNative || hasScripts) {
+          if (isNative) {
+            nativeCount++;
+          }
 
           // Check download count (quick heuristic: skip very low-traffic packages)
           const downloads = await this.getWeeklyDownloads(doc.name);
@@ -270,6 +276,7 @@ export class FeedFollower {
               metadata: {
                 downloads,
                 source: "feed",
+                reason: isNative ? "native-binary" : "install-script",
               },
             });
           }

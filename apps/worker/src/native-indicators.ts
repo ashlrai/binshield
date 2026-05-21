@@ -84,3 +84,21 @@ export function hasNativeIndicators(pkg: {
 
   return false;
 }
+
+/** npm lifecycle hooks that execute automatically during `npm install`. */
+export const AUTO_RUN_LIFECYCLE_HOOKS = ["preinstall", "install", "postinstall", "prepare"];
+
+/**
+ * Check if a package declares install-time lifecycle scripts. These execute
+ * code automatically on `npm install` and are the npm supply-chain worm
+ * vector — worth analyzing even when the package ships no native binary.
+ */
+export function hasInstallScripts(pkg: { scripts?: Record<string, string> }): boolean {
+  if (!pkg.scripts) {
+    return false;
+  }
+  return AUTO_RUN_LIFECYCLE_HOOKS.some((hook) => {
+    const body = pkg.scripts?.[hook];
+    return typeof body === "string" && body.trim().length > 0;
+  });
+}

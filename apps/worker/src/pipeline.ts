@@ -1,17 +1,25 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-import type { PackageAnalysis } from "@binshield/analysis-types";
-import { aggregatePackageRisk, summarizePackage, scoreBinary } from "@binshield/risk-engine";
+import type { ManifestAnalysis, PackageAnalysis } from "@binshield/analysis-types";
+import { aggregatePackageRiskWithManifest, summarizePackage, scoreBinary } from "@binshield/risk-engine";
 
 import { buildCacheKey, InMemoryAnalysisCache } from "./cache";
 import { FileSystemBinaryExtractor } from "./extractor";
 import { InMemoryJobStore } from "./job-store";
 import {
   createDefaultDecompilerProvider,
-  createDefaultClassifierProvider
+  createDefaultClassifierProvider,
+  createDefaultScriptAnalyzerProvider
 } from "./providers";
-import { InstallPackageSource, LocalDirectoryPackageSource, RegistryPackageSource, createDefaultPackageSource } from "./package-source";
+import {
+  InstallPackageSource,
+  LocalDirectoryPackageSource,
+  PyPiPackageSource,
+  RegistryPackageSource,
+  createDefaultPackageSource
+} from "./package-source";
 import type {
   AcquiredPackage,
   AnalysisOutcome,
@@ -20,6 +28,7 @@ import type {
   DecompiledArtifact,
   FingerprintedArtifact,
   PackageManifest,
+  ScriptAnalysisInput,
   WorkerScanRequest
 } from "./types";
 
@@ -46,6 +55,7 @@ function createDefaultBundle(demoPackageRoot = defaultDemoPackageRoot()): Analys
     extraction: new FileSystemBinaryExtractor(),
     decompiler: createDefaultDecompilerProvider(),
     classifier: createDefaultClassifierProvider(),
+    scriptAnalyzer: createDefaultScriptAnalyzerProvider(),
     cache: new InMemoryAnalysisCache(),
     jobs: new InMemoryJobStore()
   };
@@ -70,9 +80,27 @@ async function loadManifest(packageRoot: string): Promise<PackageManifest> {
   };
 }
 
+/**
+ * Stable hash of the install-script analysis, mixed into the cache key so a
+ * malicious script change invalidates a cached result even when the package's
+ * native binaries are byte-for-byte unchanged.
+ */
+function manifestFingerprint(manifest: ManifestAnalysis): string {
+  const stable = JSON.stringify({
+    hooks: manifest.lifecycleHooks,
+    files: [...manifest.analyzedFiles].sort(),
+    findings: manifest.findings
+      .map((finding) => `${finding.category}|${finding.filePath}|${finding.title}|${finding.evidence}`)
+      .sort(),
+    malware: [...manifest.knownMalwareAdvisoryIds].sort()
+  });
+  return createHash("sha256").update(stable).digest("hex").slice(0, 16);
+}
+
 function buildPackageSummary(packageAnalysis: PackageAnalysis): string {
-  if (packageAnalysis.binaryCount === 0) {
-    return `${packageAnalysis.packageName}@${packageAnalysis.version} has no native binaries in the scanned package tree.`;
+  const manifestFindings = packageAnalysis.manifestAnalysis?.findings.length ?? 0;
+  if (packageAnalysis.binaryCount === 0 && manifestFindings === 0) {
+    return `${packageAnalysis.packageName}@${packageAnalysis.version} has no native binaries and no notable install-script behavior.`;
   }
 
   return summarizePackage(packageAnalysis);
@@ -85,7 +113,8 @@ function toAnalysisPackage(
     fingerprint: FingerprintedArtifact;
     decompiled: { pseudoSource: string; imports: string[]; strings: string[]; functionCount: number; callTargets: string[]; confidence: number };
     classified: ClassifiedArtifact;
-  }>
+  }>,
+  manifestAnalysis: ManifestAnalysis
 ): PackageAnalysis {
   const binaries = classifiedArtifacts.map(({ fingerprint, decompiled, classified }) => {
     const scored = scoreBinary({
@@ -129,10 +158,11 @@ function toAnalysisPackage(
     totalBinarySize: binaries.reduce((total, binary) => total + binary.fileSize, 0),
     aiModel: "binshield-worker",
     createdAt: new Date().toISOString(),
-    binaries
+    binaries,
+    manifestAnalysis
   };
 
-  const aggregate = aggregatePackageRisk(binaries);
+  const aggregate = aggregatePackageRiskWithManifest(binaries, manifestAnalysis);
   packageAnalysis.riskScore = aggregate.riskScore;
   packageAnalysis.riskLevel = aggregate.riskLevel;
   packageAnalysis.summary = buildPackageSummary(packageAnalysis);
@@ -142,6 +172,10 @@ function toAnalysisPackage(
 function createAcquisitionForRequest(request: WorkerScanRequest, acquisition: AnalysisServiceBundle["acquisition"]) {
   if (request.packageRoot) {
     return new LocalDirectoryPackageSource(request.packageRoot);
+  }
+
+  if (request.ecosystem === "pypi") {
+    return new PyPiPackageSource();
   }
 
   if (request.packageSource === "install") {
@@ -169,9 +203,22 @@ export class WorkerRuntime {
     const packageSource = createAcquisitionForRequest(request, this.services.acquisition);
 
     const acquired = await packageSource.acquire(request);
-    const artifacts = await this.services.extraction.discover(acquired.packageRoot);
+    const scriptInput: ScriptAnalysisInput = {
+      packageRequest: request,
+      packageRoot: acquired.packageRoot,
+      manifest: acquired.manifest
+    };
+    // Install-script analysis runs concurrently with binary discovery — it is
+    // independent of the binaries and feeds the cache key below.
+    const [artifacts, manifestAnalysis] = await Promise.all([
+      this.services.extraction.discover(acquired.packageRoot),
+      this.services.scriptAnalyzer.analyze(scriptInput)
+    ]);
     const artifactHashes = artifacts.map((artifact) => artifact.sha256);
-    const cacheKey = buildCacheKey(request, artifactHashes);
+    const cacheKey = buildCacheKey(request, [
+      ...artifactHashes,
+      `manifest:${manifestFingerprint(manifestAnalysis)}`
+    ]);
 
     const cached = !request.forceReanalyze ? this.services.cache.get(cacheKey) : undefined;
     if (cached) {
@@ -206,7 +253,7 @@ export class WorkerRuntime {
       classifiedArtifacts.push({ fingerprint, decompiled, classified });
     }
 
-    const analysis = toAnalysisPackage(request, acquired.manifest, classifiedArtifacts);
+    const analysis = toAnalysisPackage(request, acquired.manifest, classifiedArtifacts, manifestAnalysis);
     this.services.cache.set({
       cacheKey,
       artifactHashes,

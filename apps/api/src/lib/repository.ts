@@ -12,6 +12,7 @@ import type {
   CheckoutSession,
   Ecosystem,
   Finding,
+  ManifestAnalysis,
   OrganizationSummary,
   PackageAnalysis,
   PackageDiff,
@@ -68,6 +69,7 @@ interface AnalysisRow {
   source_match_confidence: "low" | "medium" | "high";
   behaviors: BehaviorSummary;
   findings: Finding[];
+  manifest_analysis?: ManifestAnalysis | null;
   binary_count: number;
   total_binary_size: number;
   ghidra_version?: string | null;
@@ -468,7 +470,8 @@ class LocalRepository implements BaseRepository {
       totalBinarySize: analysisRow.total_binary_size,
       aiModel: analysisRow.ai_model ?? "claude-sonnet",
       createdAt: analysisRow.created_at,
-      binaries
+      binaries,
+      manifestAnalysis: analysisRow.manifest_analysis ?? undefined
     };
   }
 
@@ -1208,7 +1211,8 @@ class SupabaseRepository implements BaseRepository {
         strings: binary.strings,
         behaviors: binary.behaviors as PackageAnalysis["binaries"][number]["behaviors"],
         findings: binary.findings as PackageAnalysis["binaries"][number]["findings"]
-      }))
+      })),
+      manifestAnalysis: analysisRow.manifest_analysis ?? undefined
     } satisfies PackageAnalysis;
   }
 

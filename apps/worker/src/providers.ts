@@ -6,11 +6,14 @@ import type {
   DecompiledArtifact,
   DecompilerProvider,
   FingerprintedArtifact,
+  ScriptAnalysisInput,
+  ScriptAnalyzerProvider,
   WorkerScanRequest
 } from "./types";
 import { collapseConfidence } from "./types";
 import { summarizeBinaryText } from "./fingerprint";
 import { extractTokenHints as tokenHintsFromStrings } from "./fingerprint";
+import { ManifestAnalyzer, mergeManifestAnalysis } from "./manifest-analyzer";
 
 function createBasePreview(artifact: FingerprintedArtifact): string {
   const hex = Buffer.from(artifact.bytes.slice(0, 48)).toString("hex");
@@ -475,4 +478,75 @@ export async function createLiveClassifierProvider(): Promise<ClassifierProvider
     new HttpClassifierProvider(),
     new LocalHeuristicClassifierProvider()
   ]);
+}
+
+// ---------------------------------------------------------------------------
+// Script analyzer providers (install-script / manifest analysis)
+// ---------------------------------------------------------------------------
+
+/** Deterministic heuristic install-script analyzer — always succeeds. */
+export class HeuristicScriptAnalyzerProvider implements ScriptAnalyzerProvider {
+  readonly name = "heuristic-script";
+
+  private readonly analyzer = new ManifestAnalyzer();
+
+  analyze(input: ScriptAnalysisInput) {
+    return this.analyzer.analyze(input);
+  }
+}
+
+/**
+ * Runs the heuristic analyzer, then — only when the package actually has
+ * install scripts or the heuristic already flagged something — layers the AI
+ * analyzer on top. This gate keeps Grok spend proportional to real risk:
+ * the vast majority of packages have no install scripts and never hit the AI.
+ * An AI failure degrades gracefully to the heuristic floor.
+ */
+export class CompositeScriptAnalyzerProvider implements ScriptAnalyzerProvider {
+  readonly name = "composite-script-analyzer";
+
+  constructor(
+    private readonly heuristic: ScriptAnalyzerProvider,
+    private readonly ai?: ScriptAnalyzerProvider
+  ) {}
+
+  async analyze(input: ScriptAnalysisInput) {
+    const heuristicResult = await this.heuristic.analyze(input);
+    if (!this.ai) {
+      return heuristicResult;
+    }
+
+    const shouldUseAi = heuristicResult.hasInstallScripts || heuristicResult.findings.length > 0;
+    if (!shouldUseAi) {
+      return heuristicResult;
+    }
+
+    try {
+      const aiResult = await this.ai.analyze(input);
+      return mergeManifestAnalysis(heuristicResult, aiResult);
+    } catch (error) {
+      console.warn(
+        `[script-analyzer] AI pass failed, using heuristic floor: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      return heuristicResult;
+    }
+  }
+}
+
+export function createDefaultScriptAnalyzerProvider(): ScriptAnalyzerProvider {
+  return new CompositeScriptAnalyzerProvider(new HeuristicScriptAnalyzerProvider());
+}
+
+/**
+ * Script analyzer with the Grok AI pass enabled. Use this in the daemon where
+ * real analysis infrastructure (an xAI key) is available.
+ */
+export async function createLiveScriptAnalyzerProvider(): Promise<ScriptAnalyzerProvider> {
+  const { GrokScriptAnalyzerProvider } = await import("./grok-script-classifier");
+  return new CompositeScriptAnalyzerProvider(
+    new HeuristicScriptAnalyzerProvider(),
+    new GrokScriptAnalyzerProvider()
+  );
 }

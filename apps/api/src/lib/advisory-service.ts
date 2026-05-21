@@ -8,6 +8,7 @@ interface AdvisoryRow {
   id: string;
   source: string;
   source_id: string;
+  advisory_type?: string | null;
   title: string;
   description?: string | null;
   severity?: string | null;
@@ -58,6 +59,7 @@ interface OsvVulnerability {
 interface GhsaAdvisory {
   ghsa_id: string;
   cve_id?: string | null;
+  type?: string;
   summary: string;
   description: string;
   severity: string;
@@ -106,6 +108,7 @@ interface NvdResponse {
 interface ParsedAdvisory {
   source: string;
   sourceId: string;
+  advisoryType: "vulnerability" | "malware";
   title: string;
   description?: string;
   severity?: string;
@@ -274,6 +277,15 @@ export class AdvisoryService {
     );
   }
 
+  /**
+   * Advisories where the package itself is malicious (OSV `MAL-*` / GHSA
+   * malware), as opposed to a package that merely has a vulnerability.
+   */
+  async getMalwareAdvisoriesForPackage(ecosystem: string, packageName: string): Promise<Advisory[]> {
+    const advisories = await this.getPackageAdvisories(ecosystem, packageName);
+    return advisories.filter((advisory) => advisory.advisoryType === "malware");
+  }
+
   // -------------------------------------------------------------------------
   // Source fetchers
   // -------------------------------------------------------------------------
@@ -299,6 +311,7 @@ export class AdvisoryService {
       return {
         source: "osv",
         sourceId: vuln.id,
+        advisoryType: vuln.id.toUpperCase().startsWith("MAL-") ? "malware" : "vulnerability",
         title: vuln.summary ?? vuln.id,
         description: vuln.details,
         severity: severity.level,
@@ -455,6 +468,7 @@ export class AdvisoryService {
       return {
         source: "ghsa",
         sourceId: advisory.ghsa_id,
+        advisoryType: advisory.type === "malware" ? "malware" : "vulnerability",
         title: advisory.summary,
         description: advisory.description,
         severity: advisory.severity?.toUpperCase(),
@@ -532,6 +546,7 @@ export class AdvisoryService {
       return {
         source: "nvd",
         sourceId: cve.id,
+        advisoryType: "vulnerability",
         title: `${cve.id}: ${enDescription.slice(0, 200)}`,
         description: enDescription,
         severity,
@@ -611,6 +626,7 @@ export class AdvisoryService {
         body: JSON.stringify({
           source: parsed.source,
           source_id: parsed.sourceId,
+          advisory_type: parsed.advisoryType,
           title: parsed.title,
           description: parsed.description ?? null,
           severity: parsed.severity ?? null,
@@ -680,6 +696,7 @@ export class AdvisoryService {
       id: row.id,
       source: row.source,
       sourceId: row.source_id,
+      advisoryType: row.advisory_type === "malware" ? "malware" : "vulnerability",
       title: row.title,
       description: row.description ?? undefined,
       severity: row.severity ?? undefined,
