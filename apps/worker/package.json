@@ -16,7 +16,7 @@
     "@binshield/analysis-types": "workspace:*",
     "@binshield/config": "workspace:*",
     "@binshield/risk-engine": "workspace:*",
-    "tsx": "^4.19.3"
+    "tsx": "^4.22.3"
   },
   "devDependencies": {}
 }
