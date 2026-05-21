@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           fail-on: high
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -30,7 +30,7 @@ jobs:
 Store your BinShield API key as a repository secret named `BINSHIELD_API_KEY`, then reference it:
 
 ```yaml
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           api-key: ${{ secrets.BINSHIELD_API_KEY }}
           fail-on: high
@@ -166,7 +166,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           api-key: ${{ secrets.BINSHIELD_API_KEY }}
           fail-on: high

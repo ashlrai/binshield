@@ -1,68 +1,71 @@
-name: "BinShield — Binary Supply Chain Scanner"
-description: "Decompile native package binaries, classify behavior with AI, and block risky compiled code in CI."
+name: "BinShield Supply Chain Scanner"
+description: "Detect malicious install-script worms and scan native binaries (.node/.so/.dylib) with AI-powered risk scoring."
 author: "Ashlr AI"
 branding:
   icon: "shield"
-  color: "green"
+  color: "red"
+
 inputs:
   api-key:
-    description: "BinShield API key"
+    description: "BinShield API key (from binshield.dev). Enables authenticated scans with higher rate limits and proactive alerting."
     required: false
   github-token:
-    description: "GitHub token used for PR comments"
+    description: "GitHub token used to post PR comments with scan results. Pass secrets.GITHUB_TOKEN."
     required: false
   api-base-url:
-    description: "BinShield API base URL"
+    description: "BinShield API base URL. Override only when using a self-hosted instance."
     required: false
-    default: "https://binshieldapi-production.up.railway.app"
+    default: "https://api.binshield.dev"
   working-directory:
-    description: "Repository path to inspect"
+    description: "Path to the repository root to inspect. Must contain a package.json and package-lock.json."
     required: false
     default: "."
   scan-mode:
-    description: "Dependency scan mode: native-only or all-dependencies"
+    description: "Dependency scan scope. 'native-only' targets packages with install scripts, .gyp files, or platform binaries. 'all-dependencies' scans every lockfile entry."
     required: false
     default: "native-only"
   include-dev-dependencies:
-    description: "Include devDependencies from the lockfile"
+    description: "When 'true', devDependencies from the lockfile are included in the scan."
     required: false
     default: "false"
   register-dependencies:
-    description: "Register this repo's dependencies with BinShield so the org is alerted if any are later flagged malicious"
+    description: "When 'true', registers this repo's dependencies with BinShield so your org is alerted if any package is later flagged malicious by the registry feed."
     required: false
     default: "false"
   fail-on:
-    description: "Risk threshold: critical, high, medium, low, never"
+    description: "Minimum risk level that causes the action to fail. One of: critical, high, medium, low, never."
     required: false
     default: "high"
   comment-mode:
-    description: "Output mode: summary, pr-comment, both, off"
+    description: "Where to publish the scan report. One of: summary (workflow summary), pr-comment (PR comment), both, off."
     required: false
     default: "summary"
+  sarif-file:
+    description: "Relative path (from working-directory) where BinShield writes a SARIF 2.1.0 file. Use with github/codeql-action/upload-sarif to surface findings in the Security tab."
+    required: false
   poll-interval-ms:
-    description: "Polling interval in milliseconds"
+    description: "Milliseconds to wait between status polls while a real-time analysis is in progress."
     required: false
     default: "1500"
   timeout-ms:
-    description: "Polling timeout in milliseconds"
+    description: "Maximum milliseconds to wait for all analyses to complete before timing out."
     required: false
     default: "120000"
   max-targets:
-    description: "Maximum dependency targets to scan"
+    description: "Maximum number of dependency targets to scan in a single run. Prevents runaway scans on very large lockfiles."
     required: false
     default: "50"
-  sarif-file:
-    description: "Path where BinShield should write a SARIF 2.1.0 results file. When set, the file is written and the sarif-file output is populated so a subsequent github/codeql-action/upload-sarif step can upload findings to GitHub's Security tab."
-    required: false
+
 outputs:
   total-scanned:
-    description: "Number of packages scanned"
+    description: "Total number of packages scanned in this run."
   highest-risk:
-    description: "Highest risk level found (none, low, medium, high, critical)"
+    description: "Highest risk level found across all scanned packages. One of: none, low, medium, high, critical."
   failed:
-    description: "Whether the action failed due to risk threshold ('true' or 'false')"
+    description: "Whether the action exited with failure due to the risk threshold. Either 'true' or 'false'."
   sarif-file:
-    description: "Absolute path to the written SARIF 2.1.0 file (populated only when the sarif-file input is set)"
+    description: "Absolute path to the written SARIF 2.1.0 file. Populated only when the sarif-file input is provided."
+
 runs:
   using: "node20"
   main: "dist/apps/github-action/src/index.js"

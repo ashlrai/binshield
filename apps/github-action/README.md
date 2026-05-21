@@ -1,13 +1,28 @@
-# BinShield GitHub Action
+# BinShield Supply Chain Scanner
 
-Scan your npm dependencies for risky native binaries. BinShield decompiles compiled `.node` files, classifies behavior with AI, and blocks threats before they reach production.
+**Catch malicious install-script worms and AI-classify native binaries before they reach production.**
 
-**Every `npm install` ships native binaries that no other scanner checks.** BinShield is the first tool that looks inside the machine code your dependencies actually execute.
+BinShield is the only CI scanner that looks *inside* the machine code your dependencies execute. It catches two classes of threat that `npm audit` misses entirely:
+
+- **Install-script worms** — packages with `preinstall`/`postinstall` scripts that run arbitrary code at install time (the `node-ipc`, `event-source-polyfill`, and `xz-utils` attack pattern)
+- **Malicious native binaries** — `.node` / `.so` / `.dylib` files that ship compiled malware disguised as normal addons
+
+Results appear as a workflow summary, PR comment, SARIF code-scanning alerts, or all three.
+
+## Installable today
+
+```yaml
+# Before a v1 tag is published, reference @main:
+uses: ashlrai/binshield/apps/github-action@main
+
+# Once the v1 tag is cut:
+uses: ashlrai/binshield/apps/github-action@v1
+```
 
 ## Quick Start
 
 ```yaml
-name: Binary Dependency Check
+name: Dependency Security Scan
 on: [pull_request]
 
 jobs:
@@ -15,92 +30,76 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@main
         with:
           fail-on: high
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-## What It Does
+Add `api-key: ${{ secrets.BINSHIELD_API_KEY }}` (free at [binshield.dev](https://binshield.dev)) to unlock higher rate limits and proactive alerting.
 
-1. Discovers native dependencies from your `package-lock.json`
-2. Submits each to the BinShield API for binary analysis
-3. Posts a security report as a PR comment or workflow summary
-4. Fails the check if any package exceeds your risk threshold
+## What It Detects
 
-## Example PR Comment
-
-```
-## BinShield -- Binary Dependency Scan
-
-3 native binaries found in 2 packages
-
-| Package        | Risk     | Evidence                    |
-|----------------|----------|-----------------------------|
-| bcrypt@6.0.0   | MEDIUM   | 10 binaries, crypto, fs     |
-| sharp@0.34.5   | LOW      | 1 binary, filesystem        |
-
-All binaries passed the HIGH threshold.
-```
+| Threat class | Signal | Example packages |
+|---|---|---|
+| Install-script worm | `hasInstallScript: true` in lockfile | `node-ipc`, `ua-parser-js` |
+| Native addon | `.gypfile: true`, `cpu`/`os` platform constraints | `bcrypt`, `sharp`, `canvas` |
+| Binary tool | `bin` field ships an executable | `esbuild`, `vite` |
+| Known-malicious | BinShield threat intelligence database | Typosquatters, compromised versions |
 
 ## Inputs
 
-| Input | Description | Default |
-|-------|-------------|---------|
-| `api-base-url` | BinShield API URL | `https://binshieldapi-production.up.railway.app` |
-| `api-key` | API key for authenticated scans | - |
-| `github-token` | Token for PR comments | - |
-| `working-directory` | Repo path to inspect | `.` |
-| `scan-mode` | `native-only` or `all-dependencies` | `native-only` |
-| `fail-on` | Risk threshold: `critical`, `high`, `medium`, `low`, `never` | `high` |
-| `comment-mode` | `summary`, `pr-comment`, `both`, `off` | `summary` |
-| `include-dev-dependencies` | Scan devDependencies too | `false` |
-| `poll-interval-ms` | Polling delay in ms | `1500` |
-| `timeout-ms` | Polling timeout in ms | `120000` |
-| `max-targets` | Max packages to scan | `50` |
+| Input | Default | Description |
+|---|---|---|
+| `api-key` | — | BinShield API key for authenticated scans |
+| `github-token` | — | Token for PR comments (`secrets.GITHUB_TOKEN`) |
+| `api-base-url` | `https://api.binshield.dev` | Override for self-hosted deployments |
+| `working-directory` | `.` | Repo root containing `package.json` and lockfile |
+| `scan-mode` | `native-only` | `native-only` or `all-dependencies` (see below) |
+| `include-dev-dependencies` | `false` | Include `devDependencies` in the scan |
+| `register-dependencies` | `false` | Register deps so your org gets alerted if any are later flagged |
+| `fail-on` | `high` | Risk threshold: `critical`, `high`, `medium`, `low`, `never` |
+| `comment-mode` | `summary` | `summary`, `pr-comment`, `both`, or `off` |
+| `sarif-file` | — | Path to write SARIF 2.1.0 output (enables Security tab integration) |
+| `poll-interval-ms` | `1500` | Polling interval while real-time analysis runs |
+| `timeout-ms` | `120000` | Max wait time before timing out |
+| `max-targets` | `50` | Cap on packages scanned per run |
 
-## How Scanning Works
+## Outputs
 
-- Discovers native packages from lockfile (heuristic: install scripts, gyp files, known native packages)
-- Queries the BinShield public database for instant cached results
-- For unknown packages, queues real-time analysis (decompilation + AI classification)
-- Polls until results are ready or timeout is reached
-- Renders findings with evidence cues and remediation guidance
+| Output | Description |
+|---|---|
+| `total-scanned` | Number of packages scanned |
+| `highest-risk` | Highest risk level found: `none`, `low`, `medium`, `high`, `critical` |
+| `failed` | `'true'` if the risk threshold was exceeded, `'false'` otherwise |
+| `sarif-file` | Absolute path to the SARIF file (set when `sarif-file` input is provided) |
 
 ## Scan Modes
 
-**`native-only`** (default): Only scan packages identified as native binary candidates. Fast, focused on the highest-risk dependencies.
+**`native-only`** (default): Scans packages with install scripts, `.gyp` build files, platform-specific binary markers (`cpu`/`os` fields), or known native package names. Fast — typically 5–30 packages per repo.
 
-**`all-dependencies`**: Scan every dependency in the lockfile. Use for compliance audits where full coverage is required.
+**`all-dependencies`**: Scans every entry in the lockfile. Use for compliance audits or when you want full-graph visibility.
 
 ## Risk Levels
 
 | Level | Score | Meaning |
-|-------|-------|---------|
-| `none` | 0 | No binaries or behaviors detected |
-| `low` | 1-29 | Expected behaviors only |
-| `medium` | 30-59 | Review-worthy behaviors present |
-| `high` | 60-79 | Multiple risk signals, manual review required |
-| `critical` | 80-100 | Severe indicators, block until validated |
-
-## SBOM Export
-
-BinShield generates CycloneDX 1.5 SBOMs with binary-level detail:
-
-```bash
-curl https://binshieldapi-production.up.railway.app/packages/npm/bcrypt/versions/6.0.0/sbom
-```
+|---|---|---|
+| `none` | 0 | No risky signals detected |
+| `low` | 1–29 | Expected behaviors only; review optional |
+| `medium` | 30–59 | Review-worthy signals present |
+| `high` | 60–79 | Multiple risk signals; manual review required |
+| `critical` | 80–100 | Severe threat indicators; block until validated |
 
 ## GitHub Code Scanning (SARIF)
 
-BinShield can emit a SARIF 2.1.0 file so findings appear in the **Security > Code scanning** tab on GitHub. Pass the `sarif-file` input and follow up with `github/codeql-action/upload-sarif`:
+Surface BinShield findings directly in the **Security > Code scanning** tab:
 
 ```yaml
 name: BinShield + Code Scanning
 on: [pull_request, push]
 
 permissions:
-  security-events: write   # required for upload-sarif
+  security-events: write
   contents: read
 
 jobs:
@@ -109,32 +108,57 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: BinShield binary scan
+      - name: BinShield supply chain scan
         id: binshield
-        uses: ashlrai/binshield-action@v1
+        uses: ashlrai/binshield/apps/github-action@main
         with:
           api-key: ${{ secrets.BINSHIELD_API_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on: high
-          sarif-file: binshield.sarif      # relative to working-directory
+          sarif-file: binshield.sarif
 
-      - name: Upload SARIF to GitHub Security tab
-        if: always()                        # upload even when the action fails
+      - name: Upload to GitHub Security tab
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ${{ steps.binshield.outputs.sarif-file }}
           category: binshield
 ```
 
-Once uploaded, every binary and install-script finding surfaces as an alert in **Security > Code scanning alerts** with severity, rule description, and the affected package as the artifact path.
-
 ### SARIF severity mapping
 
-| BinShield severity | SARIF level |
-|--------------------|-------------|
-| `critical`, `high` | `error`     |
-| `medium`           | `warning`   |
-| `low`, `info`      | `note`      |
+| BinShield level | SARIF level |
+|---|---|
+| `critical`, `high` | `error` |
+| `medium` | `warning` |
+| `low`, `none` | `note` |
+
+## Proactive Dependency Monitoring
+
+Enable `register-dependencies: true` to record your dependency graph with BinShield. Your organization receives alerts when any registered package is later flagged by the npm registry feed — catching compromised-after-install attacks that point-in-time CI scans cannot detect.
+
+```yaml
+- uses: ashlrai/binshield/apps/github-action@main
+  with:
+    api-key: ${{ secrets.BINSHIELD_API_KEY }}
+    register-dependencies: true
+    fail-on: high
+```
+
+## Example PR Comment
+
+```
+## BinShield — Supply Chain Scan
+
+3 native candidates found in 2 packages
+
+| Package        | Risk     | Signals                       |
+|----------------|----------|-------------------------------|
+| bcrypt@6.0.0   | MEDIUM   | install script, crypto, fs    |
+| sharp@0.34.5   | LOW      | platform binary, filesystem   |
+
+All packages passed the HIGH threshold.
+```
 
 ## Support
 

@@ -94,7 +94,7 @@ jobs:
       - run: npm ci
 
       - name: BinShield Scan
-        uses: ashlrai/binshield-action@v1
+        uses: ashlrai/binshield/apps/github-action@v1
         with:
           api-key: \${{ secrets.BINSHIELD_API_KEY }}
           risk-threshold: 60

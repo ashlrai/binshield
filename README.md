@@ -89,7 +89,7 @@ pnpm typecheck && pnpm test && pnpm build            # the validation gate
 Add the GitHub Action to block malicious dependencies on every PR:
 
 ```yaml
-- uses: ashlrai/binshield-action@v1
+- uses: ashlrai/binshield/apps/github-action@v1
   with:
     api-key: ${{ secrets.BINSHIELD_API_KEY }}
     fail-on: high
