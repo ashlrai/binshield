@@ -52,31 +52,42 @@ interface InsertedAlertRow {
  * Allows only https:// URLs to non-private hostnames.
  */
 export function isValidWebhookUrl(url: string): boolean {
+  let parsed: URL;
   try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== "https:") {
-      return false;
-    }
-    const host = parsed.hostname.toLowerCase();
-    if (host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0") {
-      return false;
-    }
-    if (host.startsWith("10.") || host.startsWith("192.168.")) {
-      return false;
-    }
-    if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
-      return false;
-    }
-    if (host.startsWith("169.254.")) {
-      return false;
-    }
-    if (host.endsWith(".internal") || host.endsWith(".local")) {
-      return false;
-    }
-    return true;
+    parsed = new URL(url);
   } catch {
     return false;
   }
+  if (parsed.protocol !== "https:") {
+    return false;
+  }
+  // Strip IPv6 brackets so the checks below see the bare host.
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  // Block IPv6 literals (loopback ::1, link-local fe80::/10, ULA fc00::/7).
+  if (host.includes(":")) {
+    return false;
+  }
+  // Block numerically-encoded hosts (decimal/hex IPv4 that bypass dotted checks).
+  if (/^\d+$/.test(host) || /^0x[0-9a-f]+$/i.test(host)) {
+    return false;
+  }
+  // Block loopback, private, link-local, and internal hostnames.
+  if (host === "localhost" || host === "0.0.0.0") {
+    return false;
+  }
+  if (host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.")) {
+    return false;
+  }
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
+    return false;
+  }
+  if (host.startsWith("169.254.")) {
+    return false;
+  }
+  if (host.endsWith(".internal") || host.endsWith(".local") || host.endsWith(".localhost")) {
+    return false;
+  }
+  return true;
 }
 
 /**

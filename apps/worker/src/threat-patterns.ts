@@ -147,7 +147,7 @@ export const SCRIPT_PATTERN_RULES: ScriptPatternRule[] = [
     patterns: [
       /discord(?:app)?\.com\/api\/webhooks/i,
       /hooks\.slack\.com|api\.telegram\.org\/bot/i,
-      /(?:pastebin\.com|paste\.ee| pastes?\.io|transfer\.sh|0x0\.st)/i,
+      /(?:pastebin\.com|paste\.ee|pastes?\.io|transfer\.sh|0x0\.st)/i,
       /\b[a-z0-9-]+\.(?:ngrok\.(?:io|app)|burpcollaborator\.net|interactsh\.com|oast\.(?:fun|live|site|pro))\b/i
     ],
     minMatches: 1
@@ -199,7 +199,7 @@ export const SCRIPT_PATTERN_RULES: ScriptPatternRule[] = [
   },
   {
     id: "obfuscated-base64-exec",
-    category: "obfuscation",
+    category: "remoteCodeExecution",
     severity: "high",
     title: "Encoded payload decoded and executed",
     description: "Decodes a base64 / hex blob and immediately executes or evaluates it — staged malware hiding its true payload.",

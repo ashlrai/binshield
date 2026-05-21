@@ -85,14 +85,14 @@ async function loadManifest(packageRoot: string): Promise<PackageManifest> {
  * malicious script change invalidates a cached result even when the package's
  * native binaries are byte-for-byte unchanged.
  */
-function manifestFingerprint(manifest: ManifestAnalysis): string {
+function manifestFingerprint(analysis: ManifestAnalysis): string {
   const stable = JSON.stringify({
-    hooks: manifest.lifecycleHooks,
-    files: [...manifest.analyzedFiles].sort(),
-    findings: manifest.findings
+    hooks: analysis.lifecycleHooks,
+    files: [...analysis.analyzedFiles].sort(),
+    findings: analysis.findings
       .map((finding) => `${finding.category}|${finding.filePath}|${finding.title}|${finding.evidence}`)
       .sort(),
-    malware: [...manifest.knownMalwareAdvisoryIds].sort()
+    malware: [...analysis.knownMalwareAdvisoryIds].sort()
   });
   return createHash("sha256").update(stable).digest("hex").slice(0, 16);
 }

@@ -18,7 +18,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { ManifestAnalysis, ScriptFinding, ScriptThreatSummary } from "@binshield/analysis-types";
-import { emptyScriptThreatSummary } from "@binshield/analysis-types";
+import { emptyScriptThreatSummary, SCRIPT_THREAT_KEYS } from "@binshield/analysis-types";
 import { scoreManifest } from "@binshield/risk-engine";
 
 import type { ScriptAnalysisInput } from "./types";
@@ -34,16 +34,6 @@ const SHADOWABLE_COMMANDS = new Set([
   "pip", "pip3", "curl", "wget", "ssh", "scp", "docker", "kubectl", "make", "cc", "gcc", "clang",
   "env", "ls", "cat", "cp", "mv", "rm", "go", "cargo", "ruby", "perl", "java"
 ]);
-
-const SUMMARY_KEYS: ReadonlyArray<string> = [
-  "installHook",
-  "scriptInjection",
-  "environmentTheft",
-  "dependencyConfusion",
-  "wiper",
-  "reverseShell",
-  "remoteCodeExecution"
-];
 
 const MAX_FILES = 64;
 const MAX_FILE_BYTES = 512 * 1024;
@@ -111,7 +101,7 @@ export async function analyzeFromSources(
     }
     seen.add(key);
     findings.push(finding);
-    if (SUMMARY_KEYS.includes(finding.category)) {
+    if ((SCRIPT_THREAT_KEYS as readonly string[]).includes(finding.category)) {
       const signal = threats[finding.category as keyof ScriptThreatSummary];
       signal.detected = true;
       if (signal.details.length < 8) {

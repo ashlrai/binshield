@@ -311,6 +311,24 @@ export const emptyScriptThreatSummary = (): ScriptThreatSummary => ({
   remoteCodeExecution: { detected: false, details: [] }
 });
 
+/** The keys of ScriptThreatSummary, in a stable order. Single source of truth. */
+export const SCRIPT_THREAT_KEYS: Array<keyof ScriptThreatSummary> = [
+  "installHook",
+  "scriptInjection",
+  "environmentTheft",
+  "dependencyConfusion",
+  "wiper",
+  "reverseShell",
+  "remoteCodeExecution"
+];
+
+/** Every ScriptThreatCategory — the summary keys plus obfuscation and knownMalware. */
+export const SCRIPT_THREAT_CATEGORIES: ScriptThreatCategory[] = [
+  ...SCRIPT_THREAT_KEYS,
+  "obfuscation",
+  "knownMalware"
+];
+
 export function entitlementForPlan(plan: PlanName): EntitlementRecord {
   switch (plan) {
     case "enterprise":

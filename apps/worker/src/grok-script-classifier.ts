@@ -13,7 +13,7 @@ import type {
   ScriptThreatSummary,
   SourceMatchConfidence
 } from "@binshield/analysis-types";
-import { emptyScriptThreatSummary } from "@binshield/analysis-types";
+import { emptyScriptThreatSummary, SCRIPT_THREAT_CATEGORIES, SCRIPT_THREAT_KEYS } from "@binshield/analysis-types";
 import { scoreManifest } from "@binshield/risk-engine";
 
 import type { ScriptAnalysisInput, ScriptAnalyzerProvider } from "./types";
@@ -29,26 +29,7 @@ const INITIAL_BACKOFF_MS = 1_000;
 
 const VALID_CONFIDENCE = new Set<SourceMatchConfidence>(["low", "medium", "high"]);
 const VALID_SEVERITY = new Set(["info", "low", "medium", "high", "critical"]);
-const VALID_CATEGORY = new Set<ScriptThreatCategory>([
-  "installHook",
-  "scriptInjection",
-  "environmentTheft",
-  "dependencyConfusion",
-  "wiper",
-  "reverseShell",
-  "remoteCodeExecution",
-  "obfuscation",
-  "knownMalware"
-]);
-const THREAT_KEYS: Array<keyof ScriptThreatSummary> = [
-  "installHook",
-  "scriptInjection",
-  "environmentTheft",
-  "dependencyConfusion",
-  "wiper",
-  "reverseShell",
-  "remoteCodeExecution"
-];
+const VALID_CATEGORY = new Set<ScriptThreatCategory>(SCRIPT_THREAT_CATEGORIES);
 
 interface ChatCompletionResponse {
   model: string;
@@ -219,7 +200,7 @@ function validateThreats(raw: RawScriptClassification["threats"]): ScriptThreatS
   if (!raw || typeof raw !== "object") {
     return base;
   }
-  for (const key of THREAT_KEYS) {
+  for (const key of SCRIPT_THREAT_KEYS) {
     const signal = raw[key];
     if (signal && typeof signal === "object") {
       base[key] = {
