@@ -12,7 +12,7 @@ import { rateLimitByIp, rateLimitByAuth } from "./lib/rate-limit";
 import { createServices } from "./lib/repository";
 import type { AppServices } from "./lib/repository";
 import { generateCycloneDxSbom } from "./lib/sbom";
-import type { AuthPrincipal, Ecosystem, PackageAnalysis } from "./lib/types";
+import type { AuthPrincipal, Ecosystem, PackageAnalysis, SuppressionSummary } from "./lib/types";
 import { detectLockfileFormat, validateEcosystem, validateReportType } from "./lib/validation";
 
 type AppVariables = {
@@ -109,6 +109,34 @@ export function createApp(services = createServices(readApiEnv())) {
     await next();
   });
 
+  // Strict IP-based rate limiter for anonymous public scan (10 req/min per IP)
+  const publicScanRateLimit = rateLimitByIp({ windowMs: 60_000, max: 10 });
+
+  /** Filter binary-level findings out of an analysis according to org suppressions. */
+  function applySuppressions(analysis: PackageAnalysis, suppressions: SuppressionSummary[]): PackageAnalysis {
+    if (suppressions.length === 0) return analysis;
+
+    const active = suppressions.filter(
+      (s) =>
+        s.ecosystem === analysis.ecosystem &&
+        s.packageName === analysis.packageName &&
+        (s.version == null || s.version === analysis.version)
+    );
+
+    if (active.length === 0) return analysis;
+
+    return {
+      ...analysis,
+      binaries: analysis.binaries.map((b) => ({
+        ...b,
+        // Finding has only title/severity/description — match on title only
+        findings: (b.findings ?? []).filter(
+          (f) => !active.some((s) => s.findingTitle == null || s.findingTitle === f.title)
+        )
+      }))
+    };
+  }
+
   app.get("/health", (c) => {
     const { env, repositoryInfo } = getServices(c);
     return c.json({
@@ -118,6 +146,38 @@ export function createApp(services = createServices(readApiEnv())) {
       repository: repositoryInfo,
       defaultFailOn: env.defaultFailOn
     });
+  });
+
+  // -----------------------------------------------------------------------
+  // Public anonymous scan — no API key required, strictly IP-rate-limited
+  // -----------------------------------------------------------------------
+
+  app.post("/public/scan", publicScanRateLimit, async (c) => {
+    const body = await c.req.json();
+    const validationError = requireBody<{ ecosystem: Ecosystem; packageName: string; version: string }>(body, [
+      "ecosystem",
+      "packageName",
+      "version"
+    ]);
+    if (validationError) {
+      return c.json({ error: validationError }, 400);
+    }
+
+    if (!validateEcosystem(body.ecosystem)) {
+      return c.json({ error: "Invalid ecosystem. Must be one of: npm, pypi, crates, go" }, 400);
+    }
+
+    // Use a synthetic anonymous principal so the job is not org-scoped and
+    // does not consume any org's quota.
+    const anonPrincipal: AuthPrincipal = {
+      apiKeyId: "anon",
+      orgId: "anon",
+      label: "public-scan",
+      scopes: []
+    };
+
+    const job = await getServices(c).repository.submitScan(body, anonPrincipal);
+    return c.json(job, job.status === "complete" ? 200 : 202);
   });
 
   app.get("/packages/search", async (c) => {
@@ -153,6 +213,13 @@ export function createApp(services = createServices(readApiEnv())) {
 
     if (!analysis) {
       return c.json({ error: "Analysis not found" }, 404);
+    }
+
+    // Apply org-level finding suppressions for authenticated requests
+    const auth = c.get("auth");
+    if (auth) {
+      const suppressions = await getServices(c).repository.listSuppressions(auth.orgId);
+      return c.json(applySuppressions(analysis, suppressions));
     }
 
     return c.json(analysis);
@@ -630,6 +697,75 @@ export function createApp(services = createServices(readApiEnv())) {
     });
 
     return c.json(result);
+  });
+
+  // -----------------------------------------------------------------------
+  // Finding suppression routes
+  // -----------------------------------------------------------------------
+
+  app.get("/orgs/:orgId/suppressions", async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const items = await getServices(c).repository.listSuppressions(orgId);
+    return c.json({ items });
+  });
+
+  app.post("/orgs/:orgId/suppressions", async (c) => {
+    const orgId = c.req.param("orgId");
+    const auth = c.get("auth")!;
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const body = await c.req.json();
+    const validationError = requireBody<{ ecosystem: string; packageName: string; reason: string }>(body, [
+      "ecosystem",
+      "packageName",
+      "reason"
+    ]);
+    if (validationError) {
+      return c.json({ error: validationError }, 400);
+    }
+
+    const suppression = await getServices(c).repository.createSuppression(orgId, {
+      ecosystem: body.ecosystem,
+      packageName: body.packageName,
+      version: body.version,
+      findingCategory: body.findingCategory,
+      findingTitle: body.findingTitle,
+      reason: body.reason
+    });
+
+    logAudit(getAuditConfig(c), orgId, "suppression.created", "suppression", suppression.id, auth.userId, {
+      ecosystem: body.ecosystem,
+      packageName: body.packageName,
+      version: body.version
+    });
+
+    return c.json(suppression, 201);
+  });
+
+  app.delete("/orgs/:orgId/suppressions/:suppressionId", async (c) => {
+    const orgId = c.req.param("orgId");
+    const suppressionId = c.req.param("suppressionId");
+    const auth = c.get("auth")!;
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const removed = await getServices(c).repository.deleteSuppression(orgId, suppressionId);
+    if (!removed) {
+      return c.json({ error: "Suppression not found" }, 404);
+    }
+
+    logAudit(getAuditConfig(c), orgId, "suppression.deleted", "suppression", suppressionId, auth.userId, {});
+    return c.json({ ok: true });
   });
 
   // -----------------------------------------------------------------------

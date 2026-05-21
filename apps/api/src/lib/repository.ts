@@ -23,6 +23,7 @@ import type {
   ScanRequest,
   SearchResult,
   SubscriptionSummary,
+  SuppressionSummary,
   WatchlistPackageSummary,
   WatchlistSummary
 } from "./types";
@@ -191,6 +192,18 @@ interface AlertRow {
   delivered_at: string | null;
 }
 
+interface SuppressionRow {
+  id: string;
+  org_id: string;
+  ecosystem: string;
+  package_name: string;
+  version: string | null;
+  finding_category: string | null;
+  finding_title: string | null;
+  reason: string;
+  created_at: string;
+}
+
 function toNotificationChannelSummary(row: NotificationChannelRow): NotificationChannelSummary {
   return {
     id: row.id,
@@ -218,6 +231,20 @@ function toAlertSummary(row: AlertRow): AlertSummary {
     status: row.status,
     createdAt: row.created_at,
     deliveredAt: row.delivered_at ?? undefined
+  };
+}
+
+function toSuppressionSummary(row: SuppressionRow): SuppressionSummary {
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    ecosystem: row.ecosystem,
+    packageName: row.package_name,
+    version: row.version ?? undefined,
+    findingCategory: row.finding_category ?? undefined,
+    findingTitle: row.finding_title ?? undefined,
+    reason: row.reason,
+    createdAt: row.created_at
   };
 }
 
@@ -274,6 +301,21 @@ interface BaseRepository {
   createInvitation(orgId: string, email: string, role: string, invitedBy?: string): Promise<{ id: string; token: string; email: string; expiresAt: string }>;
   listInvitations(orgId: string): Promise<Array<{ id: string; email: string; role: string; createdAt: string; expiresAt: string; accepted: boolean }>>;
   acceptInvitation(token: string, userId: string): Promise<{ orgId: string; role: string } | null>;
+
+  // Finding suppressions
+  listSuppressions(orgId: string): Promise<SuppressionSummary[]>;
+  createSuppression(
+    orgId: string,
+    input: {
+      ecosystem: string;
+      packageName: string;
+      version?: string;
+      findingCategory?: string;
+      findingTitle?: string;
+      reason: string;
+    }
+  ): Promise<SuppressionSummary>;
+  deleteSuppression(orgId: string, suppressionId: string): Promise<boolean>;
 }
 
 function now() {
@@ -349,6 +391,7 @@ class LocalRepository implements BaseRepository {
   private notificationChannels = new Map<string, NotificationChannelRow>();
   private alerts = new Map<string, AlertRow>();
   private registeredDependencies = new Map<string, Array<{ ecosystem: string; packageName: string; version: string }>>();
+  private suppressions = new Map<string, SuppressionRow>();
 
   constructor(private readonly env: ApiEnv) {
     const seededOrgId = "org_demo";
@@ -1165,6 +1208,46 @@ class LocalRepository implements BaseRepository {
     inv.accepted_at = now();
     return { orgId: inv.org_id, role: inv.role };
   }
+
+  async listSuppressions(orgId: string): Promise<SuppressionSummary[]> {
+    return Array.from(this.suppressions.values())
+      .filter((row) => row.org_id === orgId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .map(toSuppressionSummary);
+  }
+
+  async createSuppression(
+    orgId: string,
+    input: {
+      ecosystem: string;
+      packageName: string;
+      version?: string;
+      findingCategory?: string;
+      findingTitle?: string;
+      reason: string;
+    }
+  ): Promise<SuppressionSummary> {
+    const row: SuppressionRow = {
+      id: randomId("sup"),
+      org_id: orgId,
+      ecosystem: input.ecosystem,
+      package_name: input.packageName,
+      version: input.version ?? null,
+      finding_category: input.findingCategory ?? null,
+      finding_title: input.findingTitle ?? null,
+      reason: input.reason,
+      created_at: now()
+    };
+    this.suppressions.set(row.id, row);
+    return toSuppressionSummary(row);
+  }
+
+  async deleteSuppression(orgId: string, suppressionId: string): Promise<boolean> {
+    const row = this.suppressions.get(suppressionId);
+    if (!row || row.org_id !== orgId) return false;
+    this.suppressions.delete(suppressionId);
+    return true;
+  }
 }
 
 interface AdvisoryRow {
@@ -1957,6 +2040,49 @@ class SupabaseRepository implements BaseRepository {
     );
 
     return { orgId: inv.org_id, role: inv.role };
+  }
+
+  async listSuppressions(orgId: string): Promise<SuppressionSummary[]> {
+    const rows = await this.select<SuppressionRow>(
+      "finding_suppressions",
+      `select=*&org_id=eq.${orgId}&order=created_at.desc`
+    );
+    return rows.map(toSuppressionSummary);
+  }
+
+  async createSuppression(
+    orgId: string,
+    input: {
+      ecosystem: string;
+      packageName: string;
+      version?: string;
+      findingCategory?: string;
+      findingTitle?: string;
+      reason: string;
+    }
+  ): Promise<SuppressionSummary> {
+    const [row] = await this.insert<SuppressionRow>("finding_suppressions", {
+      org_id: orgId,
+      ecosystem: input.ecosystem,
+      package_name: input.packageName,
+      version: input.version ?? null,
+      finding_category: input.findingCategory ?? null,
+      finding_title: input.findingTitle ?? null,
+      reason: input.reason
+    });
+    return toSuppressionSummary(row);
+  }
+
+  async deleteSuppression(orgId: string, suppressionId: string): Promise<boolean> {
+    try {
+      await this.request<unknown>(
+        `/finding_suppressions?id=eq.${suppressionId}&org_id=eq.${orgId}`,
+        { method: "DELETE" }
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

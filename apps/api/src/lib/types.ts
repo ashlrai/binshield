@@ -160,3 +160,18 @@ export interface AlertSummary {
   createdAt: string;
   deliveredAt?: string;
 }
+
+export interface SuppressionSummary {
+  id: string;
+  orgId: string;
+  ecosystem: string;
+  packageName: string;
+  /** Null = all versions */
+  version?: string;
+  /** Null = any category */
+  findingCategory?: string;
+  /** Null = any title */
+  findingTitle?: string;
+  reason: string;
+  createdAt: string;
+}
