@@ -6,6 +6,15 @@ export const emptyBehaviorSummary = () => ({
     obfuscation: { detected: false, details: [] },
     dataExfiltration: { detected: false, details: [] }
 });
+export const emptyScriptThreatSummary = () => ({
+    installHook: { detected: false, details: [] },
+    scriptInjection: { detected: false, details: [] },
+    environmentTheft: { detected: false, details: [] },
+    dependencyConfusion: { detected: false, details: [] },
+    wiper: { detected: false, details: [] },
+    reverseShell: { detected: false, details: [] },
+    remoteCodeExecution: { detected: false, details: [] }
+});
 export function entitlementForPlan(plan) {
     switch (plan) {
         case "enterprise":

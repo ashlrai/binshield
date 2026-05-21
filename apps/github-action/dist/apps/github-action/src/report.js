@@ -27,26 +27,49 @@ function collectFindings(analysis) {
     })));
     return findings.sort((a, b) => severityOrder.indexOf(a.severity) - severityOrder.indexOf(b.severity));
 }
+/** Install-script / manifest findings, highest severity first. */
+function collectScriptFindings(analysis) {
+    const findings = analysis.manifestAnalysis?.findings ?? [];
+    return [...findings].sort((a, b) => severityOrder.indexOf(a.severity) -
+        severityOrder.indexOf(b.severity));
+}
 function buildEvidenceCue(analysis) {
     const behaviors = collectBehaviors(analysis);
     const findings = collectFindings(analysis);
+    const scriptFindings = collectScriptFindings(analysis);
     const binaryNames = analysis.binaries.map((binary) => binary.filename);
     const topFinding = findings[0];
+    const topScript = scriptFindings[0];
     const parts = [
         `${analysis.binaryCount} binaries`,
         behaviors.length ? `behaviors: ${behaviors.slice(0, 3).join(", ")}` : "no behavior families detected",
         binaryNames.length ? `artifacts: ${binaryNames.slice(0, 2).join(", ")}` : "no native artifacts recovered"
     ];
+    if (analysis.manifestAnalysis?.hasInstallScripts) {
+        parts.push("runs install scripts");
+    }
+    if (topScript) {
+        parts.push(`install-script threat: ${topScript.severity.toUpperCase()} ${topScript.category}`);
+    }
     if (topFinding) {
-        parts.push(`top finding: ${topFinding.severity.toUpperCase()} in ${topFinding.binary}`);
+        parts.push(`top binary finding: ${topFinding.severity.toUpperCase()} in ${topFinding.binary}`);
     }
     return parts.join(" | ");
 }
 function buildGuidance(analysis) {
     const findings = collectFindings(analysis);
+    const scriptFindings = collectScriptFindings(analysis);
+    const topScript = scriptFindings[0];
     const topFinding = findings[0];
+    // Install-script threats are install-time RCE — surface their guidance first.
+    if (topScript && (topScript.severity === "critical" || topScript.severity === "high")) {
+        return topScript.recommendation;
+    }
     if (topFinding?.recommendation) {
         return topFinding.recommendation;
+    }
+    if (topScript?.recommendation) {
+        return topScript.recommendation;
     }
     switch (analysis.riskLevel) {
         case "critical":
