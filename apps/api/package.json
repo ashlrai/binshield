@@ -14,12 +14,12 @@
     "@binshield/analysis-types": "workspace:*",
     "@binshield/config": "workspace:*",
     "@binshield/risk-engine": "workspace:*",
-    "@supabase/supabase-js": "^2.56.0",
-    "hono": "^4.7.2"
+    "@supabase/supabase-js": "^2.106.1",
+    "hono": "^4.12.21"
     ,"stripe": "^18.5.0"
   },
   "devDependencies": {
     "@hono/node-server": "^1.13.8",
-    "tsx": "^4.19.3"
+    "tsx": "^4.22.3"
   }
 }

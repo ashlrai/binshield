@@ -8,11 +8,11 @@
     "build": "echo 'video: use pnpm --filter @binshield/video render to generate'"
   },
   "dependencies": {
-    "@remotion/cli": "^4.0.0",
-    "@remotion/player": "^4.0.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "remotion": "^4.0.0"
+    "@remotion/cli": "^4.0.464",
+    "@remotion/player": "^4.0.464",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "remotion": "^4.0.464"
   },
   "devDependencies": {
     "typescript": "^5.9.3"
