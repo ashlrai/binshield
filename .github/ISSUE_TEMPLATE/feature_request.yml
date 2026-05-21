@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest an improvement or new capability
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Related component
+      options:
+        - web (frontend)
+        - api
+        - worker (analysis pipeline)
+        - github-action
+        - packages (shared libraries)
+        - other / cross-cutting
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem would this solve? What is the use case?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

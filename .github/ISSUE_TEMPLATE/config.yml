@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/ashlrai/binshield/security/policy
+    about: Please report security issues privately — do not open a public issue.
+  - name: BinShield website & docs
+    url: https://binshield.dev
+    about: Product information, documentation, and the hosted platform.

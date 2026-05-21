@@ -1,0 +1,52 @@
+name: Release
+
+# Manual release: validates the monorepo, rebuilds the GitHub Action bundle,
+# and cuts a tagged GitHub Release. Publishing the Action to the Marketplace
+# mirror repo (ashlrai/binshield-action) remains a manual maintainer step —
+# see CONTRIBUTING.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate
+        run: |
+          pnpm typecheck
+          pnpm test
+          pnpm build
+
+      - name: Verify GitHub Action dist is up to date
+        run: |
+          pnpm --filter @binshield/github-action build
+          git diff --exit-code apps/github-action/dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: BinShield v${{ inputs.version }}
+          generate_release_notes: true

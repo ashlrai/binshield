@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a defect in BinShield
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. For **security vulnerabilities**, do not file
+        a public issue — see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      options:
+        - web (frontend)
+        - api
+        - worker (analysis pipeline)
+        - github-action
+        - packages (shared libraries)
+        - other / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including any error output.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: The BinShield version or git commit you are running.

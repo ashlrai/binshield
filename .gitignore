@@ -4,8 +4,10 @@ dist
 .turbo
 .env
 .env.local
+.env*.local
 coverage
-pnpm-lock.yaml
 *.tsbuildinfo
 .vercel
-.env*.local
+
+# Internal (non-public) docs — GTM, outreach, strategy, handoff notes.
+internal

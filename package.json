@@ -2,12 +2,15 @@
   "name": "binshield",
   "version": "0.1.0",
   "private": true,
-  "description": "BinShield — Supply chain binary security platform that decompiles native package binaries, classifies behavior with AI, and blocks threats before they reach production.",
+  "description": "BinShield — Supply chain security platform that detects malicious npm/PyPI install scripts and native package binaries, classifies behavior with AI, and blocks supply-chain worms before they reach production.",
   "keywords": [
     "security",
     "supply-chain",
     "binary-analysis",
     "npm",
+    "pypi",
+    "malware-detection",
+    "install-scripts",
     "decompilation",
     "sbom",
     "cyclonedx",
@@ -35,12 +38,15 @@
     "dev": "pnpm --filter @binshield/web dev",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
+    "prettier": "^3.4.2",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }

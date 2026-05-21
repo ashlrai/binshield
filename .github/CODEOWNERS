@@ -1,0 +1,6 @@
+# Default owner for everything in the repo.
+* @masonwyatt23
+
+# The published GitHub Action and the security policy warrant extra review.
+/apps/github-action/ @masonwyatt23
+/SECURITY.md @masonwyatt23
