@@ -1,0 +1,6 @@
+{
+  "name": "my-utility-lib",
+  "version": "1.0.0",
+  "description": "TEST FIXTURE — a benign utility package with no install scripts and no native binaries.",
+  "main": "index.js"
+}

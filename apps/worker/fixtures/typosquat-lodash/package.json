@@ -1,0 +1,9 @@
+{
+  "name": "lodahs",
+  "version": "4.17.21",
+  "description": "TEST FIXTURE — simulates a typosquatting package impersonating lodash. Name is edit-distance 2 from 'lodash'.",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node install.js"
+  }
+}

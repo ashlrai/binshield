@@ -23,6 +23,8 @@ import { scoreManifest } from "@binshield/risk-engine";
 
 import type { ScriptAnalysisInput } from "./types";
 import { evaluateScriptPatterns, redactEvidence } from "./threat-patterns";
+import { detectTyposquat } from "./typosquat";
+import { applyTrustedPackageDemotion } from "./trusted-packages";
 
 /** npm lifecycle hooks that execute automatically during `npm install`. */
 const AUTO_RUN_HOOKS = ["preinstall", "install", "postinstall", "prepare"];
@@ -151,6 +153,20 @@ export async function analyzeFromSources(
     record(finding);
   }
 
+  // Typosquatting: package name is suspiciously close to a popular package.
+  // Runs on npm packages only (PyPI squatting uses different patterns).
+  if (ecosystem === "npm") {
+    const typosquatFinding = detectTyposquat(input.manifest.name);
+    if (typosquatFinding) {
+      record(typosquatFinding);
+    }
+  }
+
+  // Apply trusted-package demotion: for allowlisted packages, downgrade the
+  // benign installHook baseline from "low" → "info". High/critical findings,
+  // typosquat hits, and knownMalware are NEVER demoted — see trusted-packages.ts.
+  const demotedFindings = applyTrustedPackageDemotion(findings, input.manifest.name);
+
   const base: ManifestAnalysis = {
     id: `manifest_${input.manifest.name}_${input.manifest.version}`.replace(/[^a-zA-Z0-9_.@/-]/g, "_"),
     ecosystem,
@@ -160,7 +176,7 @@ export async function analyzeFromSources(
     riskScore: 0,
     riskLevel: "none",
     threats,
-    findings,
+    findings: demotedFindings,
     knownMalwareAdvisoryIds: [],
     sourceMatchConfidence: ecosystem === "pypi" ? "low" : "medium",
     analyzedAt: new Date().toISOString()

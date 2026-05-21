@@ -1,0 +1,12 @@
+{
+  "name": "sqlite3",
+  "version": "5.1.7",
+  "description": "TEST FIXTURE — simulates a trusted native addon (sqlite3) that legitimately runs node-gyp rebuild.",
+  "main": "lib/sqlite3.js",
+  "scripts": {
+    "install": "node-pre-gyp install --fallback-to-build"
+  },
+  "dependencies": {
+    "@mapbox/node-pre-gyp": "^1.0.0"
+  }
+}
