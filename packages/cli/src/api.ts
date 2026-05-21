@@ -61,6 +61,8 @@ export interface PackageAnalysis {
   binaryCount: number;
   totalBinarySize: number;
   binaries: BinaryAnalysis[];
+  hasInstallScript?: boolean;
+  installScriptContent?: string;
   createdAt: string;
 }
 
@@ -87,6 +89,32 @@ export interface ApiListResponse<T> {
   total: number;
 }
 
+export interface LockfileScanJob {
+  id: string;
+  status: string;
+  filename: string;
+}
+
+export interface LockfilePackageResult {
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  riskLevel: RiskLevel;
+  riskScore: number;
+  status: string;
+  analysisId?: string;
+}
+
+export interface LockfileScanResult {
+  id: string;
+  filename: string;
+  status: string;
+  packages: LockfilePackageResult[];
+  totalPackages: number;
+  highRiskCount: number;
+  criticalRiskCount: number;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -107,7 +135,7 @@ function authHeaders(apiKey?: string): Record<string, string> {
 
 export class BinShieldClient {
   private readonly baseUrl: string;
-  private readonly apiKey: string | undefined;
+  readonly apiKey: string | undefined;
 
   constructor(options?: { baseUrl?: string; apiKey?: string }) {
     this.baseUrl = (options?.baseUrl ?? resolveApiUrl()).replace(/\/+$/, "");
@@ -146,6 +174,69 @@ export class BinShieldClient {
     }
 
     return (await res.json()) as ScanJob;
+  }
+
+  // -- Lockfile scan --------------------------------------------------------
+
+  async scanLockfile(filename: string, content: string): Promise<LockfileScanJob> {
+    const res = await fetch(`${this.baseUrl}/scans/lockfile`, {
+      method: "POST",
+      headers: authHeaders(this.apiKey),
+      body: JSON.stringify({ filename, content }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      let errMsg = `Lockfile scan submission failed: ${res.status} ${res.statusText}`;
+      try {
+        const parsed = JSON.parse(body) as { error?: string };
+        if (parsed.error) errMsg = parsed.error;
+      } catch {
+        // ignore parse errors
+      }
+      throw new Error(errMsg);
+    }
+
+    return (await res.json()) as LockfileScanJob;
+  }
+
+  async getLockfileScan(id: string): Promise<LockfileScanResult> {
+    const res = await fetch(`${this.baseUrl}/scans/lockfile/${encodeURIComponent(id)}`, {
+      headers: authHeaders(this.apiKey),
+    });
+
+    if (!res.ok) {
+      throw new Error(`Failed to fetch lockfile scan: ${res.status} ${res.statusText}`);
+    }
+
+    return (await res.json()) as LockfileScanResult;
+  }
+
+  async waitForLockfileResult(
+    job: LockfileScanJob,
+    opts: { timeoutMs?: number; onPoll?: (status: string) => void } = {},
+  ): Promise<LockfileScanResult> {
+    const timeout = opts.timeoutMs ?? 120_000;
+    const start = Date.now();
+    let delay = 2000;
+
+    while (Date.now() - start < timeout) {
+      await sleep(delay);
+      const result = await this.getLockfileScan(job.id);
+      opts.onPoll?.(result.status);
+
+      if (result.status === "failed") {
+        throw new Error(`Lockfile scan ${job.id} failed`);
+      }
+
+      if (result.status === "complete" || result.status === "completed") {
+        return result;
+      }
+
+      delay = Math.min(Math.round(delay * 1.5), 5000);
+    }
+
+    throw new Error(`Timed out waiting for lockfile scan ${job.id} after ${opts.timeoutMs ?? 120_000}ms`);
   }
 
   // -- Poll for scan result -------------------------------------------------

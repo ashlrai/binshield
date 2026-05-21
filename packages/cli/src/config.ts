@@ -35,19 +35,18 @@ export function writeConfig(config: BinShieldConfig): void {
 }
 
 /**
- * Resolve the API key from environment variable or config file.
- * Environment variable takes precedence.
+ * Resolve the API key: CLI flag → env var → config file.
  */
-export function resolveApiKey(): string | undefined {
-  return process.env.BINSHIELD_API_KEY ?? readConfig().apiKey;
+export function resolveApiKey(flagValue?: string): string | undefined {
+  return flagValue ?? process.env.BINSHIELD_API_KEY ?? readConfig().apiKey;
 }
 
 /**
- * Resolve the API base URL from environment variable or config file.
- * Falls back to the production default.
+ * Resolve the API base URL: CLI flag → env var → config file → production default.
  */
-export function resolveApiUrl(): string {
+export function resolveApiUrl(flagValue?: string): string {
   return (
+    flagValue ??
     process.env.BINSHIELD_API_URL ??
     readConfig().apiUrl ??
     "https://api.binshield.dev"
