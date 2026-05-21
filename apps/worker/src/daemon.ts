@@ -1,8 +1,15 @@
+import { aggregatePackageRiskWithManifest } from "@binshield/risk-engine";
+
 import type { QueuedJob, SupabaseWorkerConfig } from "./supabase-store";
 import { SupabaseWorkerStore } from "./supabase-store";
 import { WorkerRuntime } from "./pipeline";
-import { createLiveClassifierProvider, createLiveDecompilerProvider } from "./providers";
-import { checkAndSendAlerts } from "./alerts";
+import { lookupKnownMalware } from "./malware-feed";
+import {
+  createLiveClassifierProvider,
+  createLiveDecompilerProvider,
+  createLiveScriptAnalyzerProvider
+} from "./providers";
+import { runAlertLoop } from "./alert-loop";
 import { YaraScanner } from "./yara-scanner";
 import type { WorkerScanRequest } from "./types";
 
@@ -61,9 +68,16 @@ export class WorkerDaemon {
     try {
       const liveDecompiler = await createLiveDecompilerProvider();
       const liveClassifier = await createLiveClassifierProvider();
-      (this.runtime as unknown as { services: { decompiler: unknown; classifier: unknown } }).services.decompiler = liveDecompiler;
-      (this.runtime as unknown as { services: { decompiler: unknown; classifier: unknown } }).services.classifier = liveClassifier;
-      log("Live providers loaded (Ghidra Docker + Grok AI)");
+      const liveScriptAnalyzer = await createLiveScriptAnalyzerProvider();
+      const services = (
+        this.runtime as unknown as {
+          services: { decompiler: unknown; classifier: unknown; scriptAnalyzer: unknown };
+        }
+      ).services;
+      services.decompiler = liveDecompiler;
+      services.classifier = liveClassifier;
+      services.scriptAnalyzer = liveScriptAnalyzer;
+      log("Live providers loaded (Ghidra Docker + Grok AI + install-script analysis)");
     } catch {
       log("Using default providers (heuristic fallback)");
     }
@@ -168,23 +182,58 @@ export class WorkerDaemon {
         }
       }
 
+      // Cross-reference against the known-malware feed. A confirmed match
+      // forces a critical verdict regardless of heuristic/AI analysis.
+      const manifest = outcome.analysis.manifestAnalysis;
+      if (manifest) {
+        try {
+          const malware = await lookupKnownMalware(job.ecosystem, job.packageName, job.version);
+          if (malware.advisoryIds.length > 0) {
+            manifest.knownMalwareAdvisoryIds = malware.advisoryIds;
+            manifest.knownMalwareMatches = malware.matches;
+            manifest.riskScore = 100;
+            manifest.riskLevel = "critical";
+            for (const match of malware.matches) {
+              if (!manifest.findings.some((finding) => finding.evidence === match.advisoryId)) {
+                manifest.findings.push({
+                  category: "knownMalware",
+                  severity: "critical",
+                  title: `Known-malicious package (${match.advisoryId})`,
+                  description: match.summary,
+                  filePath: `${job.packageName}@${job.version}`,
+                  evidence: match.advisoryId,
+                  recommendation:
+                    "This package is on a public malware advisory. Remove it immediately and rotate any exposed credentials."
+                });
+              }
+            }
+            const merged = aggregatePackageRiskWithManifest(outcome.analysis.binaries, manifest);
+            outcome.analysis.riskScore = merged.riskScore;
+            outcome.analysis.riskLevel = merged.riskLevel;
+            log(`Job ${job.id}: matched ${malware.advisoryIds.length} known-malware advisory(ies)`);
+          }
+        } catch (malwareError) {
+          logError(`Job ${job.id}: malware feed lookup failed`, malwareError);
+        }
+      }
+
       const analysisId = await this.store.persistAnalysis(outcome.analysis);
       await this.store.completeJob(job.id, analysisId);
 
-      // Fire-and-forget: send watchlist alerts (never blocks job completion)
-      checkAndSendAlerts(
+      // Fire-and-forget: run the proactive alert loop (matches the package
+      // against watchlists + scanned lockfiles, notifies affected orgs).
+      // Never blocks job completion.
+      runAlertLoop(
         {
           supabaseUrl: this.config.supabaseUrl,
           supabaseServiceRoleKey: this.config.supabaseServiceRoleKey,
           sendgridApiKey: this.config.sendgridApiKey,
           fromEmail: this.config.fromEmail,
         },
-        job.packageName,
-        job.ecosystem,
-        job.version,
+        { ecosystem: job.ecosystem, packageName: job.packageName, version: job.version },
         outcome.analysis,
       ).catch((alertError) => {
-        logError(`Job ${job.id}: alert check failed`, alertError);
+        logError(`Job ${job.id}: alert loop failed`, alertError);
       });
 
       log(

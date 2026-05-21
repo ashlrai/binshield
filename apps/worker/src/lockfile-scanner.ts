@@ -281,6 +281,30 @@ export class LockfileScanner {
       },
     );
 
+    // Index every dependency (native or not, including transitive) so the
+    // proactive alert loop can match a flagged package back to this org.
+    if (dependencies.length > 0) {
+      const depRows = dependencies.map((dep) => ({
+        lockfile_scan_id: scanRow.id,
+        org_id: req.orgId,
+        repo_id: req.repoId ?? null,
+        ecosystem: "npm",
+        package_name: dep.name,
+        version: dep.version,
+        is_native: dep.isNative,
+        source: "lockfile-scan",
+      }));
+      for (let i = 0; i < depRows.length; i += 500) {
+        await this.request<unknown>("/lockfile_dependencies", {
+          method: "POST",
+          headers: { Prefer: "return=minimal" },
+          body: JSON.stringify(depRows.slice(i, i + 500)),
+        }).catch(() => {
+          /* dependency indexing is non-fatal — the scan result still returns */
+        });
+      }
+    }
+
     // Cross-reference native deps with existing analyses
     const packageResults: LockfilePackageResult[] = [];
     let totalRisk = 0;
