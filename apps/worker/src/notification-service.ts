@@ -261,17 +261,17 @@ async function sendWebhookAlert(
     url: packageUrl(payload)
   });
 
-  // Sign with the channel's stored secret so consumers can verify authenticity.
-  const signature = crypto.createHmac("sha256", secret ?? webhookUrl).update(body).digest("hex");
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "X-BinShield-Event": "package.flagged"
+  };
+  // Only attach a signature when the channel has a real stored secret —
+  // signing with a low-entropy fallback would give false authenticity.
+  if (secret) {
+    const signature = crypto.createHmac("sha256", secret).update(body).digest("hex");
+    headers["X-BinShield-Signature"] = `sha256=${signature}`;
+  }
 
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "X-BinShield-Event": "package.flagged",
-      "X-BinShield-Signature": `sha256=${signature}`
-    },
-    body
-  });
+  const response = await fetch(webhookUrl, { method: "POST", headers, body });
   return response.ok;
 }
