@@ -39,6 +39,7 @@ function readConfig(): GitHubActionConfig {
     scanMode: (core.getInput("scan-mode") || "native-only") as GitHubActionConfig["scanMode"],
     workingDirectory: path.resolve(workspace, core.getInput("working-directory") || "."),
     includeDevDependencies: readBoolInput("include-dev-dependencies", false),
+    registerDependencies: readBoolInput("register-dependencies", false),
     pollIntervalMs: readIntInput("poll-interval-ms", 1500),
     timeoutMs: readIntInput("timeout-ms", 120000),
     maxTargets: readIntInput("max-targets", 50)
@@ -60,6 +61,21 @@ async function main() {
     pollIntervalMs: config.pollIntervalMs,
     timeoutMs: config.timeoutMs
   });
+
+  // Opt-in: register this repo's dependencies so BinShield can alert the org
+  // if any of them is later flagged malicious by the registry feed.
+  if (config.registerDependencies && config.apiKey) {
+    try {
+      const registered = await client.registerDependencies(
+        targets.map((target) => ({ ecosystem: "npm", packageName: target.name, version: target.version }))
+      );
+      core.info(`Registered ${registered} dependencies with BinShield for proactive alerting.`);
+    } catch (error) {
+      core.warning(
+        `BinShield dependency registration failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
 
   const selected = targets.slice(0, config.maxTargets);
   const outcomes: ScanOutcome[] = [];

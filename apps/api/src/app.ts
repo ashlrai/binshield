@@ -234,6 +234,50 @@ export function createApp(services = createServices(readApiEnv())) {
     return c.json(job);
   });
 
+  // Register a repo's dependencies (from the GitHub Action) so the proactive
+  // alert loop can warn this org if any of them is later flagged malicious.
+  app.post("/dependency-registration", async (c) => {
+    const auth = c.get("auth");
+    if (!auth) {
+      return c.json({ error: "API key required" }, 401);
+    }
+
+    const body = await c.req.json();
+    const validationError = requireBody<{ dependencies: unknown }>(body, ["dependencies"]);
+    if (validationError) {
+      return c.json({ error: validationError }, 400);
+    }
+    if (!Array.isArray(body.dependencies)) {
+      return c.json({ error: "dependencies must be an array" }, 400);
+    }
+
+    const dependencies = (body.dependencies as unknown[])
+      .filter(
+        (entry): entry is { ecosystem?: string; packageName: string; version: string } =>
+          Boolean(entry) &&
+          typeof (entry as { packageName?: unknown }).packageName === "string" &&
+          typeof (entry as { version?: unknown }).version === "string"
+      )
+      .slice(0, 5000)
+      .map((entry) => ({
+        ecosystem: entry.ecosystem === "pypi" ? "pypi" : "npm",
+        packageName: entry.packageName,
+        version: entry.version
+      }));
+
+    const registered = await getServices(c).repository.registerDependencies(auth.orgId, dependencies);
+    logAudit(
+      getAuditConfig(c),
+      auth.orgId,
+      "dependencies.registered",
+      "lockfile_dependencies",
+      auth.orgId,
+      auth.userId,
+      { count: registered }
+    );
+    return c.json({ registered });
+  });
+
   app.get("/orgs/:orgId", async (c) => {
     const orgId = c.req.param("orgId");
     const { error } = await getOrgAuth(c, orgId);

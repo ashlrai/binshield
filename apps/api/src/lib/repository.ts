@@ -256,6 +256,10 @@ interface BaseRepository {
   ): Promise<NotificationChannelSummary>;
   deleteNotificationChannel(orgId: string, channelId: string): Promise<boolean>;
   listAlerts(orgId: string, limit?: number): Promise<AlertSummary[]>;
+  registerDependencies(
+    orgId: string,
+    dependencies: Array<{ ecosystem: string; packageName: string; version: string }>
+  ): Promise<number>;
 
   // Revocation & removal
   revokeApiKey(orgId: string, keyId: string): Promise<boolean>;
@@ -344,6 +348,7 @@ class LocalRepository implements BaseRepository {
   private invitations = new Map<string, OrgInvitationRow>();
   private notificationChannels = new Map<string, NotificationChannelRow>();
   private alerts = new Map<string, AlertRow>();
+  private registeredDependencies = new Map<string, Array<{ ecosystem: string; packageName: string; version: string }>>();
 
   constructor(private readonly env: ApiEnv) {
     const seededOrgId = "org_demo";
@@ -939,6 +944,14 @@ class LocalRepository implements BaseRepository {
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
       .slice(0, limit)
       .map(toAlertSummary);
+  }
+
+  async registerDependencies(
+    orgId: string,
+    dependencies: Array<{ ecosystem: string; packageName: string; version: string }>
+  ): Promise<number> {
+    this.registeredDependencies.set(orgId, dependencies);
+    return dependencies.length;
   }
 
   async validateApiKey(rawKey: string) {
@@ -1645,6 +1658,38 @@ class SupabaseRepository implements BaseRepository {
       `select=*&org_id=eq.${orgId}&order=created_at.desc&limit=${limit}`
     );
     return rows.map(toAlertSummary);
+  }
+
+  async registerDependencies(
+    orgId: string,
+    dependencies: Array<{ ecosystem: string; packageName: string; version: string }>
+  ): Promise<number> {
+    // Replace-on-write: each CI run registers a fresh snapshot of the repo's
+    // dependencies, keeping the table bounded per org.
+    await this.request<unknown>(`/lockfile_dependencies?org_id=eq.${orgId}&source=eq.github-action`, {
+      method: "DELETE",
+      headers: { Prefer: "return=minimal" }
+    }).catch(() => {
+      /* nothing to delete is fine */
+    });
+    if (dependencies.length === 0) {
+      return 0;
+    }
+    const rows = dependencies.map((dep) => ({
+      org_id: orgId,
+      ecosystem: dep.ecosystem,
+      package_name: dep.packageName,
+      version: dep.version,
+      source: "github-action"
+    }));
+    for (let i = 0; i < rows.length; i += 500) {
+      await this.request<unknown>("/lockfile_dependencies", {
+        method: "POST",
+        headers: { Prefer: "return=minimal" },
+        body: JSON.stringify(rows.slice(i, i + 500))
+      });
+    }
+    return dependencies.length;
   }
 
   async validateApiKey(rawKey: string) {

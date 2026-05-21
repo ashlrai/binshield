@@ -21,6 +21,7 @@ export interface GitHubActionConfig {
   scanMode: ScanMode;
   workingDirectory: string;
   includeDevDependencies: boolean;
+  registerDependencies: boolean;
   pollIntervalMs: number;
   timeoutMs: number;
   maxTargets: number;

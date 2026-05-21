@@ -73,6 +73,25 @@ export class BinShieldClient {
 
     throw new Error(`Timed out waiting for scan ${job.id} after ${this.options.timeoutMs}ms`);
   }
+
+  async registerDependencies(
+    dependencies: Array<{ ecosystem: string; packageName: string; version: string }>
+  ): Promise<number> {
+    const response = await fetch(`${this.options.apiBaseUrl}/dependency-registration`, {
+      method: "POST",
+      headers: authHeaders(this.options.apiKey),
+      body: JSON.stringify({ dependencies })
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `BinShield API rejected dependency registration: ${response.status} ${response.statusText}`
+      );
+    }
+
+    const data = (await response.json()) as { registered?: number };
+    return data.registered ?? 0;
+  }
 }
 
 export async function scanTarget(client: BinShieldClient, target: DiscoveredPackage, request: ScanRequest): Promise<ScanOutcome> {

@@ -27,6 +27,10 @@ inputs:
     description: "Include devDependencies from the lockfile"
     required: false
     default: "false"
+  register-dependencies:
+    description: "Register this repo's dependencies with BinShield so the org is alerted if any are later flagged malicious"
+    required: false
+    default: "false"
   fail-on:
     description: "Risk threshold: critical, high, medium, low, never"
     required: false
