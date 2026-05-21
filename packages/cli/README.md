@@ -1,104 +1,159 @@
 # @binshield/cli
 
-Zero-dependency CLI for [BinShield](https://binshield.dev) — scan npm packages and lockfiles for binary supply-chain risk without signing up for the SaaS.
+Zero-dependency CLI for [BinShield](https://binshield.dev) — audit your dependency tree and scan npm packages for binary supply-chain risk. Decompiles native `.node`, `.so`, `.dylib`, and `.wasm` binaries, detects malicious install scripts, and blocks supply-chain worms before they reach production.
+
+**Zero runtime dependencies.** The entire CLI is a single auditable entry point.
 
 ## Install
 
 ```bash
-# One-off scan (no install required)
-npx @binshield/cli scan npm bcrypt 5.1.1
+# One-off (no install required)
+npx @binshield/cli audit
 
-# Global install
+# Global
 npm install -g @binshield/cli
-
-# Or with pnpm / yarn
 pnpm add -g @binshield/cli
-yarn global add @binshield/cli
 ```
 
-## Usage
+## Commands
 
-### Scan a package
+### `binshield audit [path]` — flagship
+
+Detect your project's lockfile, scan every dependency, and print an aggregate risk report. This is the primary command for CI and developer workflows.
 
 ```bash
-# Scan a specific version
+binshield audit                           # auto-detect lockfile in cwd
+binshield audit ./apps/api                # specific directory
+binshield audit --fail-on medium          # exit 2 on medium+ risk
+binshield audit --ci                      # plain output for CI logs
+binshield audit --json > report.json      # full JSON report
+```
+
+Output includes:
+- Verdict box: overall risk level + counts by severity
+- **Install-script threats highlighted prominently** (BinShield's differentiator)
+- Sorted table of risky packages (critical → high → medium → low)
+- Remediation guidance
+
+### `binshield scan <ecosystem> <package> [version]`
+
+Deep-scan a single package. Works **without an API key** via the public endpoint.
+
+```bash
 binshield scan npm bcrypt 5.1.1
-
-# Scan latest
-binshield scan npm sharp
-
-# Other ecosystems
+binshield scan npm sharp                  # latest
 binshield scan pypi requests 2.31.0
-binshield scan cargo openssl 0.10.55
+binshield scan npm canvas --fail-on medium
+binshield scan npm express --json | jq .riskLevel
 ```
 
-### Scan a lockfile
+### `binshield init`
 
-Requires an API key ([get one free](https://binshield.dev)).
+Scaffold a GitHub Actions workflow into `.github/workflows/binshield.yml` in one command.
 
 ```bash
-# Auto-detect lockfile in current directory
-binshield scan-lockfile
+binshield init
+binshield init --fail-on medium
+binshield init --force                    # overwrite existing
+```
 
-# Explicit path
+Then add `BINSHIELD_API_KEY` as a GitHub Actions secret.
+
+### `binshield scan-lockfile [path]`
+
+Submit a specific lockfile. Requires an API key.
+
+```bash
+binshield scan-lockfile
 binshield scan-lockfile ./apps/api/package-lock.json
 ```
 
 Supports: `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`.
 
-### Search the database
+### `binshield config [get|set|path]`
+
+Manage persistent settings in `~/.binshield/config.json` (chmod 600).
+
+```bash
+binshield config set apiKey bsh_live_xxxxx
+binshield config set apiUrl https://api.binshield.dev
+binshield config get
+binshield config path                     # print config file location
+```
+
+### `binshield search <query>`
+
+Search the public package database.
 
 ```bash
 binshield search sqlite
-binshield search native addon
+binshield search native image addon
 ```
 
-### Download an SBOM
+### `binshield login`
 
-```bash
-binshield sbom sharp 0.33.2
-```
-
-### Save your API key
-
-```bash
-binshield login
-# prompts for key → saves to ~/.binshield/config.json
-```
+Interactive API key prompt (alias for `config set apiKey`).
 
 ## Global flags
 
 | Flag | Description |
 |------|-------------|
-| `--api-url <url>` | Override the API base URL |
-| `--api-key <key>` | Pass API key inline (overrides env / config) |
+| `--api-key <key>` | API key (overrides env / config file) |
+| `--api-url <url>` | Override API base URL |
+| `--fail-on <level>` | Exit 2 when risk >= level (`none`\|`low`\|`medium`\|`high`\|`critical`). Default: `high` |
 | `--json` | Machine-readable JSON output |
-| `--fail-on <level>` | Exit code 2 when risk is at or above this level (default: `high`) |
-| `--help`, `-h` | Show help |
-| `--version`, `-v` | Show version |
+| `--ci` | CI mode: plain output, no spinner, no color |
+| `--no-color` | Disable ANSI colors |
+| `--quiet`, `-q` | Suppress informational output |
+| `--verbose` | Show extra detail (imports, strings, decompiled preview) |
+| `-h`, `--help` | Show help (also: `binshield <command> --help`) |
+| `-v`, `--version` | Show version |
+
+## Config precedence
+
+```
+CLI flag  >  BINSHIELD_API_KEY / BINSHIELD_API_URL env  >  ~/.binshield/config.json  >  default
+```
 
 ## Environment variables
 
 | Variable | Description |
 |----------|-------------|
-| `BINSHIELD_API_KEY` | API key (overrides config file) |
+| `BINSHIELD_API_KEY` | API key |
 | `BINSHIELD_API_URL` | API base URL (default: `https://api.binshield.dev`) |
+| `NO_COLOR` | Disable ANSI colors ([no-color.org](https://no-color.org)) |
+| `FORCE_COLOR` | Force ANSI colors even in non-TTY |
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
 | `0` | Success — risk below threshold |
-| `1` | Error (network, API, bad arguments) |
+| `1` | Error (network failure, bad arguments, API error) |
 | `2` | Risk at or above `--fail-on` threshold |
 
 ## CI integration
 
 ```yaml
-# .github/workflows/security.yml
-- name: BinShield scan
-  run: npx @binshield/cli scan-lockfile --api-key ${{ secrets.BINSHIELD_API_KEY }} --fail-on high
+# .github/workflows/binshield.yml  (or: binshield init)
+- name: BinShield supply-chain audit
+  run: npx --yes @binshield/cli audit --ci --fail-on high
+  env:
+    BINSHIELD_API_KEY: ${{ secrets.BINSHIELD_API_KEY }}
 ```
+
+Or generate it with `binshield init`.
+
+## Why zero dependencies?
+
+A security tool's supply chain should be as small and auditable as possible. `@binshield/cli` ships with:
+
+- Hand-rolled ANSI styling (`style.ts`)
+- Hand-rolled Braille-block spinner with graceful TTY/non-TTY degradation (`spinner.ts`)
+- Hand-rolled `node:util parseArgs` argument parsing
+- Zero runtime npm dependencies
+
+The entire codebase is readable in an afternoon.
 
 ## License
 
