@@ -8,6 +8,7 @@ import type {
   PackageAnalysis,
   PackageDiff,
   RepoRecord,
+  ScriptFinding,
   SearchResult
 } from "@binshield/analysis-types";
 import { getSampleAnalysis, getSamplePackageDiff, getSamplePackageHistory, sampleAnalyses, sampleDiff } from "@binshield/analysis-types";
@@ -52,6 +53,18 @@ export interface BinaryEvidenceCard {
   decompiledPreview: string;
 }
 
+export interface InstallScriptCard {
+  /** True when the package was analyzed by the install-script engine. */
+  present: boolean;
+  hasInstallScripts: boolean;
+  riskLevel: PackageAnalysis["riskLevel"];
+  riskScore: number;
+  lifecycleHooks: string[];
+  knownMalware: boolean;
+  findings: ScriptFinding[];
+  aiExplanation?: string;
+}
+
 export interface VersionTimelineEntry {
   version: string;
   riskLevel: PackageAnalysis["riskLevel"];
@@ -80,6 +93,7 @@ export interface PackageWorkspace {
   related: PublicPackageCard[];
   found: boolean;
   evidenceCards: BinaryEvidenceCard[];
+  installScript: InstallScriptCard;
   findingsBySeverity: Array<{
     severity: FindingSeverity;
     findings: Finding[];
@@ -297,6 +311,31 @@ function toEvidenceCard(binary: BinaryAnalysis): BinaryEvidenceCard {
     findings: binary.findings,
     evidenceChecklist: buildEvidenceChecklist(binary),
     decompiledPreview: binary.decompiledPreview
+  };
+}
+
+function buildInstallScriptCard(analysis: PackageAnalysis): InstallScriptCard {
+  const manifest = analysis.manifestAnalysis;
+  if (!manifest) {
+    return {
+      present: false,
+      hasInstallScripts: false,
+      riskLevel: "none",
+      riskScore: 0,
+      lifecycleHooks: [],
+      knownMalware: false,
+      findings: []
+    };
+  }
+  return {
+    present: true,
+    hasInstallScripts: manifest.hasInstallScripts,
+    riskLevel: manifest.riskLevel,
+    riskScore: manifest.riskScore,
+    lifecycleHooks: Object.keys(manifest.lifecycleHooks),
+    knownMalware: manifest.knownMalwareAdvisoryIds.length > 0,
+    findings: manifest.findings,
+    aiExplanation: manifest.aiExplanation
   };
 }
 
@@ -605,6 +644,7 @@ export async function getPackageWorkspace(packageName: string, version?: string)
     related,
     found,
     evidenceCards: selected.binaries.map(toEvidenceCard),
+    installScript: buildInstallScriptCard(selected),
     findingsBySeverity: groupFindings(selected),
     versionTimeline: buildVersionTimeline(versions.length ? versions : [selected], selected.version),
     diffNarrative: buildDiffNarrative(selected, diff, previous),

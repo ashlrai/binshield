@@ -132,3 +132,31 @@ export interface AdvisorySyncResult {
   newAdvisories: number;
   sources: Record<string, number>;
 }
+
+export interface NotificationChannelSummary {
+  id: string;
+  orgId: string;
+  channel: "email" | "slack" | "webhook";
+  destination: string;
+  enabled: boolean;
+  minRiskLevel: string;
+  createdAt: string;
+  /** Webhook HMAC secret — returned only once, at creation time. */
+  secret?: string;
+}
+
+export interface AlertSummary {
+  id: string;
+  orgId: string;
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  riskLevel: string;
+  riskScore: number;
+  matchReason: string;
+  channel: string;
+  destination: string;
+  status: string;
+  createdAt: string;
+  deliveredAt?: string;
+}

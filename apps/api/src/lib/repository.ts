@@ -5,6 +5,7 @@ import { getSampleAnalysis, sampleAnalyses, sampleDiff } from "@binshield/analys
 import { hashApiKey } from "./auth";
 import type {
   Advisory,
+  AlertSummary,
   BehaviorSummary,
   ApiKeySummary,
   ApiListResponse,
@@ -13,6 +14,7 @@ import type {
   Ecosystem,
   Finding,
   ManifestAnalysis,
+  NotificationChannelSummary,
   OrganizationSummary,
   PackageAnalysis,
   PackageDiff,
@@ -162,6 +164,63 @@ interface RepoContextRow {
   created_at: string;
 }
 
+interface NotificationChannelRow {
+  id: string;
+  org_id: string;
+  channel: "email" | "slack" | "webhook";
+  destination: string;
+  secret: string | null;
+  enabled: boolean;
+  min_risk_level: string;
+  created_at: string;
+}
+
+interface AlertRow {
+  id: string;
+  org_id: string;
+  ecosystem: string;
+  package_name: string;
+  version: string;
+  risk_level: string;
+  risk_score: number;
+  match_reason: string;
+  channel: string;
+  destination: string;
+  status: string;
+  created_at: string;
+  delivered_at: string | null;
+}
+
+function toNotificationChannelSummary(row: NotificationChannelRow): NotificationChannelSummary {
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    channel: row.channel,
+    destination: row.destination,
+    enabled: row.enabled,
+    minRiskLevel: row.min_risk_level,
+    createdAt: row.created_at
+  };
+}
+
+function toAlertSummary(row: AlertRow): AlertSummary {
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    ecosystem: row.ecosystem,
+    packageName: row.package_name,
+    version: row.version,
+    riskLevel: row.risk_level,
+    riskScore: row.risk_score,
+    matchReason: row.match_reason,
+    channel: row.channel,
+    destination: row.destination,
+    status: row.status,
+    createdAt: row.created_at,
+    deliveredAt: row.delivered_at ?? undefined
+  };
+}
+
 interface BaseRepository {
   searchPackages(query?: string): Promise<ApiListResponse<SearchResult>>;
   listPackageVersions(ecosystem: Ecosystem, name: string): Promise<PackageAnalysis[]>;
@@ -190,6 +249,13 @@ interface BaseRepository {
   createBillingCheckout(orgId: string, plan: string): Promise<CheckoutSession>;
   getPackageAdvisories(ecosystem: Ecosystem, packageName: string): Promise<Advisory[]>;
   getRecentAdvisories(limit?: number): Promise<Advisory[]>;
+  listNotificationChannels(orgId: string): Promise<NotificationChannelSummary[]>;
+  createNotificationChannel(
+    orgId: string,
+    input: { channel: "email" | "slack" | "webhook"; destination: string; minRiskLevel?: string }
+  ): Promise<NotificationChannelSummary>;
+  deleteNotificationChannel(orgId: string, channelId: string): Promise<boolean>;
+  listAlerts(orgId: string, limit?: number): Promise<AlertSummary[]>;
 
   // Revocation & removal
   revokeApiKey(orgId: string, keyId: string): Promise<boolean>;
@@ -276,6 +342,8 @@ class LocalRepository implements BaseRepository {
   private jobs = new Map<string, AnalysisJobRow>();
   private usageRecords = new Map<string, UsageRecordRow>();
   private invitations = new Map<string, OrgInvitationRow>();
+  private notificationChannels = new Map<string, NotificationChannelRow>();
+  private alerts = new Map<string, AlertRow>();
 
   constructor(private readonly env: ApiEnv) {
     const seededOrgId = "org_demo";
@@ -831,6 +899,46 @@ class LocalRepository implements BaseRepository {
     packages.splice(idx, 1);
     this.watchlistPackages.set(watchlistId, packages);
     return true;
+  }
+
+  async listNotificationChannels(orgId: string) {
+    return Array.from(this.notificationChannels.values())
+      .filter((row) => row.org_id === orgId)
+      .map(toNotificationChannelSummary);
+  }
+
+  async createNotificationChannel(
+    orgId: string,
+    input: { channel: "email" | "slack" | "webhook"; destination: string; minRiskLevel?: string }
+  ) {
+    const secret = input.channel === "webhook" ? crypto.randomBytes(24).toString("hex") : null;
+    const row: NotificationChannelRow = {
+      id: randomId("notif"),
+      org_id: orgId,
+      channel: input.channel,
+      destination: input.destination,
+      secret,
+      enabled: true,
+      min_risk_level: input.minRiskLevel ?? "high",
+      created_at: now()
+    };
+    this.notificationChannels.set(row.id, row);
+    return { ...toNotificationChannelSummary(row), secret: secret ?? undefined };
+  }
+
+  async deleteNotificationChannel(orgId: string, channelId: string): Promise<boolean> {
+    const row = this.notificationChannels.get(channelId);
+    if (!row || row.org_id !== orgId) return false;
+    this.notificationChannels.delete(channelId);
+    return true;
+  }
+
+  async listAlerts(orgId: string, limit = 50) {
+    return Array.from(this.alerts.values())
+      .filter((row) => row.org_id === orgId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .slice(0, limit)
+      .map(toAlertSummary);
   }
 
   async validateApiKey(rawKey: string) {
@@ -1495,6 +1603,48 @@ class SupabaseRepository implements BaseRepository {
     } catch {
       return false;
     }
+  }
+
+  async listNotificationChannels(orgId: string) {
+    const rows = await this.select<NotificationChannelRow>(
+      "notification_channels",
+      `select=*&org_id=eq.${orgId}&order=created_at.desc`
+    );
+    return rows.map(toNotificationChannelSummary);
+  }
+
+  async createNotificationChannel(
+    orgId: string,
+    input: { channel: "email" | "slack" | "webhook"; destination: string; minRiskLevel?: string }
+  ) {
+    const secret = input.channel === "webhook" ? crypto.randomBytes(24).toString("hex") : null;
+    const [row] = await this.insert<NotificationChannelRow>("notification_channels", {
+      org_id: orgId,
+      channel: input.channel,
+      destination: input.destination,
+      secret,
+      min_risk_level: input.minRiskLevel ?? "high"
+    });
+    return { ...toNotificationChannelSummary(row), secret: secret ?? undefined };
+  }
+
+  async deleteNotificationChannel(orgId: string, channelId: string): Promise<boolean> {
+    try {
+      await this.request<unknown>(`/notification_channels?id=eq.${channelId}&org_id=eq.${orgId}`, {
+        method: "DELETE"
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async listAlerts(orgId: string, limit = 50) {
+    const rows = await this.select<AlertRow>(
+      "alerts",
+      `select=*&org_id=eq.${orgId}&order=created_at.desc&limit=${limit}`
+    );
+    return rows.map(toAlertSummary);
   }
 
   async validateApiKey(rawKey: string) {

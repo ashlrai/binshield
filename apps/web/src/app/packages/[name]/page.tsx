@@ -231,6 +231,59 @@ export default async function PackagePage({
             <p className="empty-state">No escalated findings were emitted for this package version.</p>
           )}
         </div>
+
+        <div className="panel">
+          <div className="panel__heading">
+            <h2>Install scripts</h2>
+            {workspace.installScript.present ? (
+              <RiskBadge level={workspace.installScript.riskLevel} score={workspace.installScript.riskScore} />
+            ) : (
+              <span>not analyzed</span>
+            )}
+          </div>
+          {!workspace.installScript.present ? (
+            <p className="empty-state">Install-script analysis is not available for this package version.</p>
+          ) : workspace.installScript.knownMalware ? (
+            <p className="empty-state">
+              This package matches a public malware advisory and is treated as known-malicious. Remove it and rotate
+              any credentials exposed to the install environment.
+            </p>
+          ) : !workspace.installScript.hasInstallScripts ? (
+            <p className="empty-state">
+              This package declares no install scripts — it runs no code on the machine during installation.
+            </p>
+          ) : (
+            <>
+              <div className="tag-list">
+                {workspace.installScript.lifecycleHooks.map((hook) => (
+                  <span key={hook} className="tag">
+                    {hook}
+                  </span>
+                ))}
+              </div>
+              {workspace.installScript.aiExplanation ? (
+                <p className="panel__supporting-copy">{workspace.installScript.aiExplanation}</p>
+              ) : null}
+              {workspace.installScript.findings.length ? (
+                <div className="finding-list">
+                  {workspace.installScript.findings.map((finding, index) => (
+                    <div key={`script-${finding.category}-${finding.filePath}-${index}`} className="finding-row">
+                      <h3>
+                        {finding.severity.toUpperCase()} — {finding.title}
+                      </h3>
+                      <p>{finding.description}</p>
+                      <small>
+                        {finding.filePath} · {finding.recommendation}
+                      </small>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-state">Install scripts are present, but no suspicious behavior was detected.</p>
+              )}
+            </>
+          )}
+        </div>
       </section>
 
       <section className="surface-grid surface-grid--split">

@@ -15,6 +15,7 @@ export type { PlanName, EntitlementRecord };
 const FEATURE_MIN_PLAN: Record<string, PlanName> = {
   api_access: "pro",
   watchlists: "pro",
+  proactive_alerts: "pro",
   binary_diff_alerts: "pro",
   sbom_export: "team",
   slack_alerts: "team",

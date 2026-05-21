@@ -367,6 +367,86 @@ export function createApp(services = createServices(readApiEnv())) {
     return c.json({ ok: true });
   });
 
+  // --- Notification channels (proactive alert loop) -----------------------
+
+  app.get("/orgs/:orgId/notification-channels", requireFeature("proactive_alerts"), async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const items = await getServices(c).repository.listNotificationChannels(orgId);
+    return c.json({ items });
+  });
+
+  app.post("/orgs/:orgId/notification-channels", requireFeature("proactive_alerts"), async (c) => {
+    const orgId = c.req.param("orgId");
+    const auth = c.get("auth")!;
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const body = await c.req.json();
+    const validationError = requireBody<{ channel: string; destination: string; minRiskLevel?: string }>(body, [
+      "channel",
+      "destination"
+    ]);
+    if (validationError) {
+      return c.json({ error: validationError }, 400);
+    }
+    if (!["email", "slack", "webhook"].includes(body.channel)) {
+      return c.json({ error: "channel must be one of: email, slack, webhook" }, 400);
+    }
+    if (body.minRiskLevel && !["low", "medium", "high", "critical"].includes(body.minRiskLevel)) {
+      return c.json({ error: "minRiskLevel must be one of: low, medium, high, critical" }, 400);
+    }
+
+    const channel = await getServices(c).repository.createNotificationChannel(orgId, {
+      channel: body.channel,
+      destination: body.destination,
+      minRiskLevel: body.minRiskLevel
+    });
+
+    logAudit(getAuditConfig(c), orgId, "notification_channel.created", "notification_channel", channel.id, auth.userId, {
+      channel: body.channel
+    });
+
+    // `secret` is returned exactly once, at creation time.
+    return c.json(channel, 201);
+  });
+
+  app.delete("/orgs/:orgId/notification-channels/:channelId", requireFeature("proactive_alerts"), async (c) => {
+    const orgId = c.req.param("orgId");
+    const channelId = c.req.param("channelId");
+    const auth = c.get("auth")!;
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const removed = await getServices(c).repository.deleteNotificationChannel(orgId, channelId);
+    if (!removed) {
+      return c.json({ error: "Notification channel not found" }, 404);
+    }
+    logAudit(getAuditConfig(c), orgId, "notification_channel.deleted", "notification_channel", channelId, auth.userId, {});
+    return c.json({ ok: true });
+  });
+
+  app.get("/orgs/:orgId/alerts", requireFeature("proactive_alerts"), async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const limitParam = Number.parseInt(c.req.query("limit") ?? "50", 10);
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 50;
+    const items = await getServices(c).repository.listAlerts(orgId, limit);
+    return c.json({ items });
+  });
+
   app.get("/orgs/:orgId/subscription", async (c) => {
     const orgId = c.req.param("orgId");
     const { error } = await getOrgAuth(c, orgId);
