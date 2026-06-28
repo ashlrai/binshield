@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -15,6 +15,82 @@ async function fileExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Walk every file/dir produced by an archive extraction and verify nothing
+ * escaped the intended output directory.  Checks two attack vectors:
+ *
+ *  1. Path traversal — entry whose resolved absolute path is outside extractDir
+ *     (e.g. "../../evil" in a tarball header).
+ *  2. Symlink escape — a symlink whose target resolves to a path outside
+ *     extractDir (absolute symlinks or chained "../.." hops).
+ *
+ * Throws a clear "rejected malicious archive" error on the first violation found.
+ */
+async function validateExtraction(extractDir: string): Promise<void> {
+  // Resolve the canonical base so we can do prefix-check comparisons.
+  const resolvedBase = await realpath(extractDir);
+  const base = resolvedBase.endsWith(path.sep) ? resolvedBase : resolvedBase + path.sep;
+
+  async function walk(dir: string): Promise<void> {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const entryPath = path.join(dir, entry.name);
+
+      // Resolve the real path of the entry itself (not its target if symlink).
+      // We use lstat so we can distinguish symlinks from regular files/dirs.
+      const st = await lstat(entryPath);
+
+      if (st.isSymbolicLink()) {
+        // For symlinks, resolve the full target and verify it stays inside.
+        // realpath() follows all hops, so chained symlinks are covered.
+        let resolved: string;
+        try {
+          resolved = await realpath(entryPath);
+        } catch {
+          // Dangling symlink — target does not exist yet inside extractDir.
+          // A dangling symlink cannot be exploited for reads, but an absolute
+          // dangling symlink that points outside is still suspicious.  Resolve
+          // the raw target relative to the symlink's directory instead.
+          const { readlink } = await import("node:fs/promises");
+          const rawTarget = await readlink(entryPath);
+          const candidate = path.resolve(path.dirname(entryPath), rawTarget);
+          if (!candidate.startsWith(base)) {
+            throw new Error(
+              `Rejected malicious archive: symlink "${entryPath}" points outside the extraction directory (target: "${rawTarget}")`
+            );
+          }
+          continue;
+        }
+        if (!resolved.startsWith(base)) {
+          throw new Error(
+            `Rejected malicious archive: symlink "${entryPath}" resolves to "${resolved}" which is outside the extraction directory`
+          );
+        }
+        // Do NOT recurse into symlink targets — that could loop and is already covered.
+      } else {
+        // Regular file or directory — verify its own real path stays inside.
+        let resolved: string;
+        try {
+          resolved = await realpath(entryPath);
+        } catch {
+          // Entry disappeared between readdir and realpath (race) — skip it.
+          continue;
+        }
+        if (!resolved.startsWith(base)) {
+          throw new Error(
+            `Rejected malicious archive: entry "${entryPath}" resolves to "${resolved}" which is outside the extraction directory`
+          );
+        }
+        if (entry.isDirectory()) {
+          await walk(entryPath);
+        }
+      }
+    }
+  }
+
+  await walk(extractDir);
 }
 
 function normalizeManifest(raw: Record<string, unknown> | undefined): PackageManifest {
@@ -86,7 +162,8 @@ export class RegistryPackageSource implements PackageAcquisitionService {
       }
 
       const tarballPath = path.join(tarballDir, tarballName);
-      await execFileAsync("tar", ["-xzf", tarballPath, "-C", extractDir]);
+      await execFileAsync("tar", ["--no-same-owner", "-xzf", tarballPath, "-C", extractDir]);
+      await validateExtraction(extractDir);
 
       const nestedRoot = await findPackageRoot(extractDir);
       const manifest = await readManifest(nestedRoot);
@@ -203,8 +280,9 @@ export class PyPiPackageSource implements PackageAcquisitionService {
       if (sdist.filename.endsWith(".zip")) {
         await execFileAsync("unzip", ["-q", tarballPath, "-d", extractDir]);
       } else {
-        await execFileAsync("tar", ["-xzf", tarballPath, "-C", extractDir]);
+        await execFileAsync("tar", ["--no-same-owner", "-xzf", tarballPath, "-C", extractDir]);
       }
+      await validateExtraction(extractDir);
 
       const nestedRoot = await findPackageRoot(extractDir);
       const manifest: PackageManifest = {
