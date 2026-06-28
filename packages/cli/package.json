@@ -35,7 +35,9 @@
     "test": "vitest run src",
     "prepublishOnly": "pnpm run build"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@ashlr/cli-common": "file:../../../ashlr-cli-common"
+  },
   "devDependencies": {
     "vitest": "^3.2.4"
   }

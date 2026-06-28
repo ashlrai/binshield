@@ -13,7 +13,12 @@
       "@binshield/analysis-types": ["packages/analysis-types/src/index.ts"],
       "@binshield/risk-engine": ["packages/risk-engine/src/index.ts"],
       "@binshield/config": ["packages/config/src/index.ts"],
-      "@binshield/ui": ["packages/ui/src/index.ts"]
+      "@binshield/ui": ["packages/ui/src/index.ts"],
+      "@ashlr/cli-common": ["../../ashlr-cli-common/src/index.ts"],
+      "@ashlr/cli-common/output": ["../../ashlr-cli-common/src/output.ts"],
+      "@ashlr/cli-common/help": ["../../ashlr-cli-common/src/help.ts"],
+      "@ashlr/cli-common/flags": ["../../ashlr-cli-common/src/flags.ts"],
+      "@ashlr/cli-common/context": ["../../ashlr-cli-common/src/context.ts"]
     }
   }
 }

@@ -17,6 +17,8 @@ import type {
   FindingSeverity,
 } from "./api.js";
 
+import { renderError as _cliCommonRenderError } from "@ashlr/cli-common/output";
+
 import {
   bold,
   dim,
@@ -496,8 +498,10 @@ export function formatPollStatus(job: { id: string; status: string; stage?: stri
 // ---------------------------------------------------------------------------
 
 export function printError(message: string): void {
-  const prefix = isColorEnabled() ? `${"\x1b[31m"}error${"\x1b[0m"}` : "error";
-  process.stderr.write(`${prefix}: ${message}\n`);
+  // Delegate color/formatting to @ashlr/cli-common; it returns {text} which we write ourselves
+  // so we control the stream (stderr) and preserve the existing string-only call signature.
+  const { text } = _cliCommonRenderError(new Error(message));
+  process.stderr.write(`${text}\n`);
 }
 
 export function printWarn(message: string): void {
