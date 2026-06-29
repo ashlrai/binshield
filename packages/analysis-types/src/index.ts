@@ -52,7 +52,8 @@ export type ScriptThreatCategory =
   | "reverseShell"
   | "remoteCodeExecution"
   | "obfuscation"
-  | "knownMalware";
+  | "knownMalware"
+  | "pythonBinaryExtension";
 
 export interface ScriptFinding {
   category: ScriptThreatCategory;
@@ -103,6 +104,14 @@ export interface ManifestAnalysis {
   aiExplanation?: string;
   sourceMatchConfidence: SourceMatchConfidence;
   analyzedAt: string;
+  /**
+   * True when the package is a PyPI wheel that contains compiled native
+   * extensions (.so / .pyd). Distinct from hasInstallScripts — a wheel may
+   * ship binaries without any setup.py.
+   */
+  hasPythonBinaryExtension?: boolean;
+  /** Filenames of Python native extensions found inside the wheel. */
+  pythonExtensionFiles?: string[];
 }
 
 export interface BinaryFingerprint {
@@ -322,11 +331,12 @@ export const SCRIPT_THREAT_KEYS: Array<keyof ScriptThreatSummary> = [
   "remoteCodeExecution"
 ];
 
-/** Every ScriptThreatCategory — the summary keys plus obfuscation and knownMalware. */
+/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, and pythonBinaryExtension. */
 export const SCRIPT_THREAT_CATEGORIES: ScriptThreatCategory[] = [
   ...SCRIPT_THREAT_KEYS,
   "obfuscation",
-  "knownMalware"
+  "knownMalware",
+  "pythonBinaryExtension"
 ];
 
 export function entitlementForPlan(plan: PlanName): EntitlementRecord {

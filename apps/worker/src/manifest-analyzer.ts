@@ -25,6 +25,7 @@ import type { ScriptAnalysisInput } from "./types";
 import { evaluateScriptPatterns, redactEvidence } from "./threat-patterns";
 import { detectTyposquat } from "./typosquat";
 import { applyTrustedPackageDemotion } from "./trusted-packages";
+import { collectWheelNativeExtensions } from "./package-source";
 
 /** npm lifecycle hooks that execute automatically during `npm install`. */
 const AUTO_RUN_HOOKS = ["preinstall", "install", "postinstall", "prepare"];
@@ -92,6 +93,14 @@ export async function analyzeFromSources(
       ? sources.some((source) => source.label === "setup.py")
       : AUTO_RUN_HOOKS.some((hook) => Boolean(input.manifest.scripts?.[hook]));
 
+  // Collect Python native extensions from the extracted package tree.
+  // This covers both sdist (compiled during install) and wheel (pre-compiled)
+  // distributions. For wheels extracted by PyPiWheelPackageSource the
+  // packageRoot is the raw unzip directory that may contain .so / .pyd files.
+  const pythonExtensionFiles: string[] =
+    ecosystem === "pypi" ? await collectWheelNativeExtensions(input.packageRoot) : [];
+  const hasPythonBinaryExtension = pythonExtensionFiles.length > 0;
+
   const threats = emptyScriptThreatSummary();
   const findings: ScriptFinding[] = [];
   const seen = new Set<string>();
@@ -148,6 +157,23 @@ export async function analyzeFromSources(
     });
   }
 
+  // Python binary extensions in wheels: pre-compiled native code shipped
+  // inside the .whl zip. Treat this as a medium-severity finding so reviewers
+  // know that opaque compiled binaries are present — analogous to how
+  // node-gyp native addons are surfaced on the npm side.
+  if (hasPythonBinaryExtension) {
+    record({
+      category: "pythonBinaryExtension",
+      severity: "medium",
+      title: "Wheel contains compiled Python native extensions",
+      description: `The wheel ships ${pythonExtensionFiles.length} pre-compiled native extension${pythonExtensionFiles.length === 1 ? "" : "s"} (${pythonExtensionFiles.slice(0, 3).join(", ")}${pythonExtensionFiles.length > 3 ? ", …" : ""}). These are binary blobs that bypass source-code review and can contain arbitrary native code.`,
+      filePath: pythonExtensionFiles[0] ?? "wheel",
+      evidence: pythonExtensionFiles.slice(0, 5).join(", "),
+      recommendation:
+        "Verify the wheel was built from the published source tarball. Check PyPI provenance attestations when available, and confirm the binary against a reproducible build."
+    });
+  }
+
   // Dependency-confusion: a package `bin` that shadows a system command.
   for (const finding of await detectBinShadowing(input)) {
     record(finding);
@@ -179,7 +205,9 @@ export async function analyzeFromSources(
     findings: demotedFindings,
     knownMalwareAdvisoryIds: [],
     sourceMatchConfidence: ecosystem === "pypi" ? "low" : "medium",
-    analyzedAt: new Date().toISOString()
+    analyzedAt: new Date().toISOString(),
+    hasPythonBinaryExtension: hasPythonBinaryExtension || undefined,
+    pythonExtensionFiles: pythonExtensionFiles.length > 0 ? pythonExtensionFiles : undefined
   };
 
   const scored = scoreManifest(base);

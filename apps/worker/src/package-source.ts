@@ -4,6 +4,8 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { isPythonNativeExtension, hasPyPiAbiTag } from "./native-indicators";
+
 import type { AcquiredPackage, PackageManifest, PackageAcquisitionService, WorkerScanRequest } from "./types";
 
 const execFileAsync = promisify(execFile);
@@ -306,6 +308,120 @@ export class PyPiPackageSource implements PackageAcquisitionService {
       );
     }
   }
+}
+
+/**
+ * Acquires a PyPI package by downloading its binary wheel (.whl) distribution
+ * from the PyPI JSON API. Wheels are zip archives; they may contain compiled
+ * native extensions (.so / .pyd / .dylib) in addition to Python source.
+ *
+ * Selection strategy: prefer wheels that match the current platform; fall back
+ * to the first `bdist_wheel` entry. The extracted tree is passed to the
+ * extractor just like an sdist — FileSystemBinaryExtractor will find any .so /
+ * .pyd files, and the manifest analyzer will mark the package as having Python
+ * binary extensions.
+ *
+ * If no wheel is published for this version (pure-Python or sdist-only),
+ * this source throws and the coordinator falls back to PyPiPackageSource.
+ */
+export class PyPiWheelPackageSource implements PackageAcquisitionService {
+  readonly name = "pypi-wheel";
+
+  async acquire(request: WorkerScanRequest): Promise<AcquiredPackage> {
+    const spec = `${request.packageName}@${request.version}`;
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "binshield-pypi-wheel-"));
+    const extractDir = path.join(tempRoot, "package");
+    await mkdir(extractDir, { recursive: true });
+
+    try {
+      const metaUrl = `https://pypi.org/pypi/${encodeURIComponent(request.packageName)}/${encodeURIComponent(
+        request.version
+      )}/json`;
+      const metaResponse = await fetch(metaUrl);
+      if (!metaResponse.ok) {
+        throw new Error(`PyPI metadata request returned ${metaResponse.status}`);
+      }
+
+      const meta = (await metaResponse.json()) as {
+        urls?: Array<{ packagetype: string; url: string; filename: string }>;
+      };
+
+      // Filter to wheel distributions only.
+      const wheels = (meta.urls ?? []).filter((entry) => entry.packagetype === "bdist_wheel");
+      if (wheels.length === 0) {
+        throw new Error(`No wheel distribution published for ${spec}`);
+      }
+
+      // Prefer a wheel with a CPython ABI tag (compiled, platform-specific)
+      // over a pure-Python wheel (py3-none-any.whl), to maximise coverage of
+      // native extension binaries.
+      const platformWheel =
+        wheels.find((w) => hasPyPiAbiTag(w.filename)) ?? wheels[0];
+
+      const wheelResponse = await fetch(platformWheel.url);
+      if (!wheelResponse.ok) {
+        throw new Error(`PyPI wheel download returned ${wheelResponse.status}`);
+      }
+      const wheelPath = path.join(tempRoot, platformWheel.filename);
+      await writeFile(wheelPath, Buffer.from(await wheelResponse.arrayBuffer()));
+
+      // Wheels are zip archives — extract with unzip.
+      await execFileAsync("unzip", ["-q", wheelPath, "-d", extractDir]);
+      await validateExtraction(extractDir);
+
+      // Unlike sdists, wheels don't have a single top-level package directory;
+      // the contents are laid out flat inside the zip. Use extractDir directly
+      // as the package root so the extractor can walk the whole tree.
+      const manifest: PackageManifest = {
+        name: request.packageName,
+        version: request.version,
+        scripts: {},
+        dependencies: {},
+        optionalDependencies: {}
+      };
+
+      return {
+        sourceKind: "tarball",
+        packageRoot: extractDir,
+        packageJsonPath: path.join(extractDir, "package.json"),
+        manifest
+      };
+    } catch (error) {
+      await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+      throw new Error(
+        `Failed to acquire wheel for ${spec} from PyPI: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+}
+
+/**
+ * Walk a wheel extraction directory and collect all Python native extension
+ * files (.so / .pyd / .dylib). Used by manifest-analyzer to mark the package
+ * as having binary extensions and emit a pythonBinaryExtension finding.
+ */
+export async function collectWheelNativeExtensions(packageRoot: string): Promise<string[]> {
+  const found: string[] = [];
+
+  async function walk(dir: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isFile() && isPythonNativeExtension(entry.name)) {
+        found.push(path.relative(packageRoot, full));
+      }
+    }
+  }
+
+  await walk(packageRoot);
+  return found;
 }
 
 async function findPackageRoot(extractDir: string): Promise<string> {
