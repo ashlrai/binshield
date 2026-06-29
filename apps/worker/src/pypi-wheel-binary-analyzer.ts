@@ -48,7 +48,12 @@ import { promisify } from "node:util";
 import { isPythonNativeExtension, hasPyPiAbiTag } from "./native-indicators.js";
 import { fingerprintFile } from "./fingerprint.js";
 import { AnalyzerRegistry } from "./malware-analyzer.js";
-import { ImportTableAnalyzer, SyscallTraceAnalyzer } from "@binshield/malware-engines";
+import {
+  ImportTableAnalyzer,
+  SyscallTraceAnalyzer,
+  ProvenanceVerifier,
+  type ProvenanceFinding,
+} from "@binshield/malware-engines";
 import {
   verifyWheelProvenance,
   matchWheelToSdist,
@@ -196,6 +201,13 @@ export interface WheelBinaryAnalysis {
    * not requested (skipProvenance: true in options).
    */
   provenance: WheelProvenanceResult | null;
+  /**
+   * Supply-chain provenance findings from ProvenanceVerifier (PEP 740
+   * GPG signatures, publisher identity, build provenance correlation,
+   * timestamp freshness, orphaned-wheel detection).
+   * Always populated for PyPI wheel scans; empty array on failure.
+   */
+  provenance_findings: ProvenanceFinding[];
 }
 
 /**
@@ -1343,6 +1355,20 @@ export interface AnalyzeWheelBinariesOptions {
    * Omit to skip sdist matching (matchesSdist will be null).
    */
   sdistMatch?: MatchWheelToSdistOptions;
+
+  /**
+   * When true, skip the ProvenanceVerifier supply-chain attestation check
+   * (PEP 740 GPG sigs, publisher identity, freshness, orphaned wheels).
+   * Defaults to false — provenance verification runs for all PyPI wheel scans.
+   */
+  skipProvenanceVerifier?: boolean;
+
+  /**
+   * Expected maintainer usernames for the ProvenanceVerifier publisher identity
+   * check (PEP 503). When omitted the check reports "unknown" rather than
+   * mismatch, and no high-severity finding is raised for unknown uploaders.
+   */
+  provenanceExpectedMaintainers?: string[];
 }
 
 /**
@@ -1428,6 +1454,24 @@ export async function analyzeWheelBinaries(
       }
     }
 
+    // ---------------------------------------------------------------------------
+    // ProvenanceVerifier supply-chain attestation check (PEP 740 + publisher)
+    // ---------------------------------------------------------------------------
+    let provenance_findings: ProvenanceFinding[] = [];
+    if (!options.skipProvenanceVerifier) {
+      try {
+        const pv = new ProvenanceVerifier();
+        const pvResult = await pv.verify(packageName, version, {
+          expectedMaintainers: options.provenanceExpectedMaintainers,
+          skipNetworkCalls: false,
+        });
+        provenance_findings = pvResult.findings;
+      } catch {
+        // ProvenanceVerifier failure is non-fatal — binary analysis proceeds.
+        provenance_findings = [];
+      }
+    }
+
     // Collect native extensions
     const nativePaths = await collectNativeExtensionPaths(extractDir);
 
@@ -1445,6 +1489,7 @@ export async function analyzeWheelBinaries(
         binaryFingerprints: [],
         repackagingRisks: [],
         provenance,
+        provenance_findings,
       };
     }
 
@@ -1506,6 +1551,7 @@ export async function analyzeWheelBinaries(
       binaryFingerprints,
       repackagingRisks,
       provenance,
+      provenance_findings,
     };
   } finally {
     await rm(tempRoot, { recursive: true, force: true }).catch(() => {});

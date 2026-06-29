@@ -418,6 +418,26 @@ export interface MalwareDetectionResult {
   confidence: number;
 }
 
+/**
+ * A structured provenance finding emitted by ProvenanceVerifier.
+ * Imported inline here to keep @binshield/analysis-types self-contained —
+ * the canonical definition lives in @binshield/malware-engines.
+ */
+export interface ProvenanceFinding {
+  /** Stable finding type identifier. */
+  type: string;
+  /** Finding severity. */
+  severity: "info" | "low" | "medium" | "high" | "critical";
+  /** Human-readable title. */
+  title: string;
+  /** Detailed description with evidence. */
+  description: string;
+  /** Machine-readable evidence payload. */
+  evidence: Record<string, unknown>;
+  /** Remediation recommendation. */
+  recommendation: string;
+}
+
 export interface BinaryAnalysis {
   id: string;
   filename: string;
@@ -449,6 +469,14 @@ export interface BinaryAnalysis {
    * introduced.
    */
   malwareDetectionResults?: MalwareDetectionResult[];
+  /**
+   * PyPI wheel supply-chain provenance findings from ProvenanceVerifier.
+   * Present only for PyPI wheel analyses where the provenance verifier ran.
+   * Covers PEP 740 GPG signatures, publisher identity (PEP 503), build
+   * provenance correlation, timestamp freshness, and orphaned-wheel detection.
+   * Absent on non-PyPI analyses and legacy records.
+   */
+  provenance_findings?: ProvenanceFinding[];
 }
 
 export interface PackageCoordinate {
