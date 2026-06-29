@@ -12,12 +12,14 @@
   },
   "dependencies": {
     "@binshield/analysis-types": "workspace:*",
+    "@binshield/analytics-collector": "workspace:*",
     "@binshield/config": "workspace:*",
     "@binshield/package-intelligence": "workspace:*",
     "@binshield/risk-engine": "workspace:*",
+    "@binshield/supply-chain-health": "workspace:*",
     "@supabase/supabase-js": "^2.56.0",
-    "hono": "^4.7.2"
-    ,"stripe": "^18.5.0"
+    "hono": "^4.7.2",
+    "stripe": "^18.5.0"
   },
   "devDependencies": {
     "@hono/node-server": "^1.13.8",

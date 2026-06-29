@@ -4,6 +4,7 @@ import { cors } from "hono/cors";
 
 import { PackageNameIntelligence } from "@binshield/package-intelligence";
 import type { Ecosystem as PkgIntelEcosystem } from "@binshield/package-intelligence";
+import { AnalyticsCollector, DashboardAggregator } from "@binshield/analytics-collector";
 
 import { AdvisoryService, getHeatMapData } from "./lib/advisory-service";
 import { EpssCache } from "./lib/epss-cache";
@@ -173,6 +174,15 @@ function startScanTimeoutWatch(
 export function createApp(services = createServices(readApiEnv())) {
   const app = new Hono<{ Variables: AppVariables }>();
 
+  // Analytics collector — demo mode when no Supabase credentials are present
+  const isDemo = !services.env.supabaseUrl || !services.env.supabaseServiceRoleKey;
+  const analyticsCollector = new AnalyticsCollector({
+    supabaseUrl: services.env.supabaseUrl,
+    supabaseServiceRoleKey: services.env.supabaseServiceRoleKey,
+    demoMode: isDemo
+  });
+  const dashboardAggregator = new DashboardAggregator();
+
   // Global error handler
   app.onError((err, c) => {
     // JSON parse errors from malformed request bodies → 400
@@ -202,7 +212,24 @@ export function createApp(services = createServices(readApiEnv())) {
     c.set("services", services);
     c.set("auth", await resolvePrincipal(services.repository, c, services.env));
     await next();
-    console.log(`[BinShield API] ${c.req.method} ${c.req.path} ${c.res.status} ${Date.now() - start}ms`);
+    const durationMs = Date.now() - start;
+    console.log(`[BinShield API] ${c.req.method} ${c.req.path} ${c.res.status} ${durationMs}ms`);
+    // Emit user_action for every authenticated route hit
+    const auth = c.get("auth");
+    if (auth) {
+      analyticsCollector.userAction(
+        {
+          action: "scan_submitted",
+          metadata: {
+            method: c.req.method,
+            path: c.req.path,
+            status: c.res.status,
+            durationMs
+          }
+        },
+        auth.orgId
+      );
+    }
   });
 
   // Rate limiting (after auth so rateLimitByAuth can use orgId)
@@ -455,7 +482,9 @@ export function createApp(services = createServices(readApiEnv())) {
       return c.json({ error: "Invalid ecosystem. Must be one of: npm, pypi, crates, go" }, 400);
     }
 
+    const scanStart = Date.now();
     const job = await getServices(c).repository.submitScan(body, auth);
+    const scanDurationMs = Date.now() - scanStart;
 
     // Fire-and-forget audit log
     logAudit(getAuditConfig(c), auth.orgId, "scan.submitted", "scan", job.id, auth.userId, {
@@ -463,6 +492,50 @@ export function createApp(services = createServices(readApiEnv())) {
       packageName: body.packageName,
       version: body.version
     });
+
+    // Analytics instrumentation
+    if (job.status === "complete" && "analysis" in job && job.analysis) {
+      const analysis = job.analysis as { riskLevel?: string; riskScore?: number; binaryCount?: number };
+      analyticsCollector.scanCompleted(
+        {
+          ecosystem: body.ecosystem,
+          packageName: body.packageName,
+          version: body.version,
+          binaryCount: analysis.binaryCount ?? 0,
+          durationMs: scanDurationMs,
+          riskLevel: (analysis.riskLevel ?? "none") as "none" | "low" | "medium" | "high" | "critical",
+          riskScore: analysis.riskScore ?? 0,
+          cached: false
+        },
+        auth.orgId
+      );
+    } else if (job.status === "failed") {
+      analyticsCollector.scanFailed(
+        {
+          ecosystem: body.ecosystem,
+          packageName: body.packageName,
+          version: body.version,
+          errorCategory: "worker_failure",
+          errorMessage: "scan job failed",
+          durationMs: scanDurationMs
+        },
+        auth.orgId
+      );
+    } else {
+      // queued / processing — emit user_action for scan submission tracking
+      analyticsCollector.userAction(
+        {
+          action: "scan_submitted",
+          metadata: {
+            ecosystem: body.ecosystem,
+            packageName: body.packageName,
+            version: body.version,
+            jobStatus: job.status
+          }
+        },
+        auth.orgId
+      );
+    }
 
     // Start background timeout watcher for non-complete jobs
     if (job.status !== "complete") {
@@ -828,6 +901,8 @@ export function createApp(services = createServices(readApiEnv())) {
     logAudit(getAuditConfig(c), orgId, "api_key.created", "api_key", apiKey.summary.id, auth.userId, {
       label: body.label
     });
+
+    analyticsCollector.userAction({ action: "api_key_created", metadata: { label: body.label } }, orgId);
 
     return c.json(apiKey, 201);
   });
@@ -1931,6 +2006,144 @@ export function createApp(services = createServices(readApiEnv())) {
     );
 
     return c.json(heatMap);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /packages/:ecosystem/:name/versions/:version/supply-chain-health
+  //
+  // Returns supply-chain health scorecard for a package version: seven signals
+  // (commit_velocity_90d, release_cadence_days, contributor_turnover,
+  // dependency_age_percentile, circular_dep_count, orphaned_dep_count,
+  // license_deprecated) aggregated into a deterministic RiskLevel.
+  //
+  // When the analysis has already been computed by the worker pipeline it is
+  // returned directly from the stored PackageAnalysis record.  When it is
+  // absent (legacy record or offline mode), the analyzer is invoked on the
+  // fly using whatever registry-like metadata is available in the record.
+  // -----------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/:name/versions/:version/supply-chain-health", async (c) => {
+    const ecosystem = c.req.param("ecosystem") as Ecosystem;
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    const analysis = await getServices(c).repository.getPackage(ecosystem, name, version);
+
+    if (!analysis) {
+      return c.json({ error: "Analysis not found" }, 404);
+    }
+
+    // Fast path: health already computed by the worker pipeline
+    if (analysis.supplyChainHealth) {
+      return c.json(analysis.supplyChainHealth);
+    }
+
+    // Slow path: compute on-the-fly from whatever metadata is available
+    try {
+      const { SupplyChainHealthAnalyzer } = await import("@binshield/supply-chain-health");
+      const schAnalyzer = new SupplyChainHealthAnalyzer();
+
+      const directDeps = Object.keys(analysis.manifestAnalysis
+        ? {} // manifest doesn't carry dep map in this shape
+        : {});
+
+      const registryMeta =
+        ecosystem === "pypi"
+          ? SupplyChainHealthAnalyzer.buildPypiMetadata({
+              info: {
+                name: analysis.packageName,
+                version: analysis.version,
+                license: null,
+                requires_dist: directDeps,
+                author: null,
+                maintainer: null,
+              },
+              releases: {},
+            })
+          : SupplyChainHealthAnalyzer.buildNpmMetadata({
+              name: analysis.packageName,
+              versions: {
+                [analysis.version]: {
+                  dependencies: {},
+                  license: undefined,
+                },
+              },
+              maintainers: [],
+            });
+
+      const health = schAnalyzer.analyze(registryMeta, analysis.version, {}, directDeps);
+      return c.json(health);
+    } catch (err) {
+      console.error(
+        `[BinShield API] supply-chain health on-the-fly failed for ${ecosystem}/${name}@${version}:`,
+        err instanceof Error ? err.message : err
+      );
+      return c.json({ error: "Supply-chain health analysis failed" }, 500);
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/analytics/dashboard
+  //
+  // Returns aggregated product KPIs for the past 7 days (or custom window).
+  // In Supabase mode, reads from the analytics_events table.
+  // In local/demo mode, aggregates from the in-memory collector buffer.
+  //
+  // Query params:
+  //   window_days — lookback window in days (1–90, default 7)
+  // -----------------------------------------------------------------------
+
+  app.get("/api/analytics/dashboard", async (c) => {
+    const auth = c.get("auth");
+    if (!auth) {
+      return c.json({ error: "API key required" }, 401);
+    }
+
+    const windowDaysRaw = Number(c.req.query("window_days") ?? 7);
+    const windowDays = Number.isFinite(windowDaysRaw)
+      ? Math.min(Math.max(Math.floor(windowDaysRaw), 1), 90)
+      : 7;
+
+    const { env } = getServices(c);
+
+    // Supabase mode: query analytics_events table
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      try {
+        const since = new Date();
+        since.setDate(since.getDate() - windowDays);
+        const baseUrl = env.supabaseUrl.replace(/\/$/, "");
+        const res = await fetch(
+          `${baseUrl}/rest/v1/analytics_events` +
+          `?timestamp=gte.${since.toISOString()}` +
+          `&select=event_type,org_id,demo,timestamp,payload` +
+          `&order=timestamp.desc&limit=10000`,
+          {
+            headers: {
+              apikey: env.supabaseServiceRoleKey,
+              authorization: `Bearer ${env.supabaseServiceRoleKey}`
+            }
+          }
+        );
+        if (res.ok) {
+          const rows = await res.json() as Array<{
+            event_type: string;
+            org_id: string | null;
+            demo: boolean;
+            timestamp: string;
+            payload: Record<string, unknown>;
+          }>;
+          const kpis = dashboardAggregator.computeFromRows(rows, windowDays);
+          return c.json(kpis);
+        }
+      } catch (err) {
+        console.error("[BinShield API] analytics dashboard Supabase query failed:", err instanceof Error ? err.message : err);
+        // Fall through to in-memory aggregation
+      }
+    }
+
+    // Local/demo mode: aggregate from in-memory buffer
+    const kpis = dashboardAggregator.compute(analyticsCollector.snapshot(), windowDays);
+    return c.json(kpis);
   });
 
   app.get("/packages/:ecosystem/confusable/:name", async (c) => {

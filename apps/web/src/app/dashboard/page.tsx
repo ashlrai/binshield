@@ -2,11 +2,19 @@ import Link from "next/link";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
+import { AnalyticsCollector } from "@binshield/analytics-collector";
 import { MetricCard } from "../../components/metric-card";
 import { PageHeader } from "../../components/page-header";
 import { RiskBadge } from "../../components/risk-badge";
 import { getDashboardSnapshot } from "../../lib/site-data";
 import { createServerClient, getOrgContext } from "../../lib/supabase";
+
+// Server-side analytics collector for the web app.
+// Uses demo mode when BINSHIELD_DEMO=true or no Supabase credentials present.
+const webAnalytics = new AnalyticsCollector({
+  supabaseUrl: process.env.SUPABASE_URL,
+  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY
+});
 
 function scoreForLevel(level: string) {
   switch (level) {
@@ -36,6 +44,19 @@ export default async function DashboardPage() {
 
   const orgCtx = await getOrgContext(user.id);
   const snapshot = await getDashboardSnapshot(orgCtx?.orgId);
+
+  // Emit user_action analytics event (fire-and-forget, never blocks render)
+  webAnalytics.userAction(
+    {
+      action: "dashboard_viewed",
+      metadata: {
+        hasOrg: orgCtx?.orgId != null,
+        repoCount: snapshot.repos.length,
+        scanCount: snapshot.recentScans.length
+      }
+    },
+    orgCtx?.orgId
+  );
 
   const hasRepos = snapshot.repos.length > 0;
 
