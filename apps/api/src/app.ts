@@ -894,6 +894,109 @@ export function createApp(services = createServices(readApiEnv())) {
     return c.json(correlation);
   });
 
+  // -----------------------------------------------------------------------
+  // GET /advisories/:cveId/exploit-activity
+  // Returns CISA KEV + NVD exploit enrichment for a single CVE ID.
+  // -----------------------------------------------------------------------
+
+  app.get("/advisories/:cveId/exploit-activity", async (c) => {
+    const cveId = c.req.param("cveId").toUpperCase();
+
+    if (!cveId.startsWith("CVE-")) {
+      return c.json({ error: "cveId must be a CVE identifier (e.g. CVE-2024-1234)" }, 400);
+    }
+
+    const { env } = getServices(c);
+
+    // -----------------------------------------------------------------------
+    // Supabase mode: look up real advisory row
+    // -----------------------------------------------------------------------
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      const baseUrl = env.supabaseUrl.replace(/\/$/, "");
+      const dbHeaders = {
+        apikey: env.supabaseServiceRoleKey,
+        authorization: `Bearer ${env.supabaseServiceRoleKey}`
+      };
+
+      const res = await fetch(
+        `${baseUrl}/rest/v1/advisories` +
+        `?source_id=eq.${encodeURIComponent(cveId)}` +
+        `&select=source_id,cisa_kev_date,exploit_maturity_score,published_at,updated_at` +
+        `&limit=1`,
+        { headers: dbHeaders }
+      );
+
+      if (!res.ok) {
+        return c.json({ error: "Advisory lookup failed" }, 502);
+      }
+
+      const rows = await res.json() as Array<{
+        source_id: string;
+        cisa_kev_date: string | null;
+        exploit_maturity_score: string | null;
+        published_at: string | null;
+        updated_at: string | null;
+      }>;
+
+      if (rows.length === 0) {
+        return c.json({ error: "CVE not found" }, 404);
+      }
+
+      const row = rows[0]!;
+
+      // Fetch affected versions from package_advisories join
+      const paRes = await fetch(
+        `${baseUrl}/rest/v1/package_advisories` +
+        `?advisory_id=eq.${encodeURIComponent(row.source_id)}` +
+        `&select=ecosystem,package_name,vulnerable_range,patched_version`,
+        { headers: dbHeaders }
+      );
+
+      const paRows = paRes.ok
+        ? (await paRes.json() as Array<{
+            ecosystem: string;
+            package_name: string;
+            vulnerable_range: string | null;
+            patched_version: string | null;
+          }>)
+        : [];
+
+      const affectedVersions = paRows.map((pa) => pa.vulnerable_range ?? "unknown").filter(Boolean);
+
+      return c.json({
+        cveId: row.source_id,
+        cisa_confirmed: row.cisa_kev_date !== null,
+        first_seen_date: row.cisa_kev_date ?? null,
+        exploit_maturity: row.exploit_maturity_score ?? null,
+        affected_versions: affectedVersions
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // Local / dev mode: check against seeded sample advisories
+    // -----------------------------------------------------------------------
+    const advisories = await getServices(c).repository.getRecentAdvisories(200);
+    const match = advisories.find(
+      (a) => a.sourceId.toUpperCase() === cveId || a.source === "nvd" && a.sourceId.toUpperCase() === cveId
+    );
+
+    if (!match) {
+      return c.json({ error: "CVE not found" }, 404);
+    }
+
+    const affectedVersions = (match.affectedPackages ?? [])
+      .map((ap) => ap.vulnerableRange ?? "unknown")
+      .filter(Boolean);
+
+    return c.json({
+      cveId: match.sourceId,
+      cisa_confirmed: false,
+      first_seen_date: null,
+      exploit_maturity: null,
+      affected_versions: affectedVersions
+    });
+  });
+
   app.get("/advisories/recent", async (c) => {
     const limit = Math.min(Number(c.req.query("limit") ?? 50), 200);
     const advisories = await getServices(c).repository.getRecentAdvisories(limit);

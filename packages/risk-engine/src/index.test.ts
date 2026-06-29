@@ -5,12 +5,14 @@ import type { ManifestAnalysis } from "@binshield/analysis-types";
 import {
   aggregatePackageRisk,
   aggregatePackageRiskWithManifest,
+  buildCisaKevFindings,
+  cisaKevBoost,
   epssBoost,
   riskLevelFromScore,
   scoreBinary,
   scoreManifest
 } from "./index";
-import type { EpssContext } from "./index";
+import type { CisaKevContext, EpssContext } from "./index";
 
 function makeManifest(overrides: Partial<ManifestAnalysis> = {}): ManifestAnalysis {
   return {
@@ -198,5 +200,195 @@ describe("EPSS boost", () => {
       riskScore: 100,
       riskLevel: "critical"
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CISA KEV boost
+// ---------------------------------------------------------------------------
+
+function makeKev(overrides: Partial<CisaKevContext> = {}): CisaKevContext {
+  return {
+    kevMatches: [],
+    ...overrides
+  };
+}
+
+describe("CISA KEV boost", () => {
+  it("returns 0 when no KEV context provided", () => {
+    expect(cisaKevBoost(undefined)).toBe(0);
+  });
+
+  it("returns 0 for empty matches array", () => {
+    expect(cisaKevBoost(makeKev())).toBe(0);
+  });
+
+  it("returns 0 for proof-of-concept only (no confirmed exploitation)", () => {
+    expect(
+      cisaKevBoost(
+        makeKev({
+          kevMatches: [{ cveId: "CVE-2024-0001", firstSeenDate: "2024-01-15", exploitMaturity: "proof-of-concept" }]
+        })
+      )
+    ).toBe(0);
+  });
+
+  it("returns +20 for active-exploitation match", () => {
+    expect(
+      cisaKevBoost(
+        makeKev({
+          kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-10", exploitMaturity: "active-exploitation" }]
+        })
+      )
+    ).toBe(20);
+  });
+
+  it("returns +20 for widespread match (ransomware-level)", () => {
+    expect(
+      cisaKevBoost(
+        makeKev({
+          kevMatches: [{ cveId: "CVE-2024-0003", firstSeenDate: "2024-06-01", exploitMaturity: "widespread" }]
+        })
+      )
+    ).toBe(20);
+  });
+
+  it("returns +20 when mix of proof-of-concept and active-exploitation", () => {
+    expect(
+      cisaKevBoost(
+        makeKev({
+          kevMatches: [
+            { cveId: "CVE-2024-0001", firstSeenDate: "2024-01-01", exploitMaturity: "proof-of-concept" },
+            { cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" }
+          ]
+        })
+      )
+    ).toBe(20);
+  });
+
+  it("scoreBinary applies CISA KEV boost on top of base score", () => {
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [],
+      importCount: 0,
+      functionCount: 0
+    };
+
+    const noKev = scoreBinary(binary);
+    const withPoC = scoreBinary(binary, undefined, makeKev({
+      kevMatches: [{ cveId: "CVE-2024-0001", firstSeenDate: "2024-01-01", exploitMaturity: "proof-of-concept" }]
+    }));
+    const withActive = scoreBinary(binary, undefined, makeKev({
+      kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" }]
+    }));
+
+    // PoC does not boost
+    expect(withPoC.riskScore).toBe(noKev.riskScore);
+    // Active exploitation adds +20
+    expect(withActive.riskScore).toBe(noKev.riskScore + 20);
+  });
+
+  it("scoreBinary stacks EPSS and CISA KEV boosts independently", () => {
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [],
+      importCount: 0,
+      functionCount: 0
+    };
+
+    const noBoosts = scoreBinary(binary);
+    const epssOnly = scoreBinary(binary, { maxEpssPercentile: 0.80 });
+    const kevOnly = scoreBinary(binary, undefined, makeKev({
+      kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" }]
+    }));
+    const both = scoreBinary(binary, { maxEpssPercentile: 0.80 }, makeKev({
+      kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" }]
+    }));
+
+    expect(epssOnly.riskScore).toBe(noBoosts.riskScore + 15);
+    expect(kevOnly.riskScore).toBe(noBoosts.riskScore + 20);
+    expect(both.riskScore).toBe(Math.min(100, noBoosts.riskScore + 15 + 20));
+  });
+
+  it("scoreManifest applies CISA KEV boost while preserving malware-override", () => {
+    const cleanManifest = makeManifest();
+    const kev = makeKev({
+      kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" }]
+    });
+
+    const withoutKev = scoreManifest(cleanManifest);
+    const withKev = scoreManifest(cleanManifest, undefined, kev);
+
+    expect(withKev.riskScore).toBe(withoutKev.riskScore + 20);
+
+    // Known-malware still forces 100 regardless of KEV
+    const malwareManifest = makeManifest({ knownMalwareAdvisoryIds: ["MAL-2026-0001"] });
+    expect(scoreManifest(malwareManifest, undefined, kev)).toEqual({
+      riskScore: 100,
+      riskLevel: "critical"
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildCisaKevFindings
+// ---------------------------------------------------------------------------
+
+describe("buildCisaKevFindings", () => {
+  it("returns empty array when no KEV context", () => {
+    expect(buildCisaKevFindings(undefined)).toEqual([]);
+  });
+
+  it("returns empty array when no matches", () => {
+    expect(buildCisaKevFindings(makeKev())).toEqual([]);
+  });
+
+  it("does not emit findings for proof-of-concept only", () => {
+    const findings = buildCisaKevFindings(
+      makeKev({
+        kevMatches: [{ cveId: "CVE-2024-0001", firstSeenDate: "2024-01-01", exploitMaturity: "proof-of-concept" }]
+      })
+    );
+    expect(findings).toHaveLength(0);
+  });
+
+  it("emits CRITICAL finding for active-exploitation", () => {
+    const findings = buildCisaKevFindings(
+      makeKev({
+        kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-10", exploitMaturity: "active-exploitation" }]
+      })
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.severity).toBe("critical");
+    expect(findings[0]!.title).toContain("CVE-Actively-Exploited-In-Wild");
+    expect(findings[0]!.title).toContain("CVE-2024-0002");
+    expect(findings[0]!.description).toContain("active-exploitation");
+    expect(findings[0]!.description).toContain("2024-03-10");
+  });
+
+  it("emits CRITICAL finding for widespread (ransomware)", () => {
+    const findings = buildCisaKevFindings(
+      makeKev({
+        kevMatches: [{ cveId: "CVE-2024-0003", firstSeenDate: "2024-06-01", exploitMaturity: "widespread" }]
+      })
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.severity).toBe("critical");
+    expect(findings[0]!.title).toContain("CVE-2024-0003");
+  });
+
+  it("emits one finding per active CVE (multiple matches)", () => {
+    const findings = buildCisaKevFindings(
+      makeKev({
+        kevMatches: [
+          { cveId: "CVE-2024-0001", firstSeenDate: "2024-01-01", exploitMaturity: "proof-of-concept" },
+          { cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" },
+          { cveId: "CVE-2024-0003", firstSeenDate: "2024-06-01", exploitMaturity: "widespread" }
+        ]
+      })
+    );
+    // PoC is excluded; active + widespread = 2 findings
+    expect(findings).toHaveLength(2);
+    expect(findings.every((f) => f.severity === "critical")).toBe(true);
   });
 });

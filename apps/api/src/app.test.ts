@@ -286,6 +286,55 @@ describe("api", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// EPSS / risk-correlation endpoint
+// ---------------------------------------------------------------------------
+
+describe("risk-correlation endpoint", () => {
+  it("returns risk-correlation for a known package with CVEs (bcrypt)", async () => {
+    const response = await app.request("/packages/npm/bcrypt/versions/5.1.1/risk-correlation");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.ecosystem).toBe("npm");
+    expect(body.packageName).toBe("bcrypt");
+    expect(body.version).toBe("5.1.1");
+    expect(Array.isArray(body.cves)).toBe(true);
+    expect(Array.isArray(body.cvssScores)).toBe(true);
+    expect(Array.isArray(body.epssScores)).toBe(true);
+    expect(typeof body.compositeExploitRisk).toBe("number");
+    expect(body.compositeExploitRisk).toBeGreaterThanOrEqual(0);
+    expect(body.compositeExploitRisk).toBeLessThanOrEqual(100);
+  });
+
+  it("returns risk-correlation for a package with no advisories", async () => {
+    const response = await app.request("/packages/npm/unknown-pkg/versions/1.0.0/risk-correlation");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.cves).toEqual([]);
+    expect(body.cvssScores).toEqual([]);
+    expect(body.epssScores).toEqual([]);
+    expect(body.compositeExploitRisk).toBe(0);
+  });
+
+  it("compositeExploitRisk is bounded 0-100", async () => {
+    const response = await app.request("/packages/npm/bcrypt/versions/5.1.1/risk-correlation");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.compositeExploitRisk).toBeGreaterThanOrEqual(0);
+    expect(body.compositeExploitRisk).toBeLessThanOrEqual(100);
+  });
+
+  it("cvssScores items have required fields", async () => {
+    const response = await app.request("/packages/npm/bcrypt/versions/5.1.1/risk-correlation");
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    for (const entry of body.cvssScores) {
+      expect(typeof entry.cveId).toBe("string");
+      expect(typeof entry.cvssScore).toBe("number");
+    }
+  });
+});
+
 describe("suppression repository methods", () => {
   it("round-trips create / list / delete on LocalRepository", async () => {
     const app2 = createApp();
@@ -320,5 +369,60 @@ describe("suppression repository methods", () => {
     const listAfter = await app2.request("/orgs/org_demo/suppressions", { headers });
     const { items: afterItems } = await listAfter.json();
     expect(afterItems.length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// /advisories/:cveId/exploit-activity — CISA KEV + NVD exploit-activity endpoint
+// ---------------------------------------------------------------------------
+
+describe("exploit-activity endpoint", () => {
+  it("returns 400 for non-CVE identifiers", async () => {
+    const res = await app.request("/advisories/GHSA-abcd-1234-wxyz/exploit-activity");
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("CVE");
+  });
+
+  it("returns 404 for a CVE that does not exist in the local advisory store", async () => {
+    const res = await app.request("/advisories/CVE-9999-99999/exploit-activity");
+    expect(res.status).toBe(404);
+  });
+
+  it("returns exploit-activity shape for a seeded CVE", async () => {
+    // CVE-2025-1234 is seeded in the local repository (adv_3 / sqlite3)
+    const res = await app.request("/advisories/CVE-2025-1234/exploit-activity");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      cveId: string;
+      cisa_confirmed: boolean;
+      first_seen_date: string | null;
+      exploit_maturity: string | null;
+      affected_versions: string[];
+    };
+    expect(body.cveId).toBe("CVE-2025-1234");
+    expect(typeof body.cisa_confirmed).toBe("boolean");
+    expect(body.first_seen_date === null || typeof body.first_seen_date === "string").toBe(true);
+    expect(body.exploit_maturity === null || typeof body.exploit_maturity === "string").toBe(true);
+    expect(Array.isArray(body.affected_versions)).toBe(true);
+  });
+
+  it("is case-insensitive on CVE ID", async () => {
+    const upper = await app.request("/advisories/CVE-2025-1234/exploit-activity");
+    const lower = await app.request("/advisories/cve-2025-1234/exploit-activity");
+    expect(upper.status).toBe(200);
+    expect(lower.status).toBe(200);
+    const bodyUpper = await upper.json() as { cveId: string };
+    const bodyLower = await lower.json() as { cveId: string };
+    expect(bodyUpper.cveId).toBe(bodyLower.cveId);
+  });
+
+  it("returns affected_versions as an array of strings", async () => {
+    const res = await app.request("/advisories/CVE-2025-1234/exploit-activity");
+    const body = await res.json() as { affected_versions: unknown };
+    expect(Array.isArray(body.affected_versions)).toBe(true);
+    for (const v of body.affected_versions as string[]) {
+      expect(typeof v).toBe("string");
+    }
   });
 });

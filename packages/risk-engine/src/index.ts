@@ -98,6 +98,64 @@ export interface EpssContext {
 }
 
 /**
+ * CISA KEV (Known Exploited Vulnerabilities) context.
+ *
+ * When a package has at least one CVE confirmed by CISA as actively exploited
+ * in the wild the risk engine applies a +20 pt boost and emits a dedicated
+ * "CVE-Actively-Exploited-In-Wild" CRITICAL finding.
+ */
+export type ExploitMaturity = "proof-of-concept" | "active-exploitation" | "widespread";
+
+export interface CisaKevContext {
+  /**
+   * CVE IDs that appear in the CISA KEV catalogue for this package/version,
+   * keyed by CVE ID with their maturity score.
+   */
+  kevMatches: Array<{
+    cveId: string;
+    firstSeenDate: string; // ISO date, e.g. "2024-03-15"
+    exploitMaturity: ExploitMaturity;
+  }>;
+}
+
+/**
+ * Compute the CISA KEV risk boost (0 or 20 pts).
+ *
+ * Returns 20 when at least one matched CVE has exploit_maturity_score of
+ * 'active-exploitation' or 'widespread'. Returns 0 otherwise (includes
+ * 'proof-of-concept' and no matches).
+ */
+export function cisaKevBoost(kev?: CisaKevContext): number {
+  if (!kev || kev.kevMatches.length === 0) return 0;
+  const hasActive = kev.kevMatches.some(
+    (m) => m.exploitMaturity === "active-exploitation" || m.exploitMaturity === "widespread"
+  );
+  return hasActive ? 20 : 0;
+}
+
+/**
+ * Build a CRITICAL "CVE-Actively-Exploited-In-Wild" finding for each
+ * active-exploitation or widespread KEV match. These findings are injected
+ * into the package-level result so they surface in reports and gate checks.
+ */
+export function buildCisaKevFindings(kev?: CisaKevContext): Finding[] {
+  if (!kev || kev.kevMatches.length === 0) return [];
+
+  return kev.kevMatches
+    .filter((m) => m.exploitMaturity === "active-exploitation" || m.exploitMaturity === "widespread")
+    .map((m) => ({
+      severity: "critical" as FindingSeverity,
+      title: `CVE-Actively-Exploited-In-Wild: ${m.cveId}`,
+      description:
+        `${m.cveId} has been confirmed by CISA as actively exploited in the wild ` +
+        `(maturity: ${m.exploitMaturity}, CISA KEV date: ${m.firstSeenDate}). ` +
+        `Immediate remediation is strongly advised.`,
+      recommendation:
+        "Upgrade or replace this package immediately. Monitor CISA KEV for patch guidance."
+    }));
+}
+
+/**
  * Compute the EPSS risk boost (0 | 15 | 25) for a given EPSS context.
  * Returns 0 when no context is provided or percentile is below threshold.
  */
@@ -110,7 +168,8 @@ export function epssBoost(epss?: EpssContext): number {
 
 export function scoreBinary(
   binary: Pick<BinaryAnalysis, "behaviors" | "findings" | "importCount" | "functionCount">,
-  epss?: EpssContext
+  epss?: EpssContext,
+  kev?: CisaKevContext
 ) {
   const baseScore =
     scoreFindings(binary.findings) +
@@ -118,7 +177,7 @@ export function scoreBinary(
     Math.min(binary.importCount / 4, 6) +
     Math.min(binary.functionCount / 20, 5);
 
-  const score = normalizeRisk(baseScore + epssBoost(epss));
+  const score = normalizeRisk(baseScore + epssBoost(epss) + cisaKevBoost(kev));
 
   return {
     riskScore: score,
@@ -135,13 +194,20 @@ export function scoreBinary(
  * real-world exploit probability (epssPercentile > 0.75 → +15 pts,
  * epssPercentile > 0.90 → +25 pts).
  */
-export function scoreManifest(manifest: ManifestAnalysis, epss?: EpssContext): { riskScore: number; riskLevel: RiskLevel } {
+export function scoreManifest(
+  manifest: ManifestAnalysis,
+  epss?: EpssContext,
+  kev?: CisaKevContext
+): { riskScore: number; riskLevel: RiskLevel } {
   if (manifest.knownMalwareAdvisoryIds.length > 0) {
     return { riskScore: 100, riskLevel: "critical" };
   }
 
   const score = normalizeRisk(
-    scoreScriptFindings(manifest.findings) + scoreScriptThreats(manifest.threats) + epssBoost(epss)
+    scoreScriptFindings(manifest.findings) +
+    scoreScriptThreats(manifest.threats) +
+    epssBoost(epss) +
+    cisaKevBoost(kev)
   );
   return {
     riskScore: score,
