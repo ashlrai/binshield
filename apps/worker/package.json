@@ -20,6 +20,7 @@
     "@binshield/malware-engines": "workspace:*",
     "@binshield/package-intelligence": "workspace:*",
     "@binshield/risk-engine": "workspace:*",
+    "@binshield/feed-sync-engine": "workspace:*",
     "@binshield/supply-chain-health": "workspace:*",
     "tsx": "^4.19.3"
   },

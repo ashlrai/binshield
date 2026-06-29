@@ -8,6 +8,13 @@ import { AnalyzerRegistry, getSharedMatchingEngine } from "@binshield/malware-en
 import type { OsvMatchResult } from "@binshield/malware-engines";
 import { aggregatePackageRiskWithManifest, summarizePackage, scoreBinary } from "@binshield/risk-engine";
 import { SupplyChainHealthAnalyzer, toHealthFinding } from "@binshield/supply-chain-health";
+import {
+  DepGraphEnricher,
+  NvdFeedIngester,
+  CisaKevSyncer,
+  type DepGraphEntry,
+  type DepGraphEnrichmentResult
+} from "@binshield/feed-sync-engine";
 
 import { buildCacheKey, InMemoryAnalysisCache } from "./cache";
 import { FileSystemBinaryExtractor } from "./extractor";
@@ -204,6 +211,11 @@ const workerAnalytics = new AnalyticsCollector({
   supabaseUrl: process.env.SUPABASE_URL,
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY
 });
+
+// Module-level feed ingestors — shared across all WorkerRuntime instances so
+// that the NVD/KEV snapshot is built once per process and stays warm.
+const sharedNvdIngester = new NvdFeedIngester();
+const sharedKevSyncer = new CisaKevSyncer();
 
 export class WorkerRuntime {
   constructor(private readonly services: AnalysisServiceBundle = createDefaultBundle()) {}
@@ -404,6 +416,30 @@ export class WorkerRuntime {
     } catch (err) {
       console.warn(
         "[BinShield] supply-chain health analysis failed (non-fatal):",
+        err instanceof Error ? err.message : err
+      );
+    }
+
+    // Feed-sync enrichment — cross-reference all direct dependencies against
+    // the NVD/CISA-KEV snapshot to produce per-dep vulnerability counts and
+    // highest EPSS percentile.  Runs best-effort: failures are caught so they
+    // never block the main analysis pipeline.
+    let depGraphEnrichment: DepGraphEnrichmentResult[] = [];
+    try {
+      const depEntries: DepGraphEntry[] = Object.entries(
+        acquired.manifest.dependencies ?? {}
+      ).map(([packageName, version]) => ({ packageName, version }));
+
+      if (depEntries.length > 0) {
+        const enricher = new DepGraphEnricher(
+          sharedNvdIngester.getSnapshot(),
+          sharedKevSyncer
+        );
+        depGraphEnrichment = enricher.enrich(depEntries);
+      }
+    } catch (err) {
+      console.warn(
+        "[BinShield] dep-graph feed enrichment failed (non-fatal):",
         err instanceof Error ? err.message : err
       );
     }

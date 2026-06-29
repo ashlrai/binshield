@@ -18,6 +18,7 @@
       "@binshield/ui": ["packages/ui/src/index.ts"],
       "@binshield/package-intelligence": ["packages/package-intelligence/src/index.ts"],
       "@binshield/supply-chain-health": ["packages/supply-chain-health/src/index.ts"],
+      "@binshield/feed-sync-engine": ["packages/feed-sync-engine/src/index.ts"],
       "@ashlr/cli-common": ["../../ashlr-cli-common/src/index.ts"],
       "@ashlr/cli-common/output": ["../../ashlr-cli-common/src/output.ts"],
       "@ashlr/cli-common/help": ["../../ashlr-cli-common/src/help.ts"],

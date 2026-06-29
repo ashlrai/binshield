@@ -32,6 +32,9 @@ importers:
       '@binshield/analysis-types':
         specifier: workspace:*
         version: link:../../packages/analysis-types
+      '@binshield/analytics-collector':
+        specifier: workspace:*
+        version: link:../../packages/analytics-collector
       '@binshield/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -41,6 +44,9 @@ importers:
       '@binshield/risk-engine':
         specifier: workspace:*
         version: link:../../packages/risk-engine
+      '@binshield/supply-chain-health':
+        specifier: workspace:*
+        version: link:../../packages/supply-chain-health
       '@supabase/supabase-js':
         specifier: ^2.56.0
         version: 2.99.3
@@ -97,6 +103,9 @@ importers:
       '@binshield/analysis-types':
         specifier: workspace:*
         version: link:../../packages/analysis-types
+      '@binshield/analytics-collector':
+        specifier: workspace:*
+        version: link:../../packages/analytics-collector
       '@binshield/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -121,9 +130,15 @@ importers:
       '@binshield/analysis-types':
         specifier: workspace:*
         version: link:../../packages/analysis-types
+      '@binshield/analytics-collector':
+        specifier: workspace:*
+        version: link:../../packages/analytics-collector
       '@binshield/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@binshield/feed-sync-engine':
+        specifier: workspace:*
+        version: link:../../packages/feed-sync-engine
       '@binshield/malware-engines':
         specifier: workspace:*
         version: link:../../packages/malware-engines
@@ -133,11 +148,16 @@ importers:
       '@binshield/risk-engine':
         specifier: workspace:*
         version: link:../../packages/risk-engine
+      '@binshield/supply-chain-health':
+        specifier: workspace:*
+        version: link:../../packages/supply-chain-health
       tsx:
         specifier: ^4.19.3
         version: 4.21.0
 
   packages/analysis-types: {}
+
+  packages/analytics-collector: {}
 
   packages/cli:
     dependencies:
@@ -154,6 +174,12 @@ importers:
 
   packages/config: {}
 
+  packages/feed-sync-engine:
+    dependencies:
+      '@binshield/analysis-types':
+        specifier: workspace:*
+        version: link:../analysis-types
+
   packages/malware-engines:
     dependencies:
       '@binshield/analysis-types':
@@ -163,6 +189,12 @@ importers:
   packages/package-intelligence: {}
 
   packages/risk-engine:
+    dependencies:
+      '@binshield/analysis-types':
+        specifier: workspace:*
+        version: link:../analysis-types
+
+  packages/supply-chain-health:
     dependencies:
       '@binshield/analysis-types':
         specifier: workspace:*
