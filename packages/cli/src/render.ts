@@ -17,8 +17,6 @@ import type {
   FindingSeverity,
 } from "./api.js";
 
-import { renderError as _cliCommonRenderError } from "@ashlr/cli-common/output";
-
 import {
   bold,
   dim,
@@ -498,10 +496,11 @@ export function formatPollStatus(job: { id: string; status: string; stage?: stri
 // ---------------------------------------------------------------------------
 
 export function printError(message: string): void {
-  // Delegate color/formatting to @ashlr/cli-common; it returns {text} which we write ourselves
-  // so we control the stream (stderr) and preserve the existing string-only call signature.
-  const { text } = _cliCommonRenderError(new Error(message));
-  process.stderr.write(`${text}\n`);
+  // Zero-dependency error formatting (mirrors the prior @ashlr/cli-common renderError
+  // contract: red "error:" prefix + message). Inlined so the published CLI has no
+  // out-of-repo file: dependency, which previously broke clean installs / deploys.
+  const prefix = isColorEnabled() ? red("error:") : "error:";
+  process.stderr.write(`${prefix} ${message}\n`);
 }
 
 export function printWarn(message: string): void {

@@ -36,7 +36,6 @@
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
-    "@ashlr/cli-common": "file:../../../ashlr-cli-common",
     "@binshield/package-intelligence": "workspace:*"
   },
   "devDependencies": {
