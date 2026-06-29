@@ -250,6 +250,48 @@ function toSuppressionSummary(row: SuppressionRow): SuppressionSummary {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Failed scan queue types
+// ---------------------------------------------------------------------------
+
+export type FailedScanStatus = "pending" | "retrying" | "abandoned" | "resolved";
+
+export interface FailedScanEntry {
+  id: string;
+  scanId: string;
+  jobId: string;
+  orgId: string | null;
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  errorReason: string;
+  failureCount: number;
+  lastAttemptAt: string;
+  nextRetryAt: string;
+  status: FailedScanStatus;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface ScanAuditLogEntry {
+  id: string;
+  scanId: string;
+  orgId: string | null;
+  eventType:
+    | "scan_queued"
+    | "scan_timeout"
+    | "scan_failed"
+    | "retry_scheduled"
+    | "retry_attempted"
+    | "retry_succeeded"
+    | "scan_abandoned"
+    | "alert_sent";
+  retryAttempt: number;
+  details: Record<string, unknown>;
+  createdAt: string;
+}
+
 interface BaseRepository {
   searchPackages(query?: string): Promise<ApiListResponse<SearchResult>>;
   listPackageVersions(ecosystem: Ecosystem, name: string): Promise<PackageAnalysis[]>;
@@ -257,6 +299,15 @@ interface BaseRepository {
   getPackageDiff(ecosystem: Ecosystem, name: string, from: string, to: string): Promise<PackageDiff | null>;
   submitScan(request: ScanRequest, principal: AuthPrincipal): Promise<ScanJob>;
   getScanJob(id: string, orgId?: string): Promise<ScanJob | null>;
+
+  // FailedScanQueue methods
+  upsertFailedScan(entry: Omit<FailedScanEntry, "id" | "createdAt" | "expiresAt">): Promise<FailedScanEntry>;
+  getFailedScan(scanId: string): Promise<FailedScanEntry | null>;
+  listPendingRetries(limit?: number): Promise<FailedScanEntry[]>;
+  markFailedScanAbandoned(scanId: string): Promise<void>;
+  resolveFailedScan(scanId: string): Promise<void>;
+  appendScanAuditLog(entry: Omit<ScanAuditLogEntry, "id" | "createdAt">): Promise<void>;
+  listScanAuditLog(scanId: string): Promise<ScanAuditLogEntry[]>;
   listRepos(orgId: string): Promise<RepoRecord[]>;
   createRepo(orgId: string, githubRepo: string): Promise<RepoRecord>;
   listWatchlists(orgId: string): Promise<WatchlistSummary[]>;
@@ -1256,6 +1307,54 @@ class LocalRepository implements BaseRepository {
     this.suppressions.delete(suppressionId);
     return true;
   }
+
+  // ---------------------------------------------------------------------------
+  // FailedScanQueue — in-memory implementation
+  // ---------------------------------------------------------------------------
+
+  private failedScans = new Map<string, FailedScanEntry>();
+  private auditLog: ScanAuditLogEntry[] = [];
+
+  async upsertFailedScan(entry: Omit<FailedScanEntry, "id" | "createdAt" | "expiresAt">): Promise<FailedScanEntry> {
+    const existing = this.failedScans.get(entry.scanId);
+    const row: FailedScanEntry = {
+      id: existing?.id ?? randomId("fsq"),
+      ...entry,
+      createdAt: existing?.createdAt ?? now(),
+      expiresAt: existing?.expiresAt ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+    };
+    this.failedScans.set(entry.scanId, row);
+    return row;
+  }
+
+  async getFailedScan(scanId: string): Promise<FailedScanEntry | null> {
+    return this.failedScans.get(scanId) ?? null;
+  }
+
+  async listPendingRetries(limit = 50): Promise<FailedScanEntry[]> {
+    const due = Date.now();
+    return Array.from(this.failedScans.values())
+      .filter((e) => (e.status === "pending" || e.status === "retrying") && new Date(e.nextRetryAt).getTime() <= due)
+      .slice(0, limit);
+  }
+
+  async markFailedScanAbandoned(scanId: string): Promise<void> {
+    const row = this.failedScans.get(scanId);
+    if (row) this.failedScans.set(scanId, { ...row, status: "abandoned" });
+  }
+
+  async resolveFailedScan(scanId: string): Promise<void> {
+    const row = this.failedScans.get(scanId);
+    if (row) this.failedScans.set(scanId, { ...row, status: "resolved" });
+  }
+
+  async appendScanAuditLog(entry: Omit<ScanAuditLogEntry, "id" | "createdAt">): Promise<void> {
+    this.auditLog.push({ id: randomId("sal"), ...entry, createdAt: now() });
+  }
+
+  async listScanAuditLog(scanId: string): Promise<ScanAuditLogEntry[]> {
+    return this.auditLog.filter((e) => e.scanId === scanId);
+  }
 }
 
 interface AdvisoryRow {
@@ -2097,6 +2196,132 @@ class SupabaseRepository implements BaseRepository {
     } catch {
       return false;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // FailedScanQueue — Supabase implementation
+  // ---------------------------------------------------------------------------
+
+  async upsertFailedScan(entry: Omit<FailedScanEntry, "id" | "createdAt" | "expiresAt">): Promise<FailedScanEntry> {
+    const rows = await this.request<Array<{
+      id: string; scan_id: string; job_id: string; org_id: string | null;
+      ecosystem: string; package_name: string; version: string;
+      error_reason: string; failure_count: number;
+      last_attempt_at: string; next_retry_at: string;
+      status: string; metadata: Record<string, unknown>;
+      created_at: string; expires_at: string;
+    }>>(`/failed_scan_queue?on_conflict=scan_id&select=*`, {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify({
+        scan_id: entry.scanId,
+        job_id: entry.jobId,
+        org_id: entry.orgId ?? null,
+        ecosystem: entry.ecosystem,
+        package_name: entry.packageName,
+        version: entry.version,
+        error_reason: entry.errorReason,
+        failure_count: entry.failureCount,
+        last_attempt_at: entry.lastAttemptAt,
+        next_retry_at: entry.nextRetryAt,
+        status: entry.status,
+        metadata: entry.metadata
+      })
+    });
+    const row = rows[0]!;
+    return {
+      id: row.id, scanId: row.scan_id, jobId: row.job_id, orgId: row.org_id,
+      ecosystem: row.ecosystem, packageName: row.package_name, version: row.version,
+      errorReason: row.error_reason, failureCount: row.failure_count,
+      lastAttemptAt: row.last_attempt_at, nextRetryAt: row.next_retry_at,
+      status: row.status as FailedScanStatus, metadata: row.metadata,
+      createdAt: row.created_at, expiresAt: row.expires_at
+    };
+  }
+
+  async getFailedScan(scanId: string): Promise<FailedScanEntry | null> {
+    const rows = await this.select<{
+      id: string; scan_id: string; job_id: string; org_id: string | null;
+      ecosystem: string; package_name: string; version: string;
+      error_reason: string; failure_count: number;
+      last_attempt_at: string; next_retry_at: string;
+      status: string; metadata: Record<string, unknown>;
+      created_at: string; expires_at: string;
+    }>("failed_scan_queue", `select=*&scan_id=eq.${encodeURIComponent(scanId)}`);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      id: row.id, scanId: row.scan_id, jobId: row.job_id, orgId: row.org_id,
+      ecosystem: row.ecosystem, packageName: row.package_name, version: row.version,
+      errorReason: row.error_reason, failureCount: row.failure_count,
+      lastAttemptAt: row.last_attempt_at, nextRetryAt: row.next_retry_at,
+      status: row.status as FailedScanStatus, metadata: row.metadata,
+      createdAt: row.created_at, expiresAt: row.expires_at
+    };
+  }
+
+  async listPendingRetries(limit = 50): Promise<FailedScanEntry[]> {
+    const nowIso = new Date().toISOString();
+    const rows = await this.select<{
+      id: string; scan_id: string; job_id: string; org_id: string | null;
+      ecosystem: string; package_name: string; version: string;
+      error_reason: string; failure_count: number;
+      last_attempt_at: string; next_retry_at: string;
+      status: string; metadata: Record<string, unknown>;
+      created_at: string; expires_at: string;
+    }>(
+      "failed_scan_queue",
+      `select=*&status=in.(pending,retrying)&next_retry_at=lte.${encodeURIComponent(nowIso)}&order=next_retry_at.asc&limit=${limit}`
+    );
+    return rows.map((row) => ({
+      id: row.id, scanId: row.scan_id, jobId: row.job_id, orgId: row.org_id,
+      ecosystem: row.ecosystem, packageName: row.package_name, version: row.version,
+      errorReason: row.error_reason, failureCount: row.failure_count,
+      lastAttemptAt: row.last_attempt_at, nextRetryAt: row.next_retry_at,
+      status: row.status as FailedScanStatus, metadata: row.metadata,
+      createdAt: row.created_at, expiresAt: row.expires_at
+    }));
+  }
+
+  async markFailedScanAbandoned(scanId: string): Promise<void> {
+    await this.request<unknown>(
+      `/failed_scan_queue?scan_id=eq.${encodeURIComponent(scanId)}`,
+      { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "abandoned" }) }
+    );
+  }
+
+  async resolveFailedScan(scanId: string): Promise<void> {
+    await this.request<unknown>(
+      `/failed_scan_queue?scan_id=eq.${encodeURIComponent(scanId)}`,
+      { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "resolved" }) }
+    );
+  }
+
+  async appendScanAuditLog(entry: Omit<ScanAuditLogEntry, "id" | "createdAt">): Promise<void> {
+    await this.request<unknown>("/scan_audit_log", {
+      method: "POST",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({
+        scan_id: entry.scanId,
+        org_id: entry.orgId ?? null,
+        event_type: entry.eventType,
+        retry_attempt: entry.retryAttempt,
+        details: entry.details
+      })
+    });
+  }
+
+  async listScanAuditLog(scanId: string): Promise<ScanAuditLogEntry[]> {
+    const rows = await this.select<{
+      id: string; scan_id: string; org_id: string | null;
+      event_type: string; retry_attempt: number;
+      details: Record<string, unknown>; created_at: string;
+    }>("scan_audit_log", `select=*&scan_id=eq.${encodeURIComponent(scanId)}&order=created_at.asc`);
+    return rows.map((row) => ({
+      id: row.id, scanId: row.scan_id, orgId: row.org_id,
+      eventType: row.event_type as ScanAuditLogEntry["eventType"],
+      retryAttempt: row.retry_attempt, details: row.details, createdAt: row.created_at
+    }));
   }
 }
 

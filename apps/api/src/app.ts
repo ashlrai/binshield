@@ -11,7 +11,7 @@ import { readApiEnv } from "./lib/env";
 import { requireFeature, requireRepoQuota, requireScanQuota, trackScanUsage } from "./lib/middleware";
 import { rateLimitByIp, rateLimitByAuth } from "./lib/rate-limit";
 import { createServices } from "./lib/repository";
-import type { AppServices } from "./lib/repository";
+import type { AppServices, FailedScanEntry } from "./lib/repository";
 import { generateCycloneDxSbom } from "./lib/sbom";
 import { verifySbomProvenance } from "./lib/sbom-provenance-checker";
 import type { AuthPrincipal, Ecosystem, PackageAnalysis, SuppressionSummary } from "./lib/types";
@@ -58,6 +58,113 @@ function getAuditConfig(c: AppContext) {
     supabaseUrl: env.supabaseUrl ?? "",
     supabaseServiceRoleKey: env.supabaseServiceRoleKey ?? ""
   };
+}
+
+// ---------------------------------------------------------------------------
+// Scan resilience helpers
+// ---------------------------------------------------------------------------
+
+/** Exponential backoff delays (ms) for retry attempts 1–5. */
+const RETRY_BACKOFF_MS = [1_000, 4_000, 16_000, 60_000, 300_000] as const;
+
+/** Maximum number of retry attempts before a scan is marked 'abandoned'. */
+const MAX_RETRY_ATTEMPTS = 3;
+
+/** How long (ms) a scan may remain 'queued' before it is considered timed-out. */
+const QUEUE_TIMEOUT_MS = 60_000;
+
+/** Compute the next retry timestamp given the current failure count (1-based). */
+function nextRetryAt(failureCount: number): string {
+  const delayMs = RETRY_BACKOFF_MS[Math.min(failureCount - 1, RETRY_BACKOFF_MS.length - 1)] ?? 300_000;
+  return new Date(Date.now() + delayMs).toISOString();
+}
+
+/**
+ * Fire-and-forget background poller that monitors a newly submitted scan job.
+ * If the job remains 'queued' for > QUEUE_TIMEOUT_MS or transitions to 'failed',
+ * it is inserted into the FailedScanQueue.  After MAX_RETRY_ATTEMPTS failures
+ * the job is abandoned and a console alert is emitted (hook for email/webhook).
+ */
+function startScanTimeoutWatch(
+  repository: AppServices["repository"],
+  jobId: string,
+  orgId: string,
+  scanPayload: { ecosystem: string; packageName: string; version: string }
+): void {
+  const POLL_INTERVAL_MS = 2_000;
+  const deadlineMs = Date.now() + QUEUE_TIMEOUT_MS;
+  let pollHandle: ReturnType<typeof setTimeout> | undefined;
+
+  async function poll(): Promise<void> {
+    try {
+      const job = await repository.getScanJob(jobId, orgId === "anon" ? undefined : orgId);
+      if (!job) return; // job vanished — nothing to do
+
+      const timedOut = job.status === "queued" && Date.now() > deadlineMs;
+      const failed = job.status === "failed";
+
+      if (!timedOut && !failed) {
+        // Still in progress — schedule next poll unless deadline already past
+        if (Date.now() < deadlineMs + POLL_INTERVAL_MS) {
+          pollHandle = setTimeout(() => { void poll(); }, POLL_INTERVAL_MS);
+        }
+        return;
+      }
+
+      const errorReason = timedOut ? "timeout: job remained queued for > 60s" : (job.error ?? "worker reported failure");
+
+      // Read existing DLQ entry (if any) to determine failure count
+      const existing = await repository.getFailedScan(jobId).catch(() => null);
+      const failureCount = (existing?.failureCount ?? 0) + 1;
+      const status: FailedScanEntry["status"] = failureCount >= MAX_RETRY_ATTEMPTS ? "abandoned" : "retrying";
+
+      await repository.upsertFailedScan({
+        scanId: jobId,
+        jobId,
+        orgId: orgId === "anon" ? null : orgId,
+        ecosystem: scanPayload.ecosystem,
+        packageName: scanPayload.packageName,
+        version: scanPayload.version,
+        errorReason,
+        failureCount,
+        lastAttemptAt: new Date().toISOString(),
+        nextRetryAt: nextRetryAt(failureCount),
+        status,
+        metadata: { originalStatus: job.status, timedOut }
+      });
+
+      await repository.appendScanAuditLog({
+        scanId: jobId,
+        orgId: orgId === "anon" ? null : orgId,
+        eventType: timedOut ? "scan_timeout" : "scan_failed",
+        retryAttempt: failureCount,
+        details: { errorReason, packageName: scanPayload.packageName, version: scanPayload.version }
+      });
+
+      if (status === "abandoned") {
+        console.warn(
+          `[BinShield] scan ${jobId} abandoned after ${failureCount} failed attempts ` +
+          `(org=${orgId}, pkg=${scanPayload.packageName}@${scanPayload.version}). ` +
+          "Consider configuring an email/webhook alert channel."
+        );
+        await repository.appendScanAuditLog({
+          scanId: jobId,
+          orgId: orgId === "anon" ? null : orgId,
+          eventType: "scan_abandoned",
+          retryAttempt: failureCount,
+          details: { alertSent: false }
+        });
+      }
+    } catch (err) {
+      // Poller errors must never crash the server process
+      console.error("[BinShield] startScanTimeoutWatch poll error:", err instanceof Error ? err.message : err);
+    }
+  }
+
+  // First poll fires after the timeout window; intermediate polls track status
+  pollHandle = setTimeout(() => { void poll(); }, POLL_INTERVAL_MS);
+  // Suppress TS unused-variable warning
+  void pollHandle;
 }
 
 export function createApp(services = createServices(readApiEnv())) {
@@ -286,6 +393,15 @@ export function createApp(services = createServices(readApiEnv())) {
       packageName: body.packageName,
       version: body.version
     });
+
+    // Start background timeout watcher for non-complete jobs
+    if (job.status !== "complete") {
+      startScanTimeoutWatch(getServices(c).repository, job.id, auth.orgId, {
+        ecosystem: body.ecosystem,
+        packageName: body.packageName,
+        version: body.version
+      });
+    }
 
     return c.json(job, job.status === "complete" ? 200 : 202);
   });

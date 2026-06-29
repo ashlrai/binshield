@@ -1299,6 +1299,446 @@ describe("AdvisoryService.enrichCvesWithEpss — CISA KEV correlation", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Scan Resilience + Dead-Letter Queue tests
+// ---------------------------------------------------------------------------
+
+describe("FailedScanQueue repository methods (LocalRepository)", () => {
+  it("upserts a failed scan entry and retrieves it by scanId", async () => {
+    const freshApp = createApp();
+    const repo = freshApp.request; // we access repository via app services indirectly
+
+    // Use the internal services by creating a fresh instance
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    const entry = await repository.upsertFailedScan({
+      scanId: "job_test001",
+      jobId: "job_test001",
+      orgId: "org_demo",
+      ecosystem: "npm",
+      packageName: "test-pkg",
+      version: "1.0.0",
+      errorReason: "timeout: job remained queued for > 60s",
+      failureCount: 1,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: new Date(Date.now() + 1000).toISOString(),
+      status: "pending",
+      metadata: {}
+    });
+
+    expect(entry.scanId).toBe("job_test001");
+    expect(entry.status).toBe("pending");
+    expect(entry.failureCount).toBe(1);
+    expect(entry.id).toBeTruthy();
+
+    const fetched = await repository.getFailedScan("job_test001");
+    expect(fetched).not.toBeNull();
+    expect(fetched!.packageName).toBe("test-pkg");
+  });
+
+  it("upsert is idempotent: second call with same scanId updates the row", async () => {
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    const base = {
+      scanId: "job_test002",
+      jobId: "job_test002",
+      orgId: "org_demo",
+      ecosystem: "npm",
+      packageName: "pkg-upsert",
+      version: "2.0.0",
+      errorReason: "first failure",
+      failureCount: 1,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: new Date(Date.now() + 1000).toISOString(),
+      status: "pending" as const,
+      metadata: {}
+    };
+    const first = await repository.upsertFailedScan(base);
+    const second = await repository.upsertFailedScan({
+      ...base,
+      failureCount: 2,
+      errorReason: "second failure",
+      status: "retrying"
+    });
+
+    // Same id, updated fields
+    expect(second.id).toBe(first.id);
+    expect(second.failureCount).toBe(2);
+    expect(second.status).toBe("retrying");
+  });
+
+  it("listPendingRetries only returns entries whose nextRetryAt is due", async () => {
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    const pastTime = new Date(Date.now() - 5000).toISOString();
+    const futureTime = new Date(Date.now() + 300_000).toISOString();
+
+    await repository.upsertFailedScan({
+      scanId: "job_due001",
+      jobId: "job_due001",
+      orgId: "org_demo",
+      ecosystem: "npm",
+      packageName: "due-pkg",
+      version: "1.0.0",
+      errorReason: "timeout",
+      failureCount: 1,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: pastTime,
+      status: "pending",
+      metadata: {}
+    });
+
+    await repository.upsertFailedScan({
+      scanId: "job_notdue001",
+      jobId: "job_notdue001",
+      orgId: "org_demo",
+      ecosystem: "npm",
+      packageName: "future-pkg",
+      version: "1.0.0",
+      errorReason: "timeout",
+      failureCount: 1,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: futureTime,
+      status: "pending",
+      metadata: {}
+    });
+
+    const pending = await repository.listPendingRetries();
+    const dueIds = pending.map((e) => e.scanId);
+    expect(dueIds).toContain("job_due001");
+    expect(dueIds).not.toContain("job_notdue001");
+  });
+
+  it("markFailedScanAbandoned transitions status to abandoned", async () => {
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    await repository.upsertFailedScan({
+      scanId: "job_abandon001",
+      jobId: "job_abandon001",
+      orgId: "org_demo",
+      ecosystem: "npm",
+      packageName: "abandon-pkg",
+      version: "3.0.0",
+      errorReason: "all retries exhausted",
+      failureCount: 5,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: new Date(Date.now() + 1000).toISOString(),
+      status: "retrying",
+      metadata: {}
+    });
+
+    await repository.markFailedScanAbandoned("job_abandon001");
+    const entry = await repository.getFailedScan("job_abandon001");
+    expect(entry?.status).toBe("abandoned");
+  });
+
+  it("resolveFailedScan transitions status to resolved", async () => {
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    await repository.upsertFailedScan({
+      scanId: "job_resolve001",
+      jobId: "job_resolve001",
+      orgId: "org_demo",
+      ecosystem: "npm",
+      packageName: "resolved-pkg",
+      version: "1.0.0",
+      errorReason: "timeout",
+      failureCount: 2,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: new Date(Date.now() + 1000).toISOString(),
+      status: "retrying",
+      metadata: {}
+    });
+
+    await repository.resolveFailedScan("job_resolve001");
+    const entry = await repository.getFailedScan("job_resolve001");
+    expect(entry?.status).toBe("resolved");
+  });
+
+  it("appendScanAuditLog and listScanAuditLog round-trip", async () => {
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    const scanId = "job_audit001";
+
+    await repository.appendScanAuditLog({
+      scanId,
+      orgId: "org_demo",
+      eventType: "scan_queued",
+      retryAttempt: 0,
+      details: { packageName: "audit-pkg", version: "1.0.0" }
+    });
+    await repository.appendScanAuditLog({
+      scanId,
+      orgId: "org_demo",
+      eventType: "scan_timeout",
+      retryAttempt: 1,
+      details: { reason: "queued > 60s" }
+    });
+    await repository.appendScanAuditLog({
+      scanId,
+      orgId: "org_demo",
+      eventType: "retry_attempted",
+      retryAttempt: 1,
+      details: {}
+    });
+
+    const log = await repository.listScanAuditLog(scanId);
+    expect(log.length).toBe(3);
+    expect(log[0]!.eventType).toBe("scan_queued");
+    expect(log[1]!.eventType).toBe("scan_timeout");
+    expect(log[2]!.eventType).toBe("retry_attempted");
+    expect(log.every((e) => e.scanId === scanId)).toBe(true);
+  });
+});
+
+describe("scan timeout watcher — API-level integration", () => {
+  it("scan for unknown package returns status queued (202)", async () => {
+    const response = await app.request("/scans/packages", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ecosystem: "npm",
+        packageName: "unknown-package-xyz-timeout-test",
+        version: "0.0.1"
+      })
+    });
+    expect(response.status).toBe(202);
+    const body = await response.json();
+    expect(body.status).toBe("queued");
+    expect(body.id).toBeTruthy();
+  });
+
+  it("scan for known package returns status complete (200) without entering queue", async () => {
+    const response = await app.request("/scans/packages", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ecosystem: "npm",
+        packageName: "bcrypt",
+        version: "5.1.1"
+      })
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe("complete");
+  });
+});
+
+describe("retry-handler — processRetry unit tests", () => {
+  it("computeNextRetryAt uses exponential backoff delays", async () => {
+    const { computeNextRetryAt } = await import("../../worker/src/retry-handler");
+    const delays = [1, 2, 3, 4, 5].map((attempt) => {
+      const before = Date.now();
+      const ts = computeNextRetryAt(attempt);
+      const after = Date.now();
+      return new Date(ts).getTime() - before;
+    });
+    // delays should be approximately [1000, 4000, 16000, 60000, 300000]
+    expect(delays[0]).toBeGreaterThanOrEqual(900);
+    expect(delays[1]).toBeGreaterThanOrEqual(3900);
+    expect(delays[2]).toBeGreaterThanOrEqual(15_900);
+    expect(delays[3]).toBeGreaterThanOrEqual(59_900);
+    expect(delays[4]).toBeGreaterThanOrEqual(299_900);
+    // Each delay should be strictly longer than the previous
+    for (let i = 1; i < delays.length; i++) {
+      expect(delays[i]).toBeGreaterThan(delays[i - 1]!);
+    }
+  });
+
+  it("processRetry: successful runScan resolves DLQ entry and writes audit log", async () => {
+    const { processRetry } = await import("../../worker/src/retry-handler");
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    const scanId = "job_retry_success001";
+    await repository.upsertFailedScan({
+      scanId, jobId: scanId, orgId: "org_demo",
+      ecosystem: "npm", packageName: "retry-success-pkg", version: "1.0.0",
+      errorReason: "timeout", failureCount: 1,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: new Date(Date.now() - 1000).toISOString(),
+      status: "pending", metadata: {}
+    });
+
+    const entry = await repository.getFailedScan(scanId);
+    const runScan = vi.fn().mockResolvedValue(true);
+    const result = await processRetry(entry!, repository, runScan);
+
+    expect(result).toBe(true);
+    expect(runScan).toHaveBeenCalledOnce();
+
+    const resolved = await repository.getFailedScan(scanId);
+    expect(resolved?.status).toBe("resolved");
+
+    const log = await repository.listScanAuditLog(scanId);
+    const eventTypes = log.map((e) => e.eventType);
+    expect(eventTypes).toContain("retry_attempted");
+    expect(eventTypes).toContain("retry_succeeded");
+  });
+
+  it("processRetry: failed runScan increments failure count and schedules next retry", async () => {
+    const { processRetry } = await import("../../worker/src/retry-handler");
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    const scanId = "job_retry_fail001";
+    await repository.upsertFailedScan({
+      scanId, jobId: scanId, orgId: "org_demo",
+      ecosystem: "npm", packageName: "retry-fail-pkg", version: "1.0.0",
+      errorReason: "timeout", failureCount: 1,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: new Date(Date.now() - 1000).toISOString(),
+      status: "pending", metadata: {}
+    });
+
+    const entry = await repository.getFailedScan(scanId);
+    const runScan = vi.fn().mockResolvedValue(false);
+    const result = await processRetry(entry!, repository, runScan, 5);
+
+    expect(result).toBe(false);
+    const updated = await repository.getFailedScan(scanId);
+    expect(updated?.failureCount).toBe(2);
+    expect(updated?.status).toBe("retrying");
+
+    const log = await repository.listScanAuditLog(scanId);
+    expect(log.some((e) => e.eventType === "scan_failed")).toBe(true);
+  });
+
+  it("processRetry: abandons scan after maxRetries failures and emits audit events", async () => {
+    const { processRetry } = await import("../../worker/src/retry-handler");
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    const scanId = "job_retry_abandon001";
+    await repository.upsertFailedScan({
+      scanId, jobId: scanId, orgId: "org_demo",
+      ecosystem: "npm", packageName: "abandon-retry-pkg", version: "1.0.0",
+      errorReason: "worker crashed", failureCount: 4,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: new Date(Date.now() - 1000).toISOString(),
+      status: "retrying", metadata: {}
+    });
+
+    const entry = await repository.getFailedScan(scanId);
+    const runScan = vi.fn().mockResolvedValue(false);
+    const result = await processRetry(entry!, repository, runScan, 5);
+
+    expect(result).toBe(false);
+    const abandoned = await repository.getFailedScan(scanId);
+    expect(abandoned?.status).toBe("abandoned");
+    expect(abandoned?.failureCount).toBe(5);
+
+    const log = await repository.listScanAuditLog(scanId);
+    const eventTypes = log.map((e) => e.eventType);
+    expect(eventTypes).toContain("scan_abandoned");
+    expect(eventTypes).toContain("alert_sent");
+  });
+
+  it("processRetry: runScan throwing an error is treated as failure", async () => {
+    const { processRetry } = await import("../../worker/src/retry-handler");
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    const scanId = "job_retry_throws001";
+    await repository.upsertFailedScan({
+      scanId, jobId: scanId, orgId: "org_demo",
+      ecosystem: "npm", packageName: "throwing-pkg", version: "1.0.0",
+      errorReason: "timeout", failureCount: 1,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: new Date(Date.now() - 1000).toISOString(),
+      status: "pending", metadata: {}
+    });
+
+    const entry = await repository.getFailedScan(scanId);
+    const runScan = vi.fn().mockRejectedValue(new Error("worker process died"));
+    const result = await processRetry(entry!, repository, runScan, 5);
+
+    expect(result).toBe(false);
+    const updated = await repository.getFailedScan(scanId);
+    expect(updated?.failureCount).toBe(2);
+    expect(updated?.errorReason).toContain("worker process died");
+  });
+
+  it("startRetryProcessor polls and processes due entries", async () => {
+    const { startRetryProcessor } = await import("../../worker/src/retry-handler");
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    const scanId = "job_processor001";
+    await repository.upsertFailedScan({
+      scanId, jobId: scanId, orgId: "org_demo",
+      ecosystem: "npm", packageName: "processor-pkg", version: "1.0.0",
+      errorReason: "timeout", failureCount: 1,
+      lastAttemptAt: new Date().toISOString(),
+      nextRetryAt: new Date(Date.now() - 100).toISOString(), // already due
+      status: "pending", metadata: {}
+    });
+
+    const runScan = vi.fn().mockResolvedValue(true);
+    const handle = startRetryProcessor({
+      repository,
+      runScan,
+      pollIntervalMs: 50, // very short for tests
+      maxRetries: 5
+    });
+
+    // Wait for at least one poll tick
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    handle.stop();
+
+    expect(runScan).toHaveBeenCalled();
+    const resolved = await repository.getFailedScan(scanId);
+    expect(resolved?.status).toBe("resolved");
+  });
+
+  it("startRetryProcessor stop() halts polling", async () => {
+    const { startRetryProcessor } = await import("../../worker/src/retry-handler");
+    const { createServices: _cs } = await import("./lib/repository");
+    const { readApiEnv } = await import("./lib/env");
+    const services = _cs(readApiEnv());
+    const repository = services.repository;
+
+    const runScan = vi.fn().mockResolvedValue(true);
+    const handle = startRetryProcessor({ repository, runScan, pollIntervalMs: 50 });
+    handle.stop();
+
+    const callsBefore = runScan.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const callsAfter = runScan.mock.calls.length;
+
+    // No additional calls after stop
+    expect(callsAfter).toBe(callsBefore);
+  });
+});
+
 describe("fetchNpmMetadata + fetchPypiMetadata helpers", () => {
   it("fetchNpmMetadata returns null on 404", async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 404 } as Response);
