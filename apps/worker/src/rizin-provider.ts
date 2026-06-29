@@ -62,7 +62,8 @@ export class RizinDecompilerProvider {
 
   /**
    * Analyze a binary with rizin, returning a decompiled artifact.
-   * Falls back to a stub result if Docker is unavailable.
+   * Falls back to a stub result if Docker is unavailable so the scan
+   * pipeline degrades gracefully rather than breaking.
    */
   async decompile(input: {
     packageRequest: WorkerScanRequest;
@@ -71,7 +72,7 @@ export class RizinDecompilerProvider {
   }): Promise<DecompiledArtifact> {
     const available = await this.isAvailable();
     if (!available) {
-      throw new Error("Docker not available for rizin analysis");
+      return buildDockerUnavailableStub(input.artifact);
     }
 
     const analysis = await this.runRizin(input.artifact);
@@ -282,6 +283,67 @@ export class RizinDecompilerProvider {
 
     return lines.join("\n");
   }
+}
+
+/**
+ * Build a stub DecompiledArtifact when Docker is unavailable.
+ * Mirrors the heuristic used by LocalHeuristicDecompilerProvider in providers.ts:
+ * infer imports from filename/magic bytes, extract strings from the artifact.
+ */
+function buildDockerUnavailableStub(artifact: FingerprintedArtifact): DecompiledArtifact {
+  const haystack = [artifact.filename, ...artifact.strings, ...artifact.interestingStrings]
+    .join(" ")
+    .toLowerCase();
+
+  const imports = new Set<string>();
+  if (/napi|node_module_register|node_api|uv_/.test(haystack)) {
+    imports.add("napi_register_module_v1");
+    imports.add("uv_queue_work");
+  }
+  if (/(http|https|curl|socket|connect|dns)/.test(haystack)) {
+    imports.add("connect");
+    imports.add("getaddrinfo");
+  }
+  if (/(crypto|hash|sha|bcrypt|argon2|evp_)/.test(haystack)) {
+    imports.add("EVP_DigestInit_ex");
+    imports.add("EVP_DigestUpdate");
+  }
+  if (/(fs|open|read|write|unlink|tmp|cache)/.test(haystack)) {
+    imports.add("open");
+    imports.add("read");
+    imports.add("write");
+  }
+  if (artifact.format === "WASM") {
+    imports.add("wasm32_runtime_call");
+  }
+
+  const importList = Array.from(imports);
+  const hex = Buffer.from(artifact.bytes.slice(0, 48)).toString("hex");
+  const stringWeight = artifact.strings.length + artifact.interestingStrings.length;
+  const sizeWeight = Math.max(1, Math.round(artifact.fileSize / 4096));
+  const functionCount = Math.max(1, Math.min(180, stringWeight + importList.length + sizeWeight));
+
+  const pseudoSource = [
+    `// Rizin stub (Docker unavailable) for ${artifact.relativePath}`,
+    `// sha256=${artifact.sha256}`,
+    `// kind=${artifact.kind} format=${artifact.format} arch=${artifact.architecture}`,
+    `// head=${hex}`,
+    `int binshield_entry(void) {`,
+    `  return 0;`,
+    `}`,
+    "",
+    "// extracted strings",
+    ...artifact.interestingStrings.map((s) => `// ${s}`),
+  ].join("\n");
+
+  return {
+    pseudoSource,
+    imports: importList,
+    strings: artifact.interestingStrings,
+    functionCount,
+    callTargets: importList,
+    confidence: 0.3, // lower than live rizin (0.65) — Docker was unavailable
+  };
 }
 
 function emptyAnalysis(): RizinAnalysisResult {
