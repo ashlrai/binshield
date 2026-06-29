@@ -259,3 +259,82 @@ export class EpssCache {
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// C Extension EPSS enrichment helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of enriching a C extension finding with EPSS/CVE context.
+ */
+export interface CExtensionEpssEnrichment {
+  /**
+   * The highest-percentile CVE found among the provided CVE IDs.
+   * null when no CVEs were found in the cache.
+   */
+  topCve: EpssCacheEntry | null;
+  /**
+   * EPSS boost delta for the top CVE (0 when no CVE found).
+   * Apply this to a base risk score: finalScore = min(100, base + epssBoost).
+   */
+  epssBoost: number;
+  /**
+   * Human-readable summary of the enrichment result.
+   * Empty string when no CVE data was found.
+   */
+  summary: string;
+  /**
+   * All CVEs found in the cache, sorted by percentile descending.
+   * Empty array when none found.
+   */
+  allCves: EpssCacheEntry[];
+}
+
+/**
+ * Enrich a C extension finding with EPSS/CVE context from the cache.
+ *
+ * This is the primary integration point between the PyPiCExtensionAnalyzer
+ * and the EPSS risk boost system. When a wheel's METADATA lists
+ * `install_requires` packages that have known-vulnerable CVEs in the cache,
+ * this function returns the boost delta to apply to the C extension's base
+ * risk score.
+ *
+ * Usage pattern:
+ * ```ts
+ * const cache = new EpssCache(dbConfig);
+ * const enrichment = await enrichCExtensionWithEpss(cache, cveIds);
+ * const finalScore = Math.min(100, baseScore + enrichment.epssBoost);
+ * ```
+ *
+ * @param cache   EpssCache instance (in-memory or DB-backed).
+ * @param cveIds  CVE IDs associated with the wheel's install_requires deps.
+ * @returns       Enrichment result with boost delta and top CVE.
+ */
+export async function enrichCExtensionWithEpss(
+  cache: EpssCache,
+  cveIds: string[]
+): Promise<CExtensionEpssEnrichment> {
+  if (cveIds.length === 0) {
+    return { topCve: null, epssBoost: 0, summary: "", allCves: [] };
+  }
+
+  const entries = await cache.getMany("pypi", cveIds);
+  if (entries.size === 0) {
+    return { topCve: null, epssBoost: 0, summary: "", allCves: [] };
+  }
+
+  // Sort all found entries by percentile descending
+  const allCves = [...entries.values()].sort((a, b) => b.percentile - a.percentile);
+  const topCve = allCves[0]!;
+  const epssBoost = computeEpssBoostDelta(topCve.percentile);
+
+  const summary =
+    epssBoost > 0
+      ? `EPSS boost +${epssBoost}pts from ${topCve.cveId} ` +
+        `(percentile: ${(topCve.percentile * 100).toFixed(1)}%, ` +
+        `score: ${topCve.score.toFixed(4)})`
+      : `Top CVE ${topCve.cveId} EPSS percentile ${(topCve.percentile * 100).toFixed(1)}% ` +
+        `below boost threshold`;
+
+  return { topCve, epssBoost, summary, allCves };
+}
