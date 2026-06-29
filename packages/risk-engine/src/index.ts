@@ -862,15 +862,19 @@ export function buildEpssBoostFinding(ctx: EpssBoostContext): Finding {
  * When `cves` is empty or all entries are stale, returns the unmodified base
  * score with no epss_context (identical to `aggregatePackageRisk`).
  *
- * @param binaries  Per-binary analysis results.
- * @param cves      Live CVE/EPSS/KEV entries from `getCveForPackage()` or
- *                  `nvdEpssCache.getBestEntry()`.
- * @param now       Timestamp override for staleness checks (default: Date.now()).
+ * @param binaries    Per-binary analysis results.
+ * @param cves        Live CVE/EPSS/KEV entries from `getCveForPackage()` or
+ *                    `nvdEpssCache.getBestEntry()`.
+ * @param now         Timestamp override for staleness checks (default: Date.now()).
+ * @param deployment  Optional patch deployment context used to apply an
+ *                    additional urgency modifier when a patch has been widely
+ *                    adopted in the ecosystem (up to -10 pts).
  */
 export function aggregatePackageRiskWithEpss(
   binaries: BinaryAnalysis[],
   cves: CveEpssInput[],
-  now = Date.now()
+  now = Date.now(),
+  deployment?: PatchDeploymentContext
 ): {
   riskScore: number;
   riskLevel: RiskLevel;
@@ -881,6 +885,12 @@ export function aggregatePackageRiskWithEpss(
 
   const best = selectBestCveEntry(cves, now);
   if (!best) {
+    // Even without EPSS data, apply patch deployment modifier when provided
+    const deployMod = patchDeploymentModifier(deployment);
+    if (deployMod !== 0) {
+      const riskScore = normalizeRisk(base.riskScore + deployMod);
+      return { riskScore, riskLevel: riskLevelFromScore(riskScore), epss_context: undefined, boostFinding: undefined };
+    }
     return { ...base, epss_context: undefined, boostFinding: undefined };
   }
 
@@ -899,12 +909,15 @@ export function aggregatePackageRiskWithEpss(
       })
     : 0;
 
-  const totalBoost = epssBoostPts + kevBoostPts;
+  // Apply patch deployment modifier to reflect ecosystem-wide patch adoption
+  const deployMod = patchDeploymentModifier(deployment);
+
+  const totalBoost = epssBoostPts + kevBoostPts + deployMod;
   const riskScore = normalizeRisk(base.riskScore + totalBoost);
   const riskLevel = riskLevelFromScore(riskScore);
 
   const epss_context = buildEpssBoostContext(best, epssBoostPts, kevBoostPts);
-  const boostFinding = totalBoost > 0 ? buildEpssBoostFinding(epss_context) : undefined;
+  const boostFinding = (epssBoostPts + kevBoostPts) > 0 ? buildEpssBoostFinding(epss_context) : undefined;
 
   return { riskScore, riskLevel, epss_context, boostFinding };
 }

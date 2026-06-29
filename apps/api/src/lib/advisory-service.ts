@@ -1289,6 +1289,102 @@ export class AdvisoryService {
   }
 
   // -------------------------------------------------------------------------
+  // Lockfile patchability — npm registry fix-version lookup
+  // -------------------------------------------------------------------------
+
+  /**
+   * Fetch all published versions of an npm package that were released after
+   * the given `vulnerableVersion`, for use by the lockfile patchability analyzer.
+   *
+   * Steps:
+   *   1. Query the npm registry `/{packageName}` endpoint for the full packument.
+   *   2. Extract all version strings from the `versions` map.
+   *   3. Filter to versions strictly greater than `vulnerableVersion` (heuristic
+   *      semver comparison — only numeric triplets are compared; pre-release
+   *      tags are ignored).
+   *   4. Return the filtered list sorted ascending (lowest fix-candidate first).
+   *
+   * Falls back to an empty array when the registry is unreachable, the package
+   * does not exist, or the response is malformed.  This is intentionally
+   * best-effort — callers must handle an empty result gracefully.
+   *
+   * @param packageName       npm package name (scoped names like @scope/pkg are
+   *                          supported — they are URL-encoded automatically).
+   * @param vulnerableVersion The currently pinned version string (e.g. "1.2.3").
+   *                          Versions <= this value are excluded from the result.
+   * @param ecosystem         Package ecosystem — only "npm" and "pnpm" are
+   *                          supported; PyPI packages return [] immediately.
+   */
+  async getCveFixVersions(
+    packageName: string,
+    vulnerableVersion: string,
+    ecosystem: "npm" | "pnpm" | "pypi"
+  ): Promise<string[]> {
+    // PyPI has no equivalent simple packument endpoint in scope — skip
+    if (ecosystem === "pypi") return [];
+
+    const encodedName = packageName.replace(/^@/, "%40").replace(/\//, "%2F");
+    const url = `https://registry.npmjs.org/${encodedName}`;
+
+    let packument: Record<string, unknown>;
+    try {
+      const res = await fetch(url, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(8_000)
+      });
+      if (!res.ok) {
+        console.warn(`[advisory-service] getCveFixVersions: npm registry returned ${res.status} for ${packageName}`);
+        return [];
+      }
+      packument = (await res.json()) as Record<string, unknown>;
+    } catch (err) {
+      console.warn(`[advisory-service] getCveFixVersions: registry fetch failed for ${packageName}:`, err instanceof Error ? err.message : err);
+      return [];
+    }
+
+    const versionsMap = packument.versions as Record<string, unknown> | undefined;
+    if (!versionsMap || typeof versionsMap !== "object") return [];
+
+    const allVersions = Object.keys(versionsMap);
+
+    // Parse the vulnerable version for comparison
+    const parseSemverLocal = (v: string): [number, number, number] | null => {
+      const clean = v.replace(/^[v=^~>=<\s]+/, "").split(/[-+]/)[0] ?? "";
+      const parts = clean.split(".").map(Number);
+      if (parts.length < 2 || parts.some((p) => !Number.isFinite(p) || p < 0)) return null;
+      return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
+    };
+
+    const vulnParsed = parseSemverLocal(vulnerableVersion);
+    if (!vulnParsed) return allVersions; // Can't compare — return all
+
+    const newer = allVersions.filter((v) => {
+      const parsed = parseSemverLocal(v);
+      if (!parsed) return false;
+      // Lexicographic comparison of [major, minor, patch] triplets
+      for (let i = 0; i < 3; i++) {
+        const diff = (parsed[i] ?? 0) - (vulnParsed[i] ?? 0);
+        if (diff > 0) return true;
+        if (diff < 0) return false;
+      }
+      return false; // equal — exclude
+    });
+
+    // Sort ascending so callers get the minimum fix candidate first
+    newer.sort((a, b) => {
+      const pa = parseSemverLocal(a)!;
+      const pb = parseSemverLocal(b)!;
+      for (let i = 0; i < 3; i++) {
+        const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+        if (diff !== 0) return diff;
+      }
+      return 0;
+    });
+
+    return newer;
+  }
+
+  // -------------------------------------------------------------------------
   // EPSS enrichment — public helpers
   // -------------------------------------------------------------------------
 

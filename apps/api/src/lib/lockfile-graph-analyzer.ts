@@ -6,6 +6,9 @@
  *   - Circular dependency chains via DFS
  *   - Orphaned dependencies (in graph but unreferenced by any other node)
  *   - Audit summary of risk signals
+ *   - Patchability scores per CVE (0–100 scale)
+ *   - Blocker chains showing which intermediate deps prevent a fix
+ *   - Lockfile patch recommendations sorted by impact
  *
  * Designed to be pure (no I/O) and deterministic so results are reproducible
  * across runs with the same input.
@@ -30,6 +33,127 @@ export interface DepNode {
    * When omitted the analyzer treats the package as having risk 0.
    */
   riskScore?: number;
+  /**
+   * Declared version ranges for each dependency (name → semver range string).
+   * Used by the patchability analyzer to determine whether a fix version is
+   * compatible with what this intermediate dep demands.
+   * e.g. { "lodash": "^4.17.0", "express": ">=4.0.0 <5.0.0" }
+   */
+  depRanges?: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
+// Patchability / vulnerability cascade types
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-CVE patchability assessment.
+ *
+ * patchability_score 0–100:
+ *   100 = latest semver satisfies all intermediate dep constraints — easy patch
+ *   75  = fix exists but requires minor version bump in one dep
+ *   50  = fix requires multiple dep bumps or a major version bump
+ *   25  = fix is heavily constrained (many blockers or wide version gap)
+ *   0   = unpatchable (fix for A requires B update, B update breaks A)
+ */
+export interface CvePatchabilityScore {
+  /** CVE identifier, e.g. "CVE-2024-12345". */
+  cveId: string;
+  /** The vulnerable package name. */
+  packageName: string;
+  /** The version currently pinned in the lockfile. */
+  currentVersion: string;
+  /** The earliest version that remediates the CVE (from registry metadata). */
+  fixVersion: string | null;
+  /**
+   * Patchability score 0–100.
+   * 100 = trivially patchable (semver compatible, no blockers)
+   * 0   = unpatchable (circular or mutually-conflicting constraints)
+   */
+  patchabilityScore: number;
+  /** Human-readable explanation of the score. */
+  patchabilityReason: string;
+  /**
+   * Whether a circular dependency prevents applying the fix.
+   * e.g. fix for A requires B@2, but B@2 requires A@<1 which re-introduces the vuln.
+   */
+  isCircularBlock: boolean;
+}
+
+/**
+ * A chain of intermediate dependencies that block applying a fix.
+ * Each entry is a dep name; the last entry is the vulnerable package.
+ *
+ * Example: ["express", "body-parser", "qs"] means:
+ *   express pins body-parser which pins qs@vulnerable
+ *   To fix qs you must update body-parser, which requires updating express first.
+ */
+export interface BlockerChain {
+  /** The CVE this blocker chain applies to. */
+  cveId: string;
+  /** The vulnerable package at the end of the chain. */
+  vulnerablePackage: string;
+  /** Ordered list of intermediate blockers culminating in the vulnerable package. */
+  chain: string[];
+  /** Whether any node in the chain creates a circular dependency preventing the fix. */
+  hasCircularBlock: boolean;
+}
+
+/**
+ * A recommended PR / lockfile update action.
+ *
+ * Sorted by impact: highest-patchability CVEs first (easiest wins),
+ * then by estimated risk reduction (CRITICAL CVEs before HIGH).
+ */
+export interface LockfilePatchRecommendation {
+  /** Package to update. */
+  packageName: string;
+  /** Current pinned version in the lockfile. */
+  currentVersion: string;
+  /** Recommended target version (semver bump). */
+  recommendedVersion: string;
+  /** CVEs that this update remediates. */
+  remediatesCves: string[];
+  /**
+   * Predicted semver bump type based on current→recommended version delta.
+   * "patch" = z bump only, "minor" = y bump, "major" = x bump.
+   */
+  semverBumpType: "patch" | "minor" | "major";
+  /** Estimated patchability score (average across remediatesCves). */
+  estimatedPatchabilityScore: number;
+  /** Whether this update has any known blocker dependencies. */
+  hasBlockers: boolean;
+}
+
+/** Extended result from the patchability analysis pass. */
+export interface PatchabilityAnalysis {
+  /** Per-CVE patchability scores. */
+  patchabilityScores: CvePatchabilityScore[];
+  /** Blocker chains — intermediate deps that prevent applying fixes. */
+  blockerChains: BlockerChain[];
+  /** Sorted PR recommendations (easiest/highest-impact first). */
+  lockfilePatchRecommendations: LockfilePatchRecommendation[];
+}
+
+/**
+ * Input record describing a single CVE affecting a specific package version.
+ * Callers populate this from advisory-service or a pre-fetched registry query.
+ */
+export interface VulnFixInfo {
+  /** CVE identifier. */
+  cveId: string;
+  /** The vulnerable package name. */
+  packageName: string;
+  /** The version currently pinned. */
+  currentVersion: string;
+  /**
+   * All published versions of the package since vulnerability discovery,
+   * as returned by the npm registry (or a heuristic fallback).
+   * May be empty when registry metadata is unavailable.
+   */
+  publishedVersionsSinceVuln: string[];
+  /** The CVE severity level (for sorting recommendations). */
+  severity?: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
 }
 
 /**
@@ -71,6 +195,21 @@ export interface LockfileGraphAnalysis {
    * Human-readable summary of overall risk across the graph.
    */
   auditSummary: string;
+  /**
+   * Per-CVE patchability scores (0–100).
+   * Only populated when `vulnFixInfos` is passed to `analyzeLockfileGraph`.
+   */
+  patchabilityScores?: CvePatchabilityScore[];
+  /**
+   * Blocker chains showing which intermediate deps prevent applying fixes.
+   * Only populated when `vulnFixInfos` is passed to `analyzeLockfileGraph`.
+   */
+  blockerChains?: BlockerChain[];
+  /**
+   * Sorted list of recommended lockfile PRs to cut (easiest/highest-impact first).
+   * Only populated when `vulnFixInfos` is passed to `analyzeLockfileGraph`.
+   */
+  lockfilePatchRecommendations?: LockfilePatchRecommendation[];
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +433,476 @@ function buildAuditSummary(
 }
 
 // ---------------------------------------------------------------------------
+// Semver heuristics (no external dependency)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a version string into [major, minor, patch] integers.
+ * Returns null when the string is not a recognisable semver triplet.
+ */
+function parseSemver(v: string): [number, number, number] | null {
+  const clean = v.replace(/^[v=^~>=<\s]+/, "").split(/[-+]/)[0] ?? "";
+  const parts = clean.split(".").map(Number);
+  if (parts.length < 2 || parts.some((p) => !Number.isFinite(p) || p < 0)) return null;
+  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
+}
+
+/**
+ * Compare two semver tuples.
+ * Returns negative when a < b, 0 when equal, positive when a > b.
+ */
+function compareSemver(a: [number, number, number], b: [number, number, number]): number {
+  for (let i = 0; i < 3; i++) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+/**
+ * Determine the semver bump type from current → target.
+ * Falls back to "major" when either version is unparseable.
+ */
+function semverBumpType(current: string, target: string): "patch" | "minor" | "major" {
+  const c = parseSemver(current);
+  const t = parseSemver(target);
+  if (!c || !t) return "major";
+  if (t[0] !== c[0]) return "major";
+  if (t[1] !== c[1]) return "minor";
+  return "patch";
+}
+
+/**
+ * Select the lowest version from a list that is strictly greater than `current`.
+ * Returns null when no such version exists (i.e. current is already at the latest).
+ */
+function findMinFixVersion(current: string, candidates: string[]): string | null {
+  const cur = parseSemver(current);
+  if (!cur) return candidates[0] ?? null;
+
+  let best: [number, number, number] | null = null;
+  let bestStr: string | null = null;
+
+  for (const cand of candidates) {
+    const parsed = parseSemver(cand);
+    if (!parsed) continue;
+    if (compareSemver(parsed, cur) <= 0) continue; // not newer
+    if (!best || compareSemver(parsed, best) < 0) {
+      best = parsed;
+      bestStr = cand;
+    }
+  }
+  return bestStr;
+}
+
+/**
+ * Check whether a version string satisfies a semver range heuristically.
+ *
+ * Supports the most common range operators used in npm lockfiles:
+ *   ^1.2.3  — compatible (same major, >= minor.patch)
+ *   ~1.2.3  — approximately (same major.minor, >= patch)
+ *   >=1.0.0 — at-least
+ *   >1.0.0  — strictly-greater
+ *   <=2.0.0 — at-most
+ *   <2.0.0  — strictly-less
+ *   =1.2.3 / 1.2.3 — exact
+ *   *       — any version
+ *
+ * When the range is a compound (space-separated or &&-joined), ALL clauses
+ * must be satisfied.  When the range contains "||" we check each alternative
+ * and return true if any satisfies.
+ */
+export function semverSatisfies(version: string, range: string): boolean {
+  if (!range || range === "*" || range === "") return true;
+
+  const v = parseSemver(version);
+  if (!v) return false;
+
+  // OR: any alternative satisfies
+  if (range.includes("||")) {
+    return range.split("||").some((alt) => semverSatisfies(version, alt.trim()));
+  }
+
+  // AND: all clauses must hold (space-separated or &&)
+  const clauses = range.split(/\s*&&\s*|\s+/).filter(Boolean);
+  if (clauses.length > 1) {
+    return clauses.every((clause) => semverSatisfies(version, clause.trim()));
+  }
+
+  const r = range.trim();
+
+  // Caret: ^X.Y.Z — same major, >= minor.patch (or for 0.x, same minor >= patch)
+  const caretMatch = r.match(/^\^([^\s]+)$/);
+  if (caretMatch) {
+    const base = parseSemver(caretMatch[1] ?? "");
+    if (!base) return true;
+    if (v[0] !== base[0]) return false;
+    if (base[0] === 0) {
+      if (v[1] !== base[1]) return false;
+      return v[2] >= base[2];
+    }
+    return compareSemver(v, base) >= 0;
+  }
+
+  // Tilde: ~X.Y.Z — same major.minor, >= patch
+  const tildeMatch = r.match(/^~([^\s]+)$/);
+  if (tildeMatch) {
+    const base = parseSemver(tildeMatch[1] ?? "");
+    if (!base) return true;
+    if (v[0] !== base[0] || v[1] !== base[1]) return false;
+    return v[2] >= base[2];
+  }
+
+  // >=, >, <=, <, =
+  const opMatch = r.match(/^(>=|>|<=|<|=)([^\s]+)$/);
+  if (opMatch) {
+    const op = opMatch[1]!;
+    const base = parseSemver(opMatch[2] ?? "");
+    if (!base) return true;
+    const cmp = compareSemver(v, base);
+    switch (op) {
+      case ">=": return cmp >= 0;
+      case ">":  return cmp > 0;
+      case "<=": return cmp <= 0;
+      case "<":  return cmp < 0;
+      case "=":  return cmp === 0;
+    }
+  }
+
+  // Exact match (no operator)
+  const exact = parseSemver(r);
+  if (exact) return compareSemver(v, exact) === 0;
+
+  // Unknown range — be permissive
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Patchability cascade detector
+// ---------------------------------------------------------------------------
+
+/**
+ * For each vulnerable package, find all intermediate dependencies in the graph
+ * that have a direct or transitive edge to that package.
+ *
+ * Returns a map of: vulnerablePackageName → list of intermediate dep names
+ * (in reverse order: closest blocker first).
+ */
+function findIntermediateBlockers(
+  nodes: DepNode[],
+  vulnerablePackageNames: Set<string>
+): Map<string, string[]> {
+  // Build reverse adjacency: dep → set of packages that depend on it
+  const reverseAdj = new Map<string, Set<string>>();
+  for (const node of nodes) {
+    for (const dep of node.deps) {
+      if (!reverseAdj.has(dep)) reverseAdj.set(dep, new Set());
+      reverseAdj.get(dep)!.add(node.name);
+    }
+  }
+
+  const result = new Map<string, string[]>();
+
+  for (const vulnPkg of vulnerablePackageNames) {
+    // BFS from the vulnerable package upward through reverse edges
+    const visited = new Set<string>();
+    const queue: string[] = [vulnPkg];
+    const blockers: string[] = [];
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (visited.has(current)) continue;
+      visited.add(current);
+
+      const parents = reverseAdj.get(current) ?? new Set();
+      for (const parent of parents) {
+        if (!visited.has(parent)) {
+          blockers.push(parent);
+          queue.push(parent);
+        }
+      }
+    }
+
+    result.set(vulnPkg, blockers);
+  }
+
+  return result;
+}
+
+/**
+ * Check whether a proposed fix version for `vulnerablePackage` is compatible
+ * with all intermediate blocker deps' declared version ranges for that package.
+ *
+ * Returns an array of blocker names that would need to be updated to accept
+ * the fix version. An empty array means the fix is range-compatible.
+ */
+function findRangeBlockers(
+  nodes: DepNode[],
+  vulnerablePackage: string,
+  fixVersion: string,
+  intermediateBlockers: string[]
+): string[] {
+  const nodeMap = new Map(nodes.map((n) => [n.name, n]));
+  const rangeBlockers: string[] = [];
+
+  for (const blockerName of intermediateBlockers) {
+    const blockerNode = nodeMap.get(blockerName);
+    if (!blockerNode) continue;
+
+    const declaredRange = blockerNode.depRanges?.[vulnerablePackage];
+    if (!declaredRange) continue; // No range info — assume compatible
+
+    if (!semverSatisfies(fixVersion, declaredRange)) {
+      rangeBlockers.push(blockerName);
+    }
+  }
+
+  return rangeBlockers;
+}
+
+/**
+ * Detect whether fixing a vulnerability creates a circular patchability problem.
+ *
+ * A circular block exists when:
+ *   - Fixing vulnPackage requires upgrading blockerDep
+ *   - blockerDep's upgrade requires a downgrade of vulnPackage
+ *     (i.e. blockerDep@new declares a range for vulnPackage that excludes the fix)
+ *
+ * This is a simplified heuristic — a full solver would require SAT/constraint
+ * solving, which is outside scope.
+ */
+function detectCircularPatchBlock(
+  nodes: DepNode[],
+  vulnPackage: string,
+  fixVersion: string,
+  rangeBlockers: string[]
+): boolean {
+  if (rangeBlockers.length === 0) return false;
+
+  const nodeMap = new Map(nodes.map((n) => [n.name, n]));
+
+  // Check if any blocker's dep list (depRanges) would restrict vulnPackage
+  // back to a range that excludes the fix version.
+  for (const blocker of rangeBlockers) {
+    const blockerNode = nodeMap.get(blocker);
+    if (!blockerNode) continue;
+
+    // The blocker restricts the vulnerable package's version range.
+    // If that range still excludes fixVersion after "upgrading" the blocker,
+    // we have a circular block (heuristic: if the blocker pins to an exact
+    // version or a tight range that excludes fix, it's circular).
+    const blockerRangeForVuln = blockerNode.depRanges?.[vulnPackage];
+    if (blockerRangeForVuln && !semverSatisfies(fixVersion, blockerRangeForVuln)) {
+      // Also check whether the graph has a cycle involving both nodes
+      // (already detected by detectCircularDependencies)
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Compute a patchability score [0–100] for a single CVE.
+ *
+ * Scoring heuristic:
+ *   No fix version available:            0  (unpatchable)
+ *   Fix exists, circular block:          0  (unpatchable)
+ *   Fix exists, range blockers > 3:      15 (very hard)
+ *   Fix exists, range blockers 2–3:      30 (hard)
+ *   Fix exists, range blockers 1:        50 (moderate)
+ *   Fix exists, 0 blockers, major bump:  65 (minor friction)
+ *   Fix exists, 0 blockers, minor bump:  85 (easy)
+ *   Fix exists, 0 blockers, patch bump: 100 (trivial)
+ */
+function computePatchabilityScore(
+  fixVersion: string | null,
+  currentVersion: string,
+  rangeBlockers: string[],
+  isCircularBlock: boolean
+): { score: number; reason: string } {
+  if (!fixVersion) {
+    return { score: 0, reason: "No fix version is available — vulnerability is currently unpatchable." };
+  }
+  if (isCircularBlock) {
+    return { score: 0, reason: "Circular dependency prevents applying the fix — upgrading the vulnerable package would break its blockers, which in turn require the vulnerable version." };
+  }
+
+  const bump = semverBumpType(currentVersion, fixVersion);
+  const blockerCount = rangeBlockers.length;
+
+  if (blockerCount > 3) {
+    return {
+      score: 15,
+      reason: `Fix requires ${blockerCount} intermediate deps to relax their version constraints (${rangeBlockers.slice(0, 3).join(", ")}, …). Very hard to patch.`
+    };
+  }
+  if (blockerCount === 3) {
+    return {
+      score: 30,
+      reason: `Fix requires 3 intermediate deps to update (${rangeBlockers.join(", ")}). Significant coordination needed.`
+    };
+  }
+  if (blockerCount === 2) {
+    return {
+      score: 30,
+      reason: `Fix requires 2 intermediate deps to update (${rangeBlockers.join(", ")}). Multiple PRs likely needed.`
+    };
+  }
+  if (blockerCount === 1) {
+    return {
+      score: 50,
+      reason: `Fix version ${fixVersion} is not compatible with ${rangeBlockers[0]}'s declared range — that dep must be updated first.`
+    };
+  }
+
+  // No range blockers
+  if (bump === "major") {
+    return {
+      score: 65,
+      reason: `Fix requires a major version bump (${currentVersion} → ${fixVersion}). No intermediate dep blockers, but the breaking-change risk is non-trivial.`
+    };
+  }
+  if (bump === "minor") {
+    return {
+      score: 85,
+      reason: `Fix is a minor version bump (${currentVersion} → ${fixVersion}) with no intermediate dep blockers. Low-friction patch.`
+    };
+  }
+  return {
+    score: 100,
+    reason: `Fix is a patch-level bump (${currentVersion} → ${fixVersion}) with no intermediate dep blockers. Apply immediately.`
+  };
+}
+
+/**
+ * Run the full vulnerability cascade patchability analysis.
+ *
+ * For each entry in `vulnFixInfos`:
+ *   1. Find the minimum fix version from the published candidates.
+ *   2. Detect intermediate blocker deps (those that declare a version range
+ *      for the vulnerable package that excludes the fix version).
+ *   3. Detect circular patchability blocks.
+ *   4. Compute a patchability score.
+ *   5. Build a blocker chain entry.
+ *
+ * Then aggregate all results into sorted `LockfilePatchRecommendation` entries.
+ *
+ * This function is pure — it performs no I/O. Callers are responsible for
+ * populating `VulnFixInfo.publishedVersionsSinceVuln` from the npm registry
+ * (via `advisory-service.getCveFixVersions()`).
+ *
+ * @param nodes         All packages from the lockfile graph.
+ * @param vulnFixInfos  Per-CVE fix information from advisory-service.
+ * @param circularDeps  Pre-computed circular dep chains from `detectCircularDependencies`.
+ */
+export function analyzePatchability(
+  nodes: DepNode[],
+  vulnFixInfos: VulnFixInfo[],
+  circularDeps: CircularDep[]
+): PatchabilityAnalysis {
+  if (vulnFixInfos.length === 0) {
+    return { patchabilityScores: [], blockerChains: [], lockfilePatchRecommendations: [] };
+  }
+
+  // Set of package names involved in circular dependency chains (for fast lookup)
+  const circularPackages = new Set(circularDeps.flatMap((c) => c.chain));
+
+  // Build a set of all vulnerable package names for blocker traversal
+  const vulnerablePackageNames = new Set(vulnFixInfos.map((v) => v.packageName));
+
+  // Find all intermediate blockers for each vulnerable package
+  const intermediateBlockersMap = findIntermediateBlockers(nodes, vulnerablePackageNames);
+
+  const patchabilityScores: CvePatchabilityScore[] = [];
+  const blockerChains: BlockerChain[] = [];
+
+  for (const vulnInfo of vulnFixInfos) {
+    const fixVersion = findMinFixVersion(vulnInfo.currentVersion, vulnInfo.publishedVersionsSinceVuln);
+    const intermediateBlockers = intermediateBlockersMap.get(vulnInfo.packageName) ?? [];
+
+    const rangeBlockers = fixVersion
+      ? findRangeBlockers(nodes, vulnInfo.packageName, fixVersion, intermediateBlockers)
+      : [];
+
+    const isCircularBlock =
+      circularPackages.has(vulnInfo.packageName) &&
+      (fixVersion ? detectCircularPatchBlock(nodes, vulnInfo.packageName, fixVersion, rangeBlockers) : false);
+
+    const { score, reason } = computePatchabilityScore(
+      fixVersion,
+      vulnInfo.currentVersion,
+      rangeBlockers,
+      isCircularBlock
+    );
+
+    patchabilityScores.push({
+      cveId: vulnInfo.cveId,
+      packageName: vulnInfo.packageName,
+      currentVersion: vulnInfo.currentVersion,
+      fixVersion,
+      patchabilityScore: score,
+      patchabilityReason: reason,
+      isCircularBlock
+    });
+
+    // Build blocker chain entry when any blockers exist
+    if (rangeBlockers.length > 0 || isCircularBlock) {
+      blockerChains.push({
+        cveId: vulnInfo.cveId,
+        vulnerablePackage: vulnInfo.packageName,
+        chain: [...rangeBlockers, vulnInfo.packageName],
+        hasCircularBlock: isCircularBlock
+      });
+    }
+  }
+
+  // Build patch recommendations: group by (packageName, recommendedVersion)
+  const recMap = new Map<string, LockfilePatchRecommendation>();
+
+  for (const ps of patchabilityScores) {
+    if (!ps.fixVersion) continue;
+    const key = `${ps.packageName}@${ps.fixVersion}`;
+    const existing = recMap.get(key);
+    if (existing) {
+      existing.remediatesCves.push(ps.cveId);
+      existing.estimatedPatchabilityScore = Math.round(
+        (existing.estimatedPatchabilityScore + ps.patchabilityScore) / 2
+      );
+      if (ps.isCircularBlock || blockerChains.some((b) => b.vulnerablePackage === ps.packageName)) {
+        existing.hasBlockers = true;
+      }
+    } else {
+      recMap.set(key, {
+        packageName: ps.packageName,
+        currentVersion: ps.currentVersion,
+        recommendedVersion: ps.fixVersion,
+        remediatesCves: [ps.cveId],
+        semverBumpType: semverBumpType(ps.currentVersion, ps.fixVersion),
+        estimatedPatchabilityScore: ps.patchabilityScore,
+        hasBlockers: ps.isCircularBlock || blockerChains.some((b) => b.vulnerablePackage === ps.packageName && b.chain.length > 1)
+      });
+    }
+  }
+
+  // Sort recommendations: highest patchabilityScore first (easiest wins),
+  // then by severity (CRITICAL first), then alphabetically.
+  const severityOrder: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+  const vulnSeverityMap = new Map(vulnFixInfos.map((v) => [v.packageName, v.severity ?? "LOW"]));
+
+  const lockfilePatchRecommendations = Array.from(recMap.values()).sort((a, b) => {
+    const scoreDiff = b.estimatedPatchabilityScore - a.estimatedPatchabilityScore;
+    if (scoreDiff !== 0) return scoreDiff;
+    const sevA = severityOrder[vulnSeverityMap.get(a.packageName) ?? "LOW"] ?? 3;
+    const sevB = severityOrder[vulnSeverityMap.get(b.packageName) ?? "LOW"] ?? 3;
+    if (sevA !== sevB) return sevA - sevB;
+    return a.packageName.localeCompare(b.packageName);
+  });
+
+  return { patchabilityScores, blockerChains, lockfilePatchRecommendations };
+}
+
+// ---------------------------------------------------------------------------
 // Main analyzer
 // ---------------------------------------------------------------------------
 
@@ -305,11 +914,15 @@ function buildAuditSummary(
  * @param directDepNames - Names of the root package's declared direct dependencies.
  *   Used to exclude those from the orphan calculation.  Pass an empty array when
  *   all packages are considered peers (e.g. monorepo workspace roots).
+ * @param vulnFixInfos - Optional per-CVE fix information used to compute
+ *   patchability scores, blocker chains, and patch recommendations.  When
+ *   omitted, the patchability fields of the result are undefined.
  * @returns Deterministic {@link LockfileGraphAnalysis} result.
  */
 export function analyzeLockfileGraph(
   nodes: DepNode[],
-  directDepNames: string[] = []
+  directDepNames: string[] = [],
+  vulnFixInfos: VulnFixInfo[] = []
 ): LockfileGraphAnalysis {
   if (nodes.length === 0) {
     return {
@@ -334,13 +947,25 @@ export function analyzeLockfileGraph(
     orphanedDeps
   );
 
-  return {
+  const base: LockfileGraphAnalysis = {
     totalPackages,
     maxTransitiveRisk,
     circularDeps,
     orphanedDeps,
     auditSummary,
   };
+
+  if (vulnFixInfos.length > 0) {
+    const patchability = analyzePatchability(nodes, vulnFixInfos, circularDeps);
+    return {
+      ...base,
+      patchabilityScores: patchability.patchabilityScores,
+      blockerChains: patchability.blockerChains,
+      lockfilePatchRecommendations: patchability.lockfilePatchRecommendations,
+    };
+  }
+
+  return base;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,15 +998,22 @@ export function buildNpmLockfileGraph(
         .replace(/\/node_modules\//g, "/");
       const version = (pkgData.version as string | undefined) ?? "unknown";
 
-      // Collect direct dep names from the "dependencies" map (keys only — no versions needed)
+      // Collect direct dep names and their declared version ranges
       const rawDeps = pkgData.dependencies as Record<string, unknown> | undefined;
       const deps = rawDeps && typeof rawDeps === "object" ? Object.keys(rawDeps) : [];
+      const depRanges: Record<string, string> = {};
+      if (rawDeps && typeof rawDeps === "object") {
+        for (const [depName, depRange] of Object.entries(rawDeps)) {
+          if (typeof depRange === "string") depRanges[depName] = depRange;
+        }
+      }
 
       nodes.push({
         name,
         version,
         ecosystem: "npm",
         deps,
+        depRanges,
         riskScore: riskScores.get(name),
       });
     }

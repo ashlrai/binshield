@@ -26,7 +26,7 @@ import {
   buildPnpmLockfileGraph,
   buildRequirementsTxtGraph,
 } from "./lib/lockfile-graph-analyzer";
-import type { LockfileGraphAnalysis } from "./lib/lockfile-graph-analyzer";
+import type { LockfileGraphAnalysis, VulnFixInfo } from "./lib/lockfile-graph-analyzer";
 
 type AppVariables = {
   auth: AuthPrincipal | null;
@@ -2350,6 +2350,7 @@ export function createApp(services = createServices(readApiEnv())) {
       content,
       riskScores: rawRiskScores,
       directDeps: rawDirectDeps,
+      vulnFixInfos: rawVulnFixInfos,
     } = body as Record<string, unknown>;
 
     if (!filename || typeof filename !== "string" || filename.trim() === "") {
@@ -2380,6 +2381,36 @@ export function createApp(services = createServices(readApiEnv())) {
       }
     }
 
+    // Build optional vuln fix infos (used for patchability cascade analysis)
+    const vulnFixInfos: VulnFixInfo[] = [];
+    if (Array.isArray(rawVulnFixInfos)) {
+      for (const item of rawVulnFixInfos) {
+        if (
+          item &&
+          typeof item === "object" &&
+          typeof (item as Record<string, unknown>).cveId === "string" &&
+          typeof (item as Record<string, unknown>).packageName === "string" &&
+          typeof (item as Record<string, unknown>).currentVersion === "string"
+        ) {
+          const entry = item as Record<string, unknown>;
+          const publishedVersionsSinceVuln: string[] = Array.isArray(entry.publishedVersionsSinceVuln)
+            ? (entry.publishedVersionsSinceVuln as unknown[]).filter((v): v is string => typeof v === "string")
+            : [];
+          const severity = entry.severity;
+          vulnFixInfos.push({
+            cveId: entry.cveId as string,
+            packageName: entry.packageName as string,
+            currentVersion: entry.currentVersion as string,
+            publishedVersionsSinceVuln,
+            severity:
+              severity === "CRITICAL" || severity === "HIGH" || severity === "MEDIUM" || severity === "LOW"
+                ? severity
+                : undefined,
+          });
+        }
+      }
+    }
+
     // Detect format and build the graph
     const base = filename.split("/").pop()?.toLowerCase() ?? filename.toLowerCase();
 
@@ -2393,13 +2424,13 @@ export function createApp(services = createServices(readApiEnv())) {
           return c.json({ error: "package-lock.json content is not valid JSON" }, 400);
         }
         const nodes = buildNpmLockfileGraph(lockJson, riskScoreMap);
-        analysis = analyzeLockfileGraph(nodes, directDepNames);
+        analysis = analyzeLockfileGraph(nodes, directDepNames, vulnFixInfos);
       } else if (base === "pnpm-lock.yaml" || base === "pnpm-lock.yml") {
         const nodes = buildPnpmLockfileGraph(content, riskScoreMap);
-        analysis = analyzeLockfileGraph(nodes, directDepNames);
+        analysis = analyzeLockfileGraph(nodes, directDepNames, vulnFixInfos);
       } else if (base === "requirements.txt") {
         const nodes = buildRequirementsTxtGraph(content, riskScoreMap);
-        analysis = analyzeLockfileGraph(nodes, directDepNames);
+        analysis = analyzeLockfileGraph(nodes, directDepNames, vulnFixInfos);
       } else {
         // Try content-based auto-detection
         const detected = detectLockfileFormat(filename, content);
@@ -2411,10 +2442,10 @@ export function createApp(services = createServices(readApiEnv())) {
             return c.json({ error: "Detected npm lockfile but content is not valid JSON" }, 400);
           }
           const nodes = buildNpmLockfileGraph(lockJson, riskScoreMap);
-          analysis = analyzeLockfileGraph(nodes, directDepNames);
+          analysis = analyzeLockfileGraph(nodes, directDepNames, vulnFixInfos);
         } else if (detected === "pnpm") {
           const nodes = buildPnpmLockfileGraph(content, riskScoreMap);
-          analysis = analyzeLockfileGraph(nodes, directDepNames);
+          analysis = analyzeLockfileGraph(nodes, directDepNames, vulnFixInfos);
         } else {
           return c.json(
             {
