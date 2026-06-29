@@ -4,7 +4,7 @@ import path from "node:path";
 
 import type { ManifestAnalysis, PackageAnalysis } from "@binshield/analysis-types";
 import { AnalyticsCollector } from "@binshield/analytics-collector";
-import { AnalyzerRegistry, getSharedMatchingEngine } from "@binshield/malware-engines";
+import { AnalyzerRegistry, getSharedMatchingEngine, PyPiBinaryRepackagingAnalyzer, BinaryProvenanceRegistry } from "@binshield/malware-engines";
 import type { OsvMatchResult } from "@binshield/malware-engines";
 import { aggregatePackageRiskWithManifest, summarizePackage, scoreBinary } from "@binshield/risk-engine";
 import { SupplyChainHealthAnalyzer, toHealthFinding } from "@binshield/supply-chain-health";
@@ -217,6 +217,11 @@ const workerAnalytics = new AnalyticsCollector({
 const sharedNvdIngester = new NvdFeedIngester();
 const sharedKevSyncer = new CisaKevSyncer();
 
+// Module-level binary provenance registry — shared across all WorkerRuntime
+// instances so that cross-package repackaging detection accumulates knowledge
+// across scans within the same process lifetime.
+const sharedProvenanceRegistry = new BinaryProvenanceRegistry();
+
 export class WorkerRuntime {
   constructor(private readonly services: AnalysisServiceBundle = createDefaultBundle()) {}
 
@@ -332,8 +337,24 @@ export class WorkerRuntime {
     // artifacts share the same instance.
     const malwareRegistry = AnalyzerRegistry.createDefault();
 
+    // Register the PyPI binary repackaging analyzer — uses the process-level
+    // shared provenance registry so knowledge accumulates across scans.
+    const repackagingAnalyzer = new PyPiBinaryRepackagingAnalyzer({
+      registry: sharedProvenanceRegistry,
+    });
+    malwareRegistry.register(repackagingAnalyzer);
+
     for (const fingerprint of artifacts) {
       const binaryBuffer = Buffer.from(fingerprint.bytes);
+
+      // Set per-binary context on the repackaging analyzer before each run
+      // so it can record (packageName, version, binaryPath) in the registry.
+      repackagingAnalyzer.setContext({
+        packageName: request.packageName,
+        version: request.version,
+        binaryPath: fingerprint.relativePath,
+        ecosystem: request.ecosystem === "pypi" ? "pypi" : "npm",
+      });
 
       // Stage 1: decompile the binary (classifier depends on its output).
       const decompiled = await this.services.decompiler.decompile({
