@@ -12,6 +12,314 @@ import type {
 } from "@binshield/analysis-types";
 
 // ---------------------------------------------------------------------------
+// Active Vulnerability — real-time CVE/EPSS/KEV input shape
+// ---------------------------------------------------------------------------
+
+/**
+ * A single active vulnerability entry derived from NVD + EPSS + CISA KEV
+ * feeds.  Callers populate this from `nvd-feed-ingester` / `epss-feed-ingester`
+ * output and pass an array to `scoreWithActiveVulnerabilities`.
+ *
+ * Staleness guard: entries whose `feedUpdatedAt` is older than 30 days are
+ * silently ignored by the engine.
+ */
+export interface ActiveVulnerability {
+  /** CVE identifier, e.g. "CVE-2024-12345". */
+  cveId: string;
+  /**
+   * EPSS percentile [0, 1].  When ≥ 0.40 a per-finding boost applies.
+   * See `epssPercentileBoost()`.
+   */
+  epssPercentile: number;
+  /** True when this CVE appears in the CISA Known Exploited Vulnerabilities catalogue. */
+  isKev: boolean;
+  /** Exploit maturity — only meaningful when `isKev` is true. */
+  exploitMaturity?: "proof-of-concept" | "active-exploitation" | "widespread";
+  /** Earliest version that fully remediates this vulnerability (semver string). */
+  patchedVersion?: string;
+  /**
+   * True when a patch exists but the consumer's lockfile has NOT been updated.
+   * False / undefined when the fix is already applied or no patch exists.
+   */
+  patchAvailableButUnmerged?: boolean;
+  /**
+   * ISO timestamp of the last feed update.  Entries older than 30 days are
+   * treated as stale and excluded from scoring.
+   */
+  feedUpdatedAt: string;
+}
+
+/**
+ * Enriched threat context appended to analysis responses.
+ * Contains enough detail for a security dashboard to surface actionable items.
+ */
+export interface ActiveThreatContext {
+  /** CVE IDs confirmed as exploited (KEV active-exploitation or widespread). */
+  exploitedCVEs: string[];
+  /** Number of vulnerabilities where no fix has been applied yet. */
+  unfixed_count: number;
+  /** Highest EPSS percentile across all active vulnerabilities [0, 1]. */
+  highest_epss_pct: number;
+  /**
+   * Net risk adjustment vs. the base score (positive = higher risk,
+   * negative = lower risk after patch credits).  Aggregated across all
+   * transitive deps.
+   */
+  risk_adjusted_from_base: number;
+}
+
+// ---------------------------------------------------------------------------
+// Staleness guard
+// ---------------------------------------------------------------------------
+
+/** Maximum feed age (ms) before an ActiveVulnerability entry is ignored. */
+const MAX_FEED_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/**
+ * Returns true when the vulnerability's feed data is still fresh enough
+ * to affect scoring (within the last 30 days).
+ */
+export function isFeedFresh(vuln: ActiveVulnerability, now = Date.now()): boolean {
+  const feedMs = new Date(vuln.feedUpdatedAt).getTime();
+  if (isNaN(feedMs)) return false;
+  return now - feedMs <= MAX_FEED_AGE_MS;
+}
+
+// ---------------------------------------------------------------------------
+// Per-vulnerability boost helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * EPSS percentile boost for a single vulnerability.
+ *
+ * 40th–74th percentile → +5 pts
+ * 75th–90th percentile → +15 pts  (unchanged from legacy EpssContext path)
+ * > 90th percentile    → +25 pts  (unchanged from legacy EpssContext path)
+ *
+ * The 40–74 band is new: previously these were zero.  Moving beyond the
+ * binary 0.75 threshold lets the engine reflect moderate but real exploitation
+ * activity without the sudden cliff.
+ */
+export function epssPercentileBoost(percentile: number): number {
+  if (percentile > 0.90) return 25;
+  if (percentile > 0.75) return 15;
+  if (percentile >= 0.40) return 5;
+  return 0;
+}
+
+/**
+ * CISA KEV boost for a single vulnerability (+20 for confirmed exploitation).
+ * Returns 0 for proof-of-concept or when the CVE is not in KEV.
+ */
+export function kevBoostForVuln(vuln: ActiveVulnerability): number {
+  if (!vuln.isKev) return 0;
+  if (
+    vuln.exploitMaturity === "active-exploitation" ||
+    vuln.exploitMaturity === "widespread"
+  ) {
+    return 20;
+  }
+  return 0;
+}
+
+/**
+ * Fix-availability modifier for a single vulnerability.
+ *
+ * No patchedVersion (no fix exists) → +10 pts
+ * Patch exists but unmerged          → +5 pts
+ * Patch applied (or unknown)         → 0 pts
+ */
+export function fixAvailabilityBoost(vuln: ActiveVulnerability): number {
+  if (!vuln.patchedVersion) return 10;          // no fix exists
+  if (vuln.patchAvailableButUnmerged) return 5; // fix exists, not applied
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Critical override helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if the vulnerability should force the risk level to "critical"
+ * regardless of the numeric score.
+ *
+ * Condition: the CVE is in CISA KEV with active-exploitation or widespread maturity.
+ */
+export function shouldForceCritical(vuln: ActiveVulnerability): boolean {
+  return (
+    vuln.isKev &&
+    (vuln.exploitMaturity === "active-exploitation" ||
+      vuln.exploitMaturity === "widespread")
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate scoring across active vulnerabilities
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the total risk point adjustment contributed by a set of active
+ * vulnerabilities.  Stale entries (> 30 days) are silently dropped.
+ *
+ * Returns { adjustment, forceCritical } where:
+ *   adjustment    – net pts to add to the base score (always >= 0)
+ *   forceCritical – true when at least one KEV active-exploitation/widespread
+ *                   CVE is present
+ */
+export function activeVulnAdjustment(
+  vulns: ActiveVulnerability[],
+  now = Date.now()
+): { adjustment: number; forceCritical: boolean } {
+  const fresh = vulns.filter((v) => isFeedFresh(v, now));
+  if (fresh.length === 0) return { adjustment: 0, forceCritical: false };
+
+  let adjustment = 0;
+  let forceCritical = false;
+
+  for (const v of fresh) {
+    adjustment += epssPercentileBoost(v.epssPercentile);
+    adjustment += kevBoostForVuln(v);
+    adjustment += fixAvailabilityBoost(v);
+    if (shouldForceCritical(v)) forceCritical = true;
+  }
+
+  return { adjustment, forceCritical };
+}
+
+/**
+ * Build an `ActiveThreatContext` summary from a set of active vulnerabilities.
+ * `baseAdjustment` is the raw point delta computed by `activeVulnAdjustment`.
+ */
+export function buildActiveThreatContext(
+  vulns: ActiveVulnerability[],
+  baseAdjustment: number,
+  now = Date.now()
+): ActiveThreatContext {
+  const fresh = vulns.filter((v) => isFeedFresh(v, now));
+
+  const exploitedCVEs = fresh
+    .filter((v) => shouldForceCritical(v))
+    .map((v) => v.cveId);
+
+  const unfixed_count = fresh.filter(
+    (v) => !v.patchedVersion || v.patchAvailableButUnmerged
+  ).length;
+
+  const highest_epss_pct =
+    fresh.length > 0
+      ? Math.max(...fresh.map((v) => v.epssPercentile))
+      : 0;
+
+  return {
+    exploitedCVEs,
+    unfixed_count,
+    highest_epss_pct,
+    risk_adjusted_from_base: baseAdjustment
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DFS transitive dependency scan
+// ---------------------------------------------------------------------------
+
+/**
+ * A minimal node in a dependency graph used by `transitiveVulnScan`.
+ * Both direct and transitive dependencies must be present in `deps` for the
+ * scan to traverse them.
+ */
+export interface DepNode {
+  /** Package name, e.g. "lodash". */
+  name: string;
+  /** Vulnerabilities that apply directly to this node. */
+  vulns: ActiveVulnerability[];
+  /** Names of direct dependencies (must also be keys in the graph map). */
+  directDeps?: string[];
+}
+
+/**
+ * Perform a depth-first scan over a dependency graph, collecting every
+ * unique `ActiveVulnerability` reachable from `rootName`.
+ *
+ * Each unique CVE ID is included at most once even if it appears in multiple
+ * transitive dependencies (de-duplicated by `cveId`).
+ *
+ * @param rootName  The package to start DFS from.
+ * @param graph     Map of package name → DepNode.
+ * @returns         Array of unique active vulnerabilities (fresh-filtered).
+ */
+export function transitiveVulnScan(
+  rootName: string,
+  graph: Map<string, DepNode>,
+  now = Date.now()
+): ActiveVulnerability[] {
+  const visited = new Set<string>();
+  const seen = new Set<string>(); // CVE de-dup
+  const result: ActiveVulnerability[] = [];
+
+  function dfs(name: string): void {
+    if (visited.has(name)) return;
+    visited.add(name);
+
+    const node = graph.get(name);
+    if (!node) return;
+
+    for (const v of node.vulns) {
+      if (!isFeedFresh(v, now)) continue;
+      if (seen.has(v.cveId)) continue;
+      seen.add(v.cveId);
+      result.push(v);
+    }
+
+    for (const dep of node.directDeps ?? []) {
+      dfs(dep);
+    }
+  }
+
+  dfs(rootName);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// High-level scorer with active vulnerabilities
+// ---------------------------------------------------------------------------
+
+/**
+ * Score a package using both its static analysis (binary + manifest) and a
+ * set of active vulnerabilities from real-time CVE/EPSS/KEV feeds.
+ *
+ * Steps:
+ *   1. Compute static base score via `aggregatePackageRiskWithManifest`.
+ *   2. Apply per-vulnerability adjustments (EPSS boost, KEV boost, fix penalty).
+ *   3. Clamp to [0, 100].
+ *   4. Override risk level to "critical" when a KEV active-exploitation CVE
+ *      is present (even if the numeric score is below 80).
+ *   5. Return enriched `activeThreatContext`.
+ */
+export function scoreWithActiveVulnerabilities(
+  binaries: BinaryAnalysis[],
+  manifest: ManifestAnalysis | undefined,
+  activeVulnerabilities: ActiveVulnerability[],
+  now = Date.now()
+): {
+  riskScore: number;
+  riskLevel: RiskLevel;
+  activeThreatContext: ActiveThreatContext;
+} {
+  const base = aggregatePackageRiskWithManifest(binaries, manifest);
+  const { adjustment, forceCritical } = activeVulnAdjustment(activeVulnerabilities, now);
+  const riskScore = normalizeRisk(base.riskScore + adjustment);
+
+  let riskLevel: RiskLevel = riskLevelFromScore(riskScore);
+  if (forceCritical && riskLevel !== "critical") {
+    riskLevel = "critical";
+  }
+
+  const activeThreatContext = buildActiveThreatContext(activeVulnerabilities, adjustment, now);
+
+  return { riskScore, riskLevel, activeThreatContext };
+}
+
+// ---------------------------------------------------------------------------
 // Vendor Patch Context — intelligent risk downgrade for patched CVEs
 // ---------------------------------------------------------------------------
 

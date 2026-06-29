@@ -3,6 +3,11 @@ import crypto from "node:crypto";
 import { getSampleAnalysis, sampleAnalyses, sampleDiff } from "@binshield/analysis-types";
 
 import { hashApiKey } from "./auth";
+import {
+  buildActiveThreatContext,
+  scoreWithActiveVulnerabilities
+} from "@binshield/risk-engine";
+import type { ActiveThreatContext, ActiveVulnerability } from "@binshield/risk-engine";
 import type {
   Advisory,
   AlertSummary,
@@ -424,6 +429,25 @@ interface BaseRepository {
     }
   ): Promise<SuppressionSummary>;
   deleteSuppression(orgId: string, suppressionId: string): Promise<boolean>;
+
+  /**
+   * Return the base package analysis enriched with a live `activeThreatContext`
+   * built from the latest CVE/EPSS/KEV feed entries for the given package.
+   *
+   * The returned object extends `PackageAnalysis` with an additional
+   * `activeThreatContext` field.  When no active vulnerabilities are found the
+   * context contains zero values (no stale-feed penalty, no exploited CVEs).
+   *
+   * @param packageId  Internal package row ID.
+   * @param versionId  Analysis row ID for the specific version.
+   * @param activeVulnerabilities  Optional pre-fetched feed entries; when
+   *   omitted the implementation may fetch from its own store.
+   */
+  getRiskWithActiveVulns(
+    packageId: string,
+    versionId: string,
+    activeVulnerabilities?: ActiveVulnerability[]
+  ): Promise<(PackageAnalysis & { activeThreatContext: ActiveThreatContext }) | null>;
 
   // Binary fingerprint similarity clustering
   /**
@@ -1384,6 +1408,40 @@ class LocalRepository implements BaseRepository {
     if (!row || row.org_id !== orgId) return false;
     this.suppressions.delete(suppressionId);
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // getRiskWithActiveVulns — in-memory implementation
+  // ---------------------------------------------------------------------------
+
+  async getRiskWithActiveVulns(
+    packageId: string,
+    versionId: string,
+    activeVulnerabilities: ActiveVulnerability[] = []
+  ): Promise<(PackageAnalysis & { activeThreatContext: ActiveThreatContext }) | null> {
+    // Resolve package row by ID
+    const packageRow = Array.from(this.packages.values()).find((p) => p.id === packageId);
+    if (!packageRow) return null;
+
+    // Resolve analysis row by ID (versionId is the analysis row id)
+    const analysisRow = Array.from(this.analyses.values()).find(
+      (a) => a.id === versionId && a.package_id === packageId
+    );
+    if (!analysisRow) return null;
+
+    const analysis = this.toPackageAnalysis(packageRow, analysisRow);
+    const { riskScore, riskLevel, activeThreatContext } = scoreWithActiveVulnerabilities(
+      analysis.binaries as import("@binshield/analysis-types").BinaryAnalysis[],
+      analysis.manifestAnalysis,
+      activeVulnerabilities
+    );
+
+    return {
+      ...analysis,
+      riskScore,
+      riskLevel,
+      activeThreatContext
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -2361,6 +2419,43 @@ class SupabaseRepository implements BaseRepository {
     } catch {
       return false;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // getRiskWithActiveVulns — Supabase implementation
+  // ---------------------------------------------------------------------------
+
+  async getRiskWithActiveVulns(
+    packageId: string,
+    versionId: string,
+    activeVulnerabilities: ActiveVulnerability[] = []
+  ): Promise<(PackageAnalysis & { activeThreatContext: ActiveThreatContext }) | null> {
+    const packageRows = await this.select<PackageRow>("packages", `select=*&id=eq.${packageId}`);
+    const packageRow = packageRows[0];
+    if (!packageRow) return null;
+
+    const analysisRows = await this.select<AnalysisRow>(
+      "analyses",
+      `select=*&id=eq.${versionId}&package_id=eq.${packageId}`
+    );
+    const analysisRow = analysisRows[0];
+    if (!analysisRow) return null;
+
+    const binaryRows = await this.select<BinaryRow>("binaries", `select=*&analysis_id=eq.${analysisRow.id}`);
+    const analysis = this.mapAnalysis(packageRow, analysisRow, binaryRows);
+
+    const { riskScore, riskLevel, activeThreatContext } = scoreWithActiveVulnerabilities(
+      analysis.binaries as import("@binshield/analysis-types").BinaryAnalysis[],
+      analysis.manifestAnalysis,
+      activeVulnerabilities
+    );
+
+    return {
+      ...analysis,
+      riskScore,
+      riskLevel,
+      activeThreatContext
+    };
   }
 
   // ---------------------------------------------------------------------------
