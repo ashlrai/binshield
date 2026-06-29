@@ -481,6 +481,79 @@ export async function createLiveClassifierProvider(): Promise<ClassifierProvider
   ]);
 }
 
+/**
+ * Creates a classifier provider with Grok as primary and Gemini/Claude as
+ * latency-aware fallbacks, plus per-model cost tracking.
+ *
+ * Environment variables:
+ *   XAI_API_KEY              — required for Grok
+ *   GEMINI_API_KEY           — required for Gemini fallback
+ *   ANTHROPIC_API_KEY        — required for Claude fallback
+ *   AI_CLASSIFIER_PROVIDER   — override primary provider (grok | gemini-classifier | claude-classifier)
+ *   AI_FALLBACK_ORDER        — comma-separated fallback order
+ *
+ * Falls through to the HTTP + heuristic providers if all AI classifiers fail.
+ */
+export async function createLiveClassifierProviderWithRouting(): Promise<ClassifierProvider> {
+  const { GrokClassifierProvider } = await import("./grok-classifier");
+  const {
+    GeminiClassifier,
+    ClaudeClassifier,
+    RoutingClassifierProvider,
+    ClassifierUsageRepository,
+    GrokAIClassifierAdapter,
+  } = await import("./ai-classifiers/index");
+
+  // Validate env — warn early rather than fail at first classification call
+  validateAIClassifierEnv();
+
+  const usageRepo = new ClassifierUsageRepository();
+  const grok = new GrokAIClassifierAdapter(
+    new GrokClassifierProvider(),
+    process.env.XAI_MODEL ?? "grok-4.3"
+  );
+  const gemini = new GeminiClassifier({ usageRepository: usageRepo });
+  const claude = new ClaudeClassifier({ usageRepository: usageRepo });
+
+  const routingProvider = new RoutingClassifierProvider({
+    providers: [grok, gemini, claude],
+    usageRepository: usageRepo,
+  });
+
+  return new CompositeClassifierProvider([
+    routingProvider,
+    new HttpClassifierProvider(),
+    new LocalHeuristicClassifierProvider()
+  ]);
+}
+
+/**
+ * Validate AI classifier environment variables and emit warnings for missing keys.
+ * Does not throw — missing keys are handled gracefully at call time by each provider.
+ */
+function validateAIClassifierEnv(): void {
+  const missing: string[] = [];
+  if (!process.env.XAI_API_KEY) missing.push("XAI_API_KEY");
+  if (!process.env.GEMINI_API_KEY) missing.push("GEMINI_API_KEY");
+  if (!process.env.ANTHROPIC_API_KEY) missing.push("ANTHROPIC_API_KEY");
+
+  if (missing.length > 0) {
+    console.warn(
+      `[providers] AI classifier env vars not set: ${missing.join(", ")}. ` +
+        `Affected providers will fail and route to the next fallback.`
+    );
+  }
+
+  const provider = process.env.AI_CLASSIFIER_PROVIDER;
+  const validProviders = new Set(["grok", "gemini-classifier", "claude-classifier"]);
+  if (provider && !validProviders.has(provider)) {
+    console.warn(
+      `[providers] AI_CLASSIFIER_PROVIDER="${provider}" is not a recognised provider ` +
+        `(valid: ${[...validProviders].join(", ")}). Falling back to declaration order.`
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Script analyzer providers (install-script / manifest analysis)
 // ---------------------------------------------------------------------------
