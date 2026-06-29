@@ -26,6 +26,7 @@ import { buildCacheKey, InMemoryAnalysisCache } from "./cache";
 import { FileSystemBinaryExtractor } from "./extractor";
 import { InMemoryJobStore } from "./job-store";
 import { verifyWheelProvenanceAttestation } from "./pypi-wheel-provenance-attestator.js";
+import { PySdistExtractorAndAnalyzer } from "./pypi-sdist-binary-extractor.js";
 import {
   createDefaultDecompilerProvider,
   createDefaultClassifierProvider,
@@ -502,6 +503,62 @@ export class WorkerRuntime {
         "[BinShield] dep-graph feed enrichment failed (non-fatal):",
         err instanceof Error ? err.message : err
       );
+    }
+
+    // PyPI sdist binary extraction & analysis — runs best-effort in parallel
+    // with the wheel provenance step for PyPI packages that ship an sdist.
+    // Findings are merged into manifestAnalysis.findings so they flow through
+    // the existing risk-score aggregation path.
+    //
+    // This closes the gap where wheel scanning catches compiled binaries in
+    // .whl files but sdists were only scanned for source-level build threats.
+    // Attackers increasingly embed pre-built .so/.pyd/.dll binaries inside
+    // sdist archives (in build/, _vendor/, etc.) to bypass wheel analysis.
+    let sdistBinaryAnalysisPromise: Promise<void> | undefined;
+    if (request.ecosystem === "pypi") {
+      sdistBinaryAnalysisPromise = (async () => {
+        try {
+          const sdistAnalyzer = new PySdistExtractorAndAnalyzer();
+          // When the package was acquired as a local directory (sdist extracted
+          // by PyPiPackageSource), analyse that directory directly to avoid a
+          // redundant download.  Otherwise skip — the caller's acquisition path
+          // did not produce an sdist root we can inspect.
+          if (acquired.packageRoot) {
+            const sdistResult = await sdistAnalyzer.analyzeFromDirectory(
+              request.packageName,
+              request.version,
+              acquired.packageRoot
+            );
+            if (sdistResult.hasNativeBinaries) {
+              console.log(
+                `[BinShield] sdist binary analysis: ${sdistResult.nativeBinaries.length} native ` +
+                `binary/binaries found in ${request.packageName}@${request.version} sdist`
+              );
+              // Merge all findings (medium+) into manifestAnalysis
+              for (const finding of sdistResult.findings) {
+                if (
+                  finding.severity === "medium" ||
+                  finding.severity === "high" ||
+                  finding.severity === "critical"
+                ) {
+                  manifestAnalysis.findings.push(finding);
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(
+            "[BinShield] pypi sdist binary extraction failed (non-fatal):",
+            err instanceof Error ? err.message : err
+          );
+        }
+      })();
+    }
+
+    // Await the sdist binary analysis before building the final PackageAnalysis
+    // so its findings are included in risk scoring.
+    if (sdistBinaryAnalysisPromise) {
+      await sdistBinaryAnalysisPromise;
     }
 
     const analysis = toAnalysisPackage(request, acquired.manifest, classifiedArtifacts, manifestAnalysis, supplyChainHealth, depGraphEnrichment);
