@@ -4,7 +4,8 @@ import path from "node:path";
 
 import type { ManifestAnalysis, PackageAnalysis } from "@binshield/analysis-types";
 import { AnalyticsCollector } from "@binshield/analytics-collector";
-import { AnalyzerRegistry } from "@binshield/malware-engines";
+import { AnalyzerRegistry, getSharedMatchingEngine } from "@binshield/malware-engines";
+import type { OsvMatchResult } from "@binshield/malware-engines";
 import { aggregatePackageRiskWithManifest, summarizePackage, scoreBinary } from "@binshield/risk-engine";
 import { SupplyChainHealthAnalyzer, toHealthFinding } from "@binshield/supply-chain-health";
 
@@ -226,12 +227,62 @@ export class WorkerRuntime {
       buildSystemType: acquired.buildSystemType,
       pythonBuildThreatDetails: acquired.pythonBuildThreatDetails
     };
+    // OSV malware feed cross-reference — runs before AI classification so that
+    // known-worm packages are flagged immediately without waiting for the full
+    // binary analysis pipeline.  The MatchingEngine is in-memory so this is
+    // synchronous and <5ms.  Results are attached to the manifest analysis via
+    // the knownMalwareAdvisoryIds / knownMalwareMatches fields.
+    const osvEcosystem = request.ecosystem === "pypi" ? "PyPI" : "npm";
+    const osvMatchResult: OsvMatchResult = getSharedMatchingEngine().match(
+      request.packageName,
+      request.version,
+      osvEcosystem
+    );
+
+    if (osvMatchResult.matched) {
+      console.log(
+        `[BinShield] OSV malware match (${osvMatchResult.matchType}): ` +
+          `${request.packageName}@${request.version} — ` +
+          osvMatchResult.findings.map((f) => f.advisoryId).join(", ")
+      );
+    }
+
     // Install-script analysis runs concurrently with binary discovery — it is
     // independent of the binaries and feeds the cache key below.
     const [artifacts, manifestAnalysis] = await Promise.all([
       this.services.extraction.discover(acquired.packageRoot),
       this.services.scriptAnalyzer.analyze(scriptInput)
     ]);
+
+    // Merge OSV match findings into the manifest analysis so they appear in
+    // the knownMalwareAdvisoryIds list and affect risk scoring downstream.
+    if (osvMatchResult.matched && osvMatchResult.findings.length > 0) {
+      const existingIds = new Set(manifestAnalysis.knownMalwareAdvisoryIds);
+      for (const finding of osvMatchResult.findings) {
+        if (!existingIds.has(finding.advisoryId)) {
+          manifestAnalysis.knownMalwareAdvisoryIds.push(finding.advisoryId);
+          existingIds.add(finding.advisoryId);
+        }
+      }
+      // Attach structured match objects for provenance (advisory ID + link)
+      if (!manifestAnalysis.knownMalwareMatches) {
+        manifestAnalysis.knownMalwareMatches = [];
+      }
+      const existingMatchIds = new Set(
+        manifestAnalysis.knownMalwareMatches.map((m) => m.advisoryId)
+      );
+      for (const finding of osvMatchResult.findings) {
+        if (!existingMatchIds.has(finding.advisoryId)) {
+          manifestAnalysis.knownMalwareMatches.push({
+            advisoryId: finding.advisoryId,
+            source: "osv",
+            summary: finding.summary,
+            url: finding.advisoryUrl,
+          });
+          existingMatchIds.add(finding.advisoryId);
+        }
+      }
+    }
     const artifactHashes = artifacts.map((artifact) => artifact.sha256);
     const cacheKey = buildCacheKey(request, [
       ...artifactHashes,
