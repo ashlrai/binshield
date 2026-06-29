@@ -433,11 +433,21 @@ describe("analyzeWheelBinaries — fixture wheel extraction", () => {
       })
     );
 
-    const result = await analyzeWheelBinaries("pure-pkg", "1.0.0", {
-      packagetype: "bdist_wheel",
-      url: "https://files.example/pure-cp311.whl",
-      filename: "pure_pkg-1.0.0-py3-none-any.whl",
-    });
+    const result = await analyzeWheelBinaries(
+      "pure-pkg",
+      "1.0.0",
+      {
+        packagetype: "bdist_wheel",
+        url: "https://files.example/pure-cp311.whl",
+        filename: "pure_pkg-1.0.0-py3-none-any.whl",
+      },
+      // Isolate the native-binary-detection contract: a wheel with no native
+      // extensions must produce no *binary* findings. Provenance/attestation
+      // findings are a separate concern verified in their own suites, and the
+      // stubbed fetch would otherwise make the provenance verifier emit a
+      // "missing attestation" finding here.
+      { skipProvenance: true, skipProvenanceVerifier: true }
+    );
 
     expect(result.hasNativeExtensions).toBe(false);
     expect(result.nativeExtensions).toHaveLength(0);
@@ -677,11 +687,17 @@ describe("analyzeWheelBinaries — malformed wheel handling", () => {
       })
     );
 
-    const result = await analyzeWheelBinaries("text-only", "1.0.0", {
-      packagetype: "bdist_wheel",
-      url: "https://files.example/text-only.whl",
-      filename: "text_only-1.0.0-py3-none-any.whl",
-    });
+    const result = await analyzeWheelBinaries(
+      "text-only",
+      "1.0.0",
+      {
+        packagetype: "bdist_wheel",
+        url: "https://files.example/text-only.whl",
+        filename: "text_only-1.0.0-py3-none-any.whl",
+      },
+      // See note above: isolate the binary-findings contract from provenance.
+      { skipProvenance: true, skipProvenanceVerifier: true }
+    );
 
     expect(result.hasNativeExtensions).toBe(false);
     expect(result.nativeExtensions).toHaveLength(0);
