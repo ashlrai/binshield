@@ -4,6 +4,42 @@ import { EpssCache } from "./epss-cache";
 import type { VendorPatchContext, LockfileResolutionContext } from "@binshield/risk-engine";
 
 // ---------------------------------------------------------------------------
+// CveEpssEntry — result type for getCveForPackage()
+// ---------------------------------------------------------------------------
+
+/**
+ * A single CVE entry returned by `getCveForPackage()`, combining the CVE ID
+ * with its current EPSS percentile and CISA KEV status.
+ *
+ * Used by the risk-engine EPSS severity override pipeline to decide how much
+ * to boost a package's risk_score based on real-world exploitation data.
+ */
+export interface CveEpssEntry {
+  /** CVE identifier in uppercase, e.g. "CVE-2024-12345". */
+  cveId: string;
+  /**
+   * EPSS probability percentile [0, 1].
+   * 0 when no EPSS data is available for this CVE.
+   */
+  epss_percentile: number;
+  /**
+   * Raw EPSS probability score [0, 1] (distinct from the percentile rank).
+   * 0 when no EPSS data is available.
+   */
+  epss_score: number;
+  /**
+   * True when this CVE appears in the CISA Known Exploited Vulnerabilities
+   * catalogue (as populated by the NVD feed ingester).
+   */
+  kev_active: boolean;
+  /**
+   * ISO date string (YYYY-MM-DD) when the EPSS score was last computed.
+   * Undefined when no EPSS data is available.
+   */
+  score_date?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Vendor advisory JSON shape (GitHub Security Advisories + generic feed)
 // ---------------------------------------------------------------------------
 
@@ -353,6 +389,94 @@ export class AdvisoryService {
   async getMalwareAdvisoriesForPackage(ecosystem: string, packageName: string): Promise<Advisory[]> {
     const advisories = await this.getPackageAdvisories(ecosystem, packageName);
     return advisories.filter((advisory) => advisory.advisoryType === "malware");
+  }
+
+  // -------------------------------------------------------------------------
+  // EPSS severity override — getCveForPackage
+  // -------------------------------------------------------------------------
+
+  /**
+   * Return all CVE IDs known for a given package + version, along with their
+   * EPSS percentiles and CISA KEV status, ready for use by the risk-engine
+   * EPSS severity override pipeline.
+   *
+   * Steps:
+   *   1. Fetch all advisories stored for this ecosystem/package from the DB.
+   *   2. Filter to CVE-prefixed source IDs (skip GHSA-only entries).
+   *   3. For each CVE, look up any cached EPSS score; fall back to a live
+   *      FIRST API fetch when no cached row exists.
+   *   4. Return an array of CveEpssEntry objects sorted by epss_percentile desc.
+   *
+   * The result is intentionally lightweight — callers (e.g. aggregatePackageRisk
+   * in the risk-engine) pass the highest-percentile entry to epssBoost() /
+   * cisaKevBoost() to compute the risk score uplift.
+   *
+   * @param ecosystem    Package ecosystem ("npm" | "pypi").
+   * @param packageName  Package name, e.g. "lodash".
+   * @param version      Exact version string pinned in the lockfile.
+   */
+  async getCveForPackage(
+    ecosystem: string,
+    packageName: string,
+    version: string
+  ): Promise<CveEpssEntry[]> {
+    // 1. Pull all advisories from DB (already synced by syncPackageAdvisories)
+    let advisories: Advisory[] = [];
+    try {
+      advisories = await this.getPackageAdvisories(ecosystem, packageName);
+    } catch {
+      // Graceful degradation — no advisories means no boost
+      return [];
+    }
+
+    // 2. Extract unique CVE IDs
+    const cveIds = [
+      ...new Set(
+        advisories
+          .map((a) => a.sourceId)
+          .filter((id) => id.toUpperCase().startsWith("CVE-"))
+          .map((id) => id.toUpperCase())
+      )
+    ];
+    if (cveIds.length === 0) return [];
+
+    // 3. Fetch EPSS scores (cached → live fallback)
+    let epssRows: EpssScore[] = [];
+    try {
+      epssRows = await this.getEpssScores(ecosystem, packageName, version);
+      if (epssRows.length === 0) {
+        epssRows = await this.syncEpssScores(ecosystem, packageName, version, cveIds);
+      }
+    } catch {
+      // EPSS enrichment is best-effort
+    }
+
+    const epssMap = new Map(epssRows.map((r) => [r.cveId.toUpperCase(), r]));
+
+    // 4. Build KEV set from advisory raw data
+    const kevSet = new Set<string>();
+    for (const advisory of advisories) {
+      const raw = advisory as unknown as Record<string, unknown>;
+      const kevDate = raw["cisaKevDate"] ?? raw["cisa_kev_date"];
+      if (kevDate && advisory.sourceId.toUpperCase().startsWith("CVE-")) {
+        kevSet.add(advisory.sourceId.toUpperCase());
+      }
+    }
+
+    // 5. Assemble result — one entry per CVE, sorted by percentile desc
+    const entries: CveEpssEntry[] = cveIds.map((cveId) => {
+      const epssRow = epssMap.get(cveId);
+      return {
+        cveId,
+        epss_percentile: epssRow?.epssPercentile ?? 0,
+        epss_score: epssRow?.epssScore ?? 0,
+        kev_active: kevSet.has(cveId),
+        score_date: epssRow?.scoreDate
+      };
+    });
+
+    entries.sort((a, b) => b.epss_percentile - a.epss_percentile);
+    return entries;
   }
 
   // -------------------------------------------------------------------------

@@ -2,6 +2,7 @@ import type {
   BehaviorSignal,
   BehaviorSummary,
   BinaryAnalysis,
+  EpssBoostContext,
   Finding,
   FindingSeverity,
   ManifestAnalysis,
@@ -20,6 +21,10 @@ export {
   epssBoostPoints,
   malwareSignalBoostPoints
 } from "./epss-correlator";
+
+// Note: CveEpssInput, aggregatePackageRiskWithEpss, buildEpssBoostContext,
+// buildEpssBoostFinding, isEpssEntryFresh, and selectBestCveEntry are defined
+// and exported further down in this file.
 
 // ---------------------------------------------------------------------------
 // Active Vulnerability — real-time CVE/EPSS/KEV input shape
@@ -733,6 +738,175 @@ export function aggregatePackageRisk(binaries: BinaryAnalysis[]) {
     riskScore: aggregate,
     riskLevel: riskLevelFromScore(aggregate)
   };
+}
+
+// ---------------------------------------------------------------------------
+// EPSS input shape for aggregatePackageRiskWithEpss
+// ---------------------------------------------------------------------------
+
+/**
+ * A single CVE entry used by the EPSS severity override pipeline.
+ * Callers populate this from `getCveForPackage()` in advisory-service or
+ * directly from the `nvdEpssCache` singleton in the worker.
+ */
+export interface CveEpssInput {
+  /** CVE identifier, e.g. "CVE-2024-12345". */
+  cveId: string;
+  /** EPSS percentile [0, 1]. */
+  epss_percentile: number;
+  /** True when this CVE is in the CISA KEV catalogue. */
+  kev_active: boolean;
+  /**
+   * ISO timestamp of the last EPSS data fetch.
+   * Entries older than 30 days are silently ignored (staleness guard).
+   */
+  fetchedAt?: string;
+}
+
+/** Maximum age (ms) of a CVE EPSS entry before it is treated as stale. */
+const EPSS_STALENESS_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/**
+ * Returns true when the entry's `fetchedAt` is recent enough to be used
+ * for risk scoring (within the last 30 days, or when fetchedAt is absent).
+ */
+export function isEpssEntryFresh(entry: CveEpssInput, now = Date.now()): boolean {
+  if (!entry.fetchedAt) return true; // no staleness info → assume fresh
+  const fetchedMs = new Date(entry.fetchedAt).getTime();
+  if (isNaN(fetchedMs)) return false;
+  return now - fetchedMs <= EPSS_STALENESS_MS;
+}
+
+/**
+ * Select the best (highest-percentile, fresh) CVE entry from a list.
+ * Returns undefined when the list is empty or all entries are stale.
+ */
+export function selectBestCveEntry(
+  cves: CveEpssInput[],
+  now = Date.now()
+): CveEpssInput | undefined {
+  const fresh = cves.filter((c) => isEpssEntryFresh(c, now));
+  if (fresh.length === 0) return undefined;
+  return fresh.reduce((best, c) => (c.epss_percentile > best.epss_percentile ? c : best));
+}
+
+/**
+ * Build an `EpssBoostContext` audit record from the best CVE entry and the
+ * boost points actually applied.
+ */
+export function buildEpssBoostContext(
+  best: CveEpssInput,
+  epssBoostPts: number,
+  kevBoostPts: number
+): EpssBoostContext {
+  const pctLabel = `${Math.round(best.epss_percentile * 100)}th percentile`;
+  const parts: string[] = [];
+
+  if (epssBoostPts > 0) {
+    parts.push(`EPSS ${pctLabel} (${best.cveId})`);
+  }
+  if (kevBoostPts > 0) {
+    parts.push(`CISA KEV active-exploitation`);
+  }
+  if (parts.length === 0) {
+    parts.push(`EPSS ${pctLabel} (${best.cveId}) — below boost threshold`);
+  }
+
+  return {
+    primaryCveId: best.cveId,
+    epss_percentile: best.epss_percentile,
+    epss_boost_pts: epssBoostPts,
+    kev_status: best.kev_active,
+    kev_boost_pts: kevBoostPts,
+    boost_reason: parts.join(" + "),
+    computed_at: new Date().toISOString()
+  };
+}
+
+/**
+ * Build a CRITICAL or HIGH `Finding` that documents the EPSS boost applied to
+ * a package's risk score.  Persisted to `analyses.findings` so the boost is
+ * fully auditable.
+ */
+export function buildEpssBoostFinding(ctx: EpssBoostContext): Finding {
+  const totalBoost = ctx.epss_boost_pts + ctx.kev_boost_pts;
+  const severity: FindingSeverity = totalBoost >= 20 ? "critical" : totalBoost >= 10 ? "high" : "medium";
+
+  return {
+    severity,
+    title: `EPSS Severity Override: ${ctx.primaryCveId}`,
+    description: ctx.boost_reason,
+    recommendation:
+      `${ctx.primaryCveId} has EPSS percentile ${Math.round(ctx.epss_percentile * 100)}%. ` +
+      (ctx.kev_status
+        ? "This CVE is confirmed in the CISA Known Exploited Vulnerabilities catalogue — patch immediately."
+        : "Monitor for active exploitation and prioritise patching.")
+  };
+}
+
+/**
+ * Aggregate package risk from binary analyses and optionally apply an EPSS
+ * severity override when real-time CVE/EPSS/KEV data is available.
+ *
+ * This is the closed-feedback-loop version of `aggregatePackageRisk`:
+ *   1. Compute the static base score (max×0.65 + avg×0.35 across binaries).
+ *   2. Select the best (highest-percentile) fresh CVE entry.
+ *   3. Apply `epssPercentileBoost()` from the epss-correlator.
+ *   4. Apply `kevBoostForVuln()` if the best CVE is in CISA KEV.
+ *   5. Clamp to [0, 100].
+ *   6. Build an `EpssBoostContext` audit record and a boost `Finding`.
+ *
+ * The boost Finding is designed to be appended to `analyses.findings` by the
+ * caller so the override is fully auditable in the database.
+ *
+ * When `cves` is empty or all entries are stale, returns the unmodified base
+ * score with no epss_context (identical to `aggregatePackageRisk`).
+ *
+ * @param binaries  Per-binary analysis results.
+ * @param cves      Live CVE/EPSS/KEV entries from `getCveForPackage()` or
+ *                  `nvdEpssCache.getBestEntry()`.
+ * @param now       Timestamp override for staleness checks (default: Date.now()).
+ */
+export function aggregatePackageRiskWithEpss(
+  binaries: BinaryAnalysis[],
+  cves: CveEpssInput[],
+  now = Date.now()
+): {
+  riskScore: number;
+  riskLevel: RiskLevel;
+  epss_context: EpssBoostContext | undefined;
+  boostFinding: Finding | undefined;
+} {
+  const base = aggregatePackageRisk(binaries);
+
+  const best = selectBestCveEntry(cves, now);
+  if (!best) {
+    return { ...base, epss_context: undefined, boostFinding: undefined };
+  }
+
+  // Compute EPSS percentile boost (from epss-correlator via index.ts re-export)
+  const epssBoostPts = epssPercentileBoost(best.epss_percentile);
+
+  // Compute CISA KEV boost using the existing kevBoostForVuln helper
+  // (re-uses the same logic — activeVulnerability shape compatible via duck-typing)
+  const kevBoostPts = best.kev_active
+    ? kevBoostForVuln({
+        cveId: best.cveId,
+        epssPercentile: best.epss_percentile,
+        isKev: best.kev_active,
+        exploitMaturity: "active-exploitation",
+        feedUpdatedAt: best.fetchedAt ?? new Date().toISOString()
+      })
+    : 0;
+
+  const totalBoost = epssBoostPts + kevBoostPts;
+  const riskScore = normalizeRisk(base.riskScore + totalBoost);
+  const riskLevel = riskLevelFromScore(riskScore);
+
+  const epss_context = buildEpssBoostContext(best, epssBoostPts, kevBoostPts);
+  const boostFinding = totalBoost > 0 ? buildEpssBoostFinding(epss_context) : undefined;
+
+  return { riskScore, riskLevel, epss_context, boostFinding };
 }
 
 /**

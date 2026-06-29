@@ -514,6 +514,46 @@ export interface SupplyChainHealthResult {
   analyzedAt: string;
 }
 
+/**
+ * Audit trail for an EPSS-driven risk score boost applied during package scoring.
+ *
+ * Persisted to analyses.findings (as boost_reason) so that every automatic
+ * risk_score elevation can be traced back to the exact CVE + EPSS signal that
+ * caused it.  Present only when at least one CVE has EPSS percentile >= 0.40
+ * or the package appears in the CISA KEV catalogue.
+ */
+export interface EpssBoostContext {
+  /** CVE ID that contributed the highest EPSS boost to the risk score. */
+  primaryCveId: string;
+  /** EPSS percentile for the primary CVE [0, 1]. */
+  epss_percentile: number;
+  /**
+   * Net risk points added by the EPSS percentile boost alone (0 | 5 | 15 | 25).
+   * Corresponds to the output of `epssPercentileBoost(epss_percentile)` in the
+   * risk-engine.
+   */
+  epss_boost_pts: number;
+  /**
+   * True when the primary CVE (or any CVE for this package) appears in the
+   * CISA Known Exploited Vulnerabilities catalogue.
+   */
+  kev_status: boolean;
+  /**
+   * Net risk points added by the CISA KEV boost (0 | 20).
+   * Corresponds to the output of `kevBoostForVuln()` in the risk-engine.
+   */
+  kev_boost_pts: number;
+  /**
+   * Human-readable explanation for the boost, suitable for persisting to
+   * analyses.findings as the `description` field.
+   *
+   * Example: "EPSS 97th percentile (CVE-2024-12345) + CISA KEV active-exploitation"
+   */
+  boost_reason: string;
+  /** ISO timestamp when this boost context was computed. */
+  computed_at: string;
+}
+
 export interface PackageAnalysis extends PackageCoordinate {
   id: string;
   status: AnalysisStatus;
@@ -553,6 +593,15 @@ export interface PackageAnalysis extends PackageCoordinate {
      */
     risk_adjusted_from_base: number;
   };
+  /**
+   * EPSS severity override context persisted during risk scoring.
+   * Present when at least one CVE affecting this package has EPSS percentile >= 0.40,
+   * indicating the NVD/CISA KEV feed correlation boosted the risk_score.
+   *
+   * Designed to provide a full audit trail for any risk_score boost applied by
+   * the EPSS severity override pipeline (epssBoost + cisaKevBoost in aggregatePackageRisk).
+   */
+  epss_context?: EpssBoostContext;
 }
 
 export interface PackageDiff {

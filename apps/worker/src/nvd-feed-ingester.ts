@@ -538,6 +538,126 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// NvdEpssCache — rolling in-memory CVE→EPSS mapping
+// ---------------------------------------------------------------------------
+
+/**
+ * A single CVE entry in the NVD EPSS cache.
+ */
+export interface NvdEpssCacheEntry {
+  /** CVE identifier in uppercase, e.g. "CVE-2024-12345". */
+  cveId: string;
+  /** EPSS percentile [0, 1] — probability of exploitation within the next 30 days. */
+  epss_percentile: number;
+  /** Raw EPSS probability score [0, 1]. */
+  epss_score: number;
+  /** True when this CVE is in the CISA KEV catalogue (set during syncCisaKev). */
+  kev_active: boolean;
+  /** Exploit maturity from CISA KEV — only meaningful when kev_active is true. */
+  kev_maturity?: ExploitMaturity;
+  /**
+   * Package name + version key this entry was indexed under, e.g. "lodash@4.17.21".
+   * Allows callers to quickly look up all CVEs for a specific package version.
+   */
+  packageVersionKey?: string;
+  /** ISO timestamp when the EPSS score was last fetched from the FIRST API. */
+  fetchedAt: string;
+}
+
+/**
+ * Rolling in-memory CVE→EPSS mapping maintained by the NVD feed ingester.
+ *
+ * Keyed by CVE ID (uppercase).  The ingester populates this cache during each
+ * poll cycle so downstream consumers (e.g. the risk-engine EPSS severity
+ * override pipeline) can look up EPSS data without an extra HTTP round-trip.
+ *
+ * Design:
+ *   - Maximum 10 000 entries (oldest evicted on overflow).
+ *   - Entries older than 30 days are treated as stale by `isFresh()`.
+ *   - Thread-safe for single-process Node.js (synchronous Map access).
+ */
+export class NvdEpssCache {
+  private readonly cache = new Map<string, NvdEpssCacheEntry>();
+  private readonly MAX_ENTRIES = 10_000;
+  private readonly TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+  /** Insert or overwrite a single entry. Evicts the oldest entry on overflow. */
+  set(entry: NvdEpssCacheEntry): void {
+    const key = entry.cveId.toUpperCase();
+    if (!this.cache.has(key) && this.cache.size >= this.MAX_ENTRIES) {
+      // Evict the first (oldest) key
+      const oldest = this.cache.keys().next().value;
+      if (oldest) this.cache.delete(oldest);
+    }
+    this.cache.set(key, { ...entry, cveId: key });
+  }
+
+  /** Bulk-insert entries. */
+  setMany(entries: NvdEpssCacheEntry[]): void {
+    for (const entry of entries) {
+      this.set(entry);
+    }
+  }
+
+  /** Retrieve a single entry by CVE ID. Returns undefined when not cached. */
+  get(cveId: string): NvdEpssCacheEntry | undefined {
+    return this.cache.get(cveId.toUpperCase());
+  }
+
+  /**
+   * Retrieve entries for all CVE IDs in the list.
+   * Missing CVEs are omitted from the result map.
+   */
+  getMany(cveIds: string[]): Map<string, NvdEpssCacheEntry> {
+    const result = new Map<string, NvdEpssCacheEntry>();
+    for (const id of cveIds) {
+      const entry = this.cache.get(id.toUpperCase());
+      if (entry) result.set(id.toUpperCase(), entry);
+    }
+    return result;
+  }
+
+  /**
+   * Returns true when the entry's `fetchedAt` timestamp is within the 30-day TTL.
+   */
+  isFresh(entry: NvdEpssCacheEntry, now = Date.now()): boolean {
+    const fetchedMs = new Date(entry.fetchedAt).getTime();
+    if (isNaN(fetchedMs)) return false;
+    return now - fetchedMs <= this.TTL_MS;
+  }
+
+  /**
+   * Return the highest-percentile fresh entry across the given CVE IDs.
+   * Returns undefined when no fresh entries exist for any of the CVE IDs.
+   */
+  getBestEntry(cveIds: string[], now = Date.now()): NvdEpssCacheEntry | undefined {
+    let best: NvdEpssCacheEntry | undefined;
+    for (const id of cveIds) {
+      const entry = this.cache.get(id.toUpperCase());
+      if (!entry || !this.isFresh(entry, now)) continue;
+      if (!best || entry.epss_percentile > best.epss_percentile) {
+        best = entry;
+      }
+    }
+    return best;
+  }
+
+  /** Total number of entries currently held. */
+  get size(): number {
+    return this.cache.size;
+  }
+
+  /** Remove all entries. */
+  clear(): void {
+    this.cache.clear();
+  }
+}
+
+// Module-level singleton cache shared across all NvdFeedIngester instances.
+// Consumers can import `nvdEpssCache` directly for zero-latency CVE lookups.
+export const nvdEpssCache = new NvdEpssCache();
+
+// ---------------------------------------------------------------------------
 // Standalone entry point (invoked when this module is run directly)
 // ---------------------------------------------------------------------------
 
