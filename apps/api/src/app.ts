@@ -3,6 +3,7 @@ import type { Context } from "hono";
 import { cors } from "hono/cors";
 
 import { AdvisoryService } from "./lib/advisory-service";
+import { EpssCache } from "./lib/epss-cache";
 import { logAudit } from "./lib/audit";
 import { assertSameOrg, resolvePrincipal } from "./lib/auth";
 import { generateReport } from "./lib/compliance-reports";
@@ -1093,6 +1094,78 @@ export function createApp(services = createServices(readApiEnv())) {
         cythonFiles: [],
         suspiciousPatterns: []
       }
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /packages/:ecosystem/:name/versions/:version/vulnerabilities/enriched
+  // EPSS/CVE enrichment: fetches CVEs from advisories table, queries FIRST
+  // EPSS API, checks CISA KEV membership, and returns a structured risk report.
+  // -----------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/:name/versions/:version/vulnerabilities/enriched", async (c) => {
+    const ecosystem = c.req.param("ecosystem") as Ecosystem;
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    const { env } = getServices(c);
+
+    // Build the EPSS cache: use Supabase backing when credentials are available
+    const epssCache = new EpssCache(
+      env.supabaseUrl && env.supabaseServiceRoleKey
+        ? { supabaseUrl: env.supabaseUrl, supabaseServiceRoleKey: env.supabaseServiceRoleKey }
+        : undefined
+    );
+
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      // Supabase mode — use real advisory data from the DB
+      const advisoryService = new AdvisoryService({
+        supabaseUrl: env.supabaseUrl,
+        supabaseServiceRoleKey: env.supabaseServiceRoleKey,
+        githubToken: env.githubToken,
+        nvdApiKey: env.nvdApiKey
+      });
+
+      try {
+        const enrichment = await advisoryService.enrichCvesWithEpss(ecosystem, name, version, epssCache);
+        return c.json(enrichment);
+      } catch (err) {
+        console.error(`[BinShield API] enrichCvesWithEpss failed for ${ecosystem}/${name}@${version}:`, err instanceof Error ? err.message : err);
+        return c.json({ error: "Enrichment failed" }, 500);
+      }
+    }
+
+    // Local/dev mode — use seeded advisory data with mocked EPSS (no live fetch)
+    const advisories = await getServices(c).repository.getPackageAdvisories(ecosystem, name);
+
+    const findings = advisories.map((advisory) => ({
+      cvId: advisory.sourceId,
+      title: advisory.title,
+      severity: advisory.severity ?? "unknown",
+      cvssScore: advisory.cvssScore,
+      epssPercentile: undefined as number | undefined,
+      cisaKevDate: undefined as string | undefined,
+      exploitMaturity: undefined as string | undefined,
+      recommendation: `Review ${advisory.sourceId} and apply the latest patched version.`
+    }));
+
+    const maxCvssV3Score = findings.reduce((max, f) => Math.max(max, f.cvssScore ?? 0), 0);
+    const baseScore = Math.round((maxCvssV3Score / 10) * 100);
+
+    return c.json({
+      ecosystem,
+      packageName: name,
+      version,
+      findings,
+      maxEpssPercentile: 0,
+      maxCvssV3Score,
+      cisaKevMatches: [],
+      exploitMaturityStats: { proofOfConcept: 0, activeExploitation: 0, widespread: 0 },
+      riskBoost: { baseScore, epssBoost: 0, cisaKevBoost: 0, finalScore: baseScore },
+      recommendations: findings.length > 0
+        ? [`Review all listed advisories and upgrade to the patched version as soon as feasible.`]
+        : ["No known CVEs found for this package version. Continue monitoring for new advisories."],
+      enrichedAt: new Date().toISOString()
     });
   });
 

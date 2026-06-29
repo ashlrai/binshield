@@ -1192,6 +1192,74 @@ export function getSampleActionSummaries(packageName?: string): ActionScanSummar
   return packageName ? sampleActionSummaries.filter((summary) => summary.packageName === packageName) : sampleActionSummaries;
 }
 
+// ---------------------------------------------------------------------------
+// EPSS/CVE Enrichment types
+// ---------------------------------------------------------------------------
+
+/** Exploit maturity classification for a CVE. */
+export type ExploitMaturity = "proof-of-concept" | "active-exploitation" | "widespread" | "none";
+
+/** A single enriched CVE finding returned by the /vulnerabilities/enriched endpoint. */
+export interface EnrichedFinding {
+  /** CVE or GHSA identifier. */
+  cvId: string;
+  /** Human-readable advisory title. */
+  title: string;
+  /** CVSS v3 base severity label. */
+  severity: string;
+  /** CVSS v3 base score (0–10), if available. */
+  cvssScore?: number;
+  /** EPSS probability percentile (0–1), if available. */
+  epssPercentile?: number;
+  /** Date the CVE was added to CISA KEV catalogue, if applicable. */
+  cisaKevDate?: string;
+  /** Exploit maturity classification, if known. */
+  exploitMaturity?: ExploitMaturity;
+  /** Prioritized remediation recommendation. */
+  recommendation: string;
+}
+
+/** How EPSS and CISA KEV scores boost the overall risk score. */
+export interface RiskBoost {
+  /** Base risk score derived from maximum CVSS score (0–100). */
+  baseScore: number;
+  /** Additional risk points added because of high EPSS percentile (0–40). */
+  epssBoost: number;
+  /** Additional risk points added because of CISA KEV membership (0–30). */
+  cisaKevBoost: number;
+  /** Final composite risk score after boosts, capped at 100. */
+  finalScore: number;
+}
+
+/** Breakdown of exploit maturity levels across all CVEs for this package version. */
+export interface ExploitMaturityStats {
+  proofOfConcept: number;
+  activeExploitation: number;
+  widespread: number;
+}
+
+/** Full enriched vulnerability response for a package version. */
+export interface VulnerabilityEnrichment {
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  /** List of enriched CVE findings sorted by exploitability (highest EPSS first). */
+  findings: EnrichedFinding[];
+  /** Aggregate risk metrics. */
+  maxEpssPercentile: number;
+  maxCvssV3Score: number;
+  /** CVE IDs that also appear in the CISA KEV catalogue. */
+  cisaKevMatches: string[];
+  /** Breakdown of exploit maturity levels. */
+  exploitMaturityStats: ExploitMaturityStats;
+  /** How EPSS and KEV scores boost the base CVSS risk. */
+  riskBoost: RiskBoost;
+  /** Prioritised remediation recommendations (highest exploit activity first). */
+  recommendations: string[];
+  /** ISO timestamp when this enrichment was generated. */
+  enrichedAt: string;
+}
+
 export function getSampleAnalysis(packageName: string, version?: string): PackageAnalysis | undefined {
   return sampleAnalyses.find((analysis) => {
     if (analysis.packageName !== packageName) {

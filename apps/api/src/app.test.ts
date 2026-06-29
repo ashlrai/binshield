@@ -863,6 +863,442 @@ describe("POST /sbom/verify-provenance endpoint", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// /packages/:ecosystem/:name/versions/:version/vulnerabilities/enriched
+// EPSS + CISA KEV enrichment endpoint
+// ---------------------------------------------------------------------------
+
+describe("vulnerabilities/enriched endpoint", () => {
+  it("returns 200 with structured enrichment for a package that has advisories (sqlite3)", async () => {
+    const res = await app.request("/packages/npm/sqlite3/versions/5.1.6/vulnerabilities/enriched");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      ecosystem: string;
+      packageName: string;
+      version: string;
+      findings: unknown[];
+      maxEpssPercentile: number;
+      maxCvssV3Score: number;
+      cisaKevMatches: string[];
+      exploitMaturityStats: { proofOfConcept: number; activeExploitation: number; widespread: number };
+      riskBoost: { baseScore: number; epssBoost: number; cisaKevBoost: number; finalScore: number };
+      recommendations: string[];
+      enrichedAt: string;
+    };
+    expect(body.ecosystem).toBe("npm");
+    expect(body.packageName).toBe("sqlite3");
+    expect(body.version).toBe("5.1.6");
+    expect(Array.isArray(body.findings)).toBe(true);
+    expect(body.findings.length).toBeGreaterThan(0);
+    expect(Array.isArray(body.cisaKevMatches)).toBe(true);
+    expect(typeof body.maxEpssPercentile).toBe("number");
+    expect(typeof body.maxCvssV3Score).toBe("number");
+    expect(typeof body.enrichedAt).toBe("string");
+  });
+
+  it("returns required riskBoost shape", async () => {
+    const res = await app.request("/packages/npm/sqlite3/versions/5.1.6/vulnerabilities/enriched");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      riskBoost: { baseScore: number; epssBoost: number; cisaKevBoost: number; finalScore: number };
+    };
+    expect(typeof body.riskBoost.baseScore).toBe("number");
+    expect(typeof body.riskBoost.epssBoost).toBe("number");
+    expect(typeof body.riskBoost.cisaKevBoost).toBe("number");
+    expect(typeof body.riskBoost.finalScore).toBe("number");
+    // finalScore must be within [0, 100]
+    expect(body.riskBoost.finalScore).toBeGreaterThanOrEqual(0);
+    expect(body.riskBoost.finalScore).toBeLessThanOrEqual(100);
+    // finalScore = baseScore + epssBoost + cisaKevBoost (capped)
+    expect(body.riskBoost.finalScore).toBeLessThanOrEqual(
+      body.riskBoost.baseScore + body.riskBoost.epssBoost + body.riskBoost.cisaKevBoost
+    );
+  });
+
+  it("findings items have required fields", async () => {
+    const res = await app.request("/packages/npm/sqlite3/versions/5.1.6/vulnerabilities/enriched");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      findings: Array<{ cvId: string; title: string; severity: string; recommendation: string }>;
+    };
+    for (const f of body.findings) {
+      expect(typeof f.cvId).toBe("string");
+      expect(typeof f.title).toBe("string");
+      expect(typeof f.severity).toBe("string");
+      expect(typeof f.recommendation).toBe("string");
+    }
+  });
+
+  it("exploitMaturityStats has correct numeric shape", async () => {
+    const res = await app.request("/packages/npm/sqlite3/versions/5.1.6/vulnerabilities/enriched");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      exploitMaturityStats: { proofOfConcept: number; activeExploitation: number; widespread: number };
+    };
+    expect(typeof body.exploitMaturityStats.proofOfConcept).toBe("number");
+    expect(typeof body.exploitMaturityStats.activeExploitation).toBe("number");
+    expect(typeof body.exploitMaturityStats.widespread).toBe("number");
+  });
+
+  it("returns empty findings for a package with no advisories", async () => {
+    const res = await app.request("/packages/npm/unknown-no-advisory-pkg/versions/1.0.0/vulnerabilities/enriched");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      findings: unknown[];
+      maxCvssV3Score: number;
+      maxEpssPercentile: number;
+      cisaKevMatches: string[];
+      riskBoost: { baseScore: number; finalScore: number };
+      recommendations: string[];
+    };
+    expect(body.findings).toHaveLength(0);
+    expect(body.maxCvssV3Score).toBe(0);
+    expect(body.maxEpssPercentile).toBe(0);
+    expect(body.cisaKevMatches).toHaveLength(0);
+    expect(body.riskBoost.baseScore).toBe(0);
+    expect(body.riskBoost.finalScore).toBe(0);
+    expect(body.recommendations.length).toBeGreaterThan(0);
+  });
+
+  it("recommendations is a non-empty array of strings", async () => {
+    const res = await app.request("/packages/npm/bcrypt/versions/5.1.1/vulnerabilities/enriched");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { recommendations: unknown[] };
+    expect(Array.isArray(body.recommendations)).toBe(true);
+    expect(body.recommendations.length).toBeGreaterThan(0);
+    for (const r of body.recommendations) {
+      expect(typeof r).toBe("string");
+    }
+  });
+
+  it("baseScore is derived from maxCvssV3Score (cvss/10 * 100, rounded)", async () => {
+    const res = await app.request("/packages/npm/sqlite3/versions/5.1.6/vulnerabilities/enriched");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      maxCvssV3Score: number;
+      riskBoost: { baseScore: number };
+    };
+    const expectedBase = Math.round((body.maxCvssV3Score / 10) * 100);
+    expect(body.riskBoost.baseScore).toBe(expectedBase);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EpssCache — unit tests for TTL, in-memory layer, and setMany/getMany
+// ---------------------------------------------------------------------------
+
+describe("EpssCache", () => {
+  // Import directly from the module (no Supabase — in-memory only)
+  it("returns null for unknown CVE", async () => {
+    const { EpssCache } = await import("./lib/epss-cache");
+    const cache = new EpssCache();
+    const result = await cache.get("npm", "CVE-9999-00001");
+    expect(result).toBeNull();
+  });
+
+  it("stores and retrieves an entry within TTL", async () => {
+    const { EpssCache } = await import("./lib/epss-cache");
+    const cache = new EpssCache();
+    const entry = {
+      ecosystem: "npm",
+      cveId: "CVE-2025-0001",
+      score: 0.12,
+      percentile: 0.75,
+      fetchedAt: new Date().toISOString()
+    };
+    await cache.setMany([entry]);
+    const result = await cache.get("npm", "CVE-2025-0001");
+    expect(result).not.toBeNull();
+    expect(result!.score).toBe(0.12);
+    expect(result!.percentile).toBe(0.75);
+  });
+
+  it("getMany returns all cached entries", async () => {
+    const { EpssCache } = await import("./lib/epss-cache");
+    const cache = new EpssCache();
+    const now = new Date().toISOString();
+    await cache.setMany([
+      { ecosystem: "npm", cveId: "CVE-2025-0010", score: 0.05, percentile: 0.3, fetchedAt: now },
+      { ecosystem: "npm", cveId: "CVE-2025-0011", score: 0.20, percentile: 0.85, fetchedAt: now }
+    ]);
+    const result = await cache.getMany("npm", ["CVE-2025-0010", "CVE-2025-0011", "CVE-2025-MISSING"]);
+    expect(result.size).toBe(2);
+    expect(result.has("CVE-2025-0010")).toBe(true);
+    expect(result.has("CVE-2025-0011")).toBe(true);
+    expect(result.has("CVE-2025-MISSING")).toBe(false);
+  });
+
+  it("evicts stale entries (past 7-day TTL)", async () => {
+    const { EpssCache } = await import("./lib/epss-cache");
+    const cache = new EpssCache();
+    // fetchedAt = 8 days ago → stale
+    const staleDate = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    await cache.setMany([
+      { ecosystem: "npm", cveId: "CVE-2020-STALE", score: 0.9, percentile: 0.99, fetchedAt: staleDate }
+    ]);
+    // Bypass setMany freshness to force stale entry into map directly
+    // (setMany writes to the map; stale detection happens on get/getMany)
+    const result = await cache.get("npm", "CVE-2020-STALE");
+    expect(result).toBeNull();
+  });
+
+  it("is case-insensitive on CVE ID", async () => {
+    const { EpssCache } = await import("./lib/epss-cache");
+    const cache = new EpssCache();
+    const now = new Date().toISOString();
+    await cache.setMany([{ ecosystem: "npm", cveId: "cve-2025-9999", score: 0.3, percentile: 0.6, fetchedAt: now }]);
+    const result = await cache.get("npm", "CVE-2025-9999");
+    expect(result).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AdvisoryService.fetchEpssScores — mocked FIRST EPSS API
+// ---------------------------------------------------------------------------
+
+describe("AdvisoryService.fetchEpssScores", () => {
+  it("returns empty map when no CVE IDs given", async () => {
+    const { AdvisoryService } = await import("./lib/advisory-service");
+    const { EpssCache } = await import("./lib/epss-cache");
+    const svc = new AdvisoryService({
+      supabaseUrl: "https://fake.supabase.co",
+      supabaseServiceRoleKey: "fake-key"
+    });
+    const cache = new EpssCache();
+    const result = await svc.fetchEpssScores("npm", [], cache);
+    expect(result.size).toBe(0);
+  });
+
+  it("returns scores from cache without hitting the network", async () => {
+    const { AdvisoryService } = await import("./lib/advisory-service");
+    const { EpssCache } = await import("./lib/epss-cache");
+    const svc = new AdvisoryService({
+      supabaseUrl: "https://fake.supabase.co",
+      supabaseServiceRoleKey: "fake-key"
+    });
+    const cache = new EpssCache();
+    const now = new Date().toISOString();
+    await cache.setMany([
+      { ecosystem: "npm", cveId: "CVE-2025-1111", score: 0.15, percentile: 0.72, fetchedAt: now }
+    ]);
+
+    // No global fetch mock set up — if live fetch were attempted it would fail in CI
+    const result = await svc.fetchEpssScores("npm", ["CVE-2025-1111"], cache);
+    expect(result.has("CVE-2025-1111")).toBe(true);
+    expect(result.get("CVE-2025-1111")!.percentile).toBe(0.72);
+  });
+
+  it("fetches from FIRST EPSS API for cache-miss CVEs and caches result", async () => {
+    const { AdvisoryService } = await import("./lib/advisory-service");
+    const { EpssCache } = await import("./lib/epss-cache");
+
+    // Monkey-patch global fetch for this test
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: "OK",
+        status_code: 200,
+        version: "1.0",
+        access: "public",
+        total: 1,
+        offset: 0,
+        limit: 100,
+        data: [{ cve: "CVE-2025-9876", epss: "0.25", percentile: "0.88" }]
+      })
+    } as Response);
+
+    try {
+      const svc = new AdvisoryService({
+        supabaseUrl: "https://fake.supabase.co",
+        supabaseServiceRoleKey: "fake-key"
+      });
+      const cache = new EpssCache(); // no Supabase backing
+
+      const result = await svc.fetchEpssScores("npm", ["CVE-2025-9876"], cache);
+      expect(result.has("CVE-2025-9876")).toBe(true);
+      expect(result.get("CVE-2025-9876")!.score).toBeCloseTo(0.25);
+      expect(result.get("CVE-2025-9876")!.percentile).toBeCloseTo(0.88);
+
+      // Result should now be in the in-memory cache
+      const cached = await cache.get("npm", "CVE-2025-9876");
+      expect(cached).not.toBeNull();
+      expect(cached!.percentile).toBeCloseTo(0.88);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("handles EPSS API returning no data gracefully", async () => {
+    const { AdvisoryService } = await import("./lib/advisory-service");
+    const { EpssCache } = await import("./lib/epss-cache");
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: "OK", status_code: 200, version: "1.0", access: "public", total: 0, offset: 0, limit: 100, data: [] })
+    } as Response);
+
+    try {
+      const svc = new AdvisoryService({
+        supabaseUrl: "https://fake.supabase.co",
+        supabaseServiceRoleKey: "fake-key"
+      });
+      const result = await svc.fetchEpssScores("npm", ["CVE-2099-NOTFOUND"], new EpssCache());
+      expect(result.size).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("handles EPSS API network failure gracefully", async () => {
+    const { AdvisoryService } = await import("./lib/advisory-service");
+    const { EpssCache } = await import("./lib/epss-cache");
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+
+    try {
+      const svc = new AdvisoryService({
+        supabaseUrl: "https://fake.supabase.co",
+        supabaseServiceRoleKey: "fake-key"
+      });
+      // Should not throw — returns empty map
+      const result = await svc.fetchEpssScores("npm", ["CVE-2025-FAIL"], new EpssCache());
+      expect(result.size).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AdvisoryService.enrichCvesWithEpss — CISA KEV correlation
+// ---------------------------------------------------------------------------
+
+describe("AdvisoryService.enrichCvesWithEpss — CISA KEV correlation", () => {
+  it("includes cisaKevDate in finding when advisory has cisaKevDate set", async () => {
+    const { AdvisoryService } = await import("./lib/advisory-service");
+    const { EpssCache } = await import("./lib/epss-cache");
+
+    // Stub fetchEpssFromApi so no network calls are made
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: "OK", status_code: 200, version: "1.0", access: "public",
+        total: 1, offset: 0, limit: 100,
+        data: [{ cve: "CVE-2025-1234", epss: "0.7", percentile: "0.92" }]
+      })
+    } as Response);
+
+    // Build a service that fetches from our mock advisory data
+    // For this test we override getPackageAdvisories to inject a KEV-tagged advisory
+    const svc = new AdvisoryService({
+      supabaseUrl: "https://fake.supabase.co",
+      supabaseServiceRoleKey: "fake-key"
+    });
+
+    // Inject a KEV advisory via prototype override
+    const origGet = svc.getPackageAdvisories.bind(svc);
+    svc.getPackageAdvisories = async () => [
+      {
+        id: "adv_kev_test",
+        source: "nvd",
+        sourceId: "CVE-2025-1234",
+        title: "Test KEV Advisory",
+        severity: "critical",
+        cvssScore: 9.8,
+        cweIds: [],
+        references: [],
+        affectedPackages: [{ ecosystem: "npm", packageName: "test-pkg", vulnerableRange: "<1.0.0" }],
+        cisaKevDate: "2025-06-01"
+      } as unknown as Awaited<ReturnType<typeof origGet>>[0]
+    ];
+
+    try {
+      const result = await svc.enrichCvesWithEpss("npm", "test-pkg", "0.9.0", new EpssCache());
+      expect(result.cisaKevMatches).toContain("CVE-2025-1234");
+      expect(result.riskBoost.cisaKevBoost).toBe(30);
+      expect(result.riskBoost.finalScore).toBeGreaterThan(result.riskBoost.baseScore);
+      const finding = result.findings.find((f) => f.cvId === "CVE-2025-1234");
+      expect(finding?.cisaKevDate).toBe("2025-06-01");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("riskBoost finalScore is capped at 100", async () => {
+    const { AdvisoryService } = await import("./lib/advisory-service");
+    const { EpssCache } = await import("./lib/epss-cache");
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ status: "OK", status_code: 200, version: "1.0", access: "public", total: 1, offset: 0, limit: 100,
+        data: [{ cve: "CVE-2025-MAXRISK", epss: "1.0", percentile: "1.0" }] })
+    } as Response);
+
+    const svc = new AdvisoryService({
+      supabaseUrl: "https://fake.supabase.co",
+      supabaseServiceRoleKey: "fake-key"
+    });
+    svc.getPackageAdvisories = async () => [
+      {
+        id: "adv_max",
+        source: "nvd",
+        sourceId: "CVE-2025-MAXRISK",
+        title: "Maximum Risk Advisory",
+        severity: "critical",
+        cvssScore: 10.0,
+        cweIds: [],
+        references: [],
+        affectedPackages: [],
+        cisaKevDate: "2025-01-01"
+      } as unknown as Awaited<ReturnType<typeof svc.getPackageAdvisories>>[0]
+    ];
+
+    try {
+      const result = await svc.enrichCvesWithEpss("npm", "max-risk-pkg", "1.0.0", new EpssCache());
+      expect(result.riskBoost.finalScore).toBeLessThanOrEqual(100);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("returns empty findings and zero scores for a package with no advisories", async () => {
+    const { AdvisoryService } = await import("./lib/advisory-service");
+    const { EpssCache } = await import("./lib/epss-cache");
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ status: "OK", status_code: 200, version: "1.0", access: "public", total: 0, offset: 0, limit: 100, data: [] })
+    } as Response);
+
+    const svc = new AdvisoryService({
+      supabaseUrl: "https://fake.supabase.co",
+      supabaseServiceRoleKey: "fake-key"
+    });
+    svc.getPackageAdvisories = async () => [];
+
+    try {
+      const result = await svc.enrichCvesWithEpss("npm", "empty-pkg", "1.0.0", new EpssCache());
+      expect(result.findings).toHaveLength(0);
+      expect(result.maxEpssPercentile).toBe(0);
+      expect(result.maxCvssV3Score).toBe(0);
+      expect(result.cisaKevMatches).toHaveLength(0);
+      expect(result.riskBoost.finalScore).toBe(0);
+      expect(result.recommendations.length).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 describe("fetchNpmMetadata + fetchPypiMetadata helpers", () => {
   it("fetchNpmMetadata returns null on 404", async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 404 } as Response);
