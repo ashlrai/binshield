@@ -226,7 +226,7 @@ export function createApp(services = createServices(readApiEnv())) {
     if (auth) {
       analyticsCollector.userAction(
         {
-          action: "scan_submitted",
+          action: "api_request",
           metadata: {
             method: c.req.method,
             path: c.req.path,

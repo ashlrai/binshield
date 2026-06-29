@@ -88,6 +88,7 @@ export type UserActionName =
   | "watchlist_created"
   | "suppression_created"
   | "scan_submitted"
+  | "api_request"
   | "lockfile_uploaded"
   | "report_generated"
   | "billing_checkout_started"
