@@ -997,6 +997,54 @@ export function createApp(services = createServices(readApiEnv())) {
     });
   });
 
+  // -----------------------------------------------------------------------
+  // GET /binaries/:id/malware-analysis
+  // Returns per-analyzer malware detection breakdowns for a specific binary.
+  // The binary is located by scanning all stored package analyses for a
+  // matching binary id.
+  // -----------------------------------------------------------------------
+
+  app.get("/binaries/:id/malware-analysis", async (c) => {
+    const binaryId = c.req.param("id");
+    const { repository } = getServices(c);
+
+    // Search all indexed packages for a binary with this id.
+    const searchResults = await repository.searchPackages();
+    for (const item of searchResults.items) {
+      const analysis = await repository.getPackage(item.ecosystem, item.packageName);
+      if (!analysis) continue;
+
+      const binary = analysis.binaries.find((b) => b.id === binaryId);
+      if (!binary) continue;
+
+      const malwareDetectionResults = binary.malwareDetectionResults ?? [];
+      const anyDetected = malwareDetectionResults.some((r) => r.detected);
+      const maxConfidence =
+        malwareDetectionResults.length > 0
+          ? Math.max(...malwareDetectionResults.map((r) => r.confidence))
+          : 0;
+
+      return c.json({
+        binaryId: binary.id,
+        filename: binary.filename,
+        packageName: item.packageName,
+        ecosystem: item.ecosystem,
+        overallDetected: anyDetected,
+        overallConfidence: maxConfidence,
+        analyzerCount: malwareDetectionResults.length,
+        analyzers: malwareDetectionResults.map((r) => ({
+          analyzerName: r.analyzerName,
+          analyzerVersion: r.analyzerVersion,
+          detected: r.detected,
+          confidence: r.confidence,
+          signals: r.signals
+        }))
+      });
+    }
+
+    return c.json({ error: "Binary not found" }, 404);
+  });
+
   app.get("/advisories/recent", async (c) => {
     const limit = Math.min(Number(c.req.query("limit") ?? 50), 200);
     const advisories = await getServices(c).repository.getRecentAdvisories(limit);

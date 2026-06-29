@@ -120,6 +120,31 @@ export interface BinaryFingerprint {
   binaryKey: string;
 }
 
+/**
+ * Per-analyzer malware detection result, produced by the malware-engines
+ * plugin registry and stored on each `BinaryAnalysis` record.
+ * Absent on legacy records produced before the plugin system was introduced.
+ */
+export interface MalwareDetectionResult {
+  /** Name of the analyzer that produced this result (e.g. "entropy", "import-table", "string-literal"). */
+  analyzerName: string;
+  /** Semver version of the analyzer at scan time, for audit / traceability. */
+  analyzerVersion: string;
+  /** Whether this analyzer detected malware indicators (after confidence threshold applied). */
+  detected: boolean;
+  /**
+   * Human-readable evidence strings collected by this analyzer.
+   * Empty when no indicators were found.
+   */
+  signals: string[];
+  /**
+   * Confidence score [0, 1] for this analyzer's verdict.
+   *   0.0 = no signal / inconclusive.
+   *   1.0 = very high confidence, multiple strong indicators.
+   */
+  confidence: number;
+}
+
 export interface BinaryAnalysis {
   id: string;
   filename: string;
@@ -144,6 +169,13 @@ export interface BinaryAnalysis {
    * Absent on legacy records produced before the plugin system was introduced.
    */
   analyzerVersions?: Record<string, string>;
+  /**
+   * Results from the malware-engines plugin registry, one entry per active
+   * analyzer (entropy, import-table, string-literal, plus any custom plugins).
+   * Absent on legacy records produced before the malware-engines package was
+   * introduced.
+   */
+  malwareDetectionResults?: MalwareDetectionResult[];
 }
 
 export interface PackageCoordinate {

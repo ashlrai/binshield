@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { ManifestAnalysis, PackageAnalysis } from "@binshield/analysis-types";
+import { AnalyzerRegistry } from "@binshield/malware-engines";
 import { aggregatePackageRiskWithManifest, summarizePackage, scoreBinary } from "@binshield/risk-engine";
 
 import { buildCacheKey, InMemoryAnalysisCache } from "./cache";
@@ -113,10 +114,11 @@ function toAnalysisPackage(
     fingerprint: FingerprintedArtifact;
     decompiled: { pseudoSource: string; imports: string[]; strings: string[]; functionCount: number; callTargets: string[]; confidence: number };
     classified: ClassifiedArtifact;
+    malwareDetectionResults?: import("@binshield/analysis-types").MalwareDetectionResult[];
   }>,
   manifestAnalysis: ManifestAnalysis
 ): PackageAnalysis {
-  const binaries = classifiedArtifacts.map(({ fingerprint, decompiled, classified }) => {
+  const binaries = classifiedArtifacts.map(({ fingerprint, decompiled, classified, malwareDetectionResults }) => {
     const scored = scoreBinary({
       behaviors: classified.behaviors,
       findings: classified.findings,
@@ -139,7 +141,8 @@ function toAnalysisPackage(
       imports: decompiled.imports,
       strings: decompiled.strings,
       behaviors: classified.behaviors,
-      findings: classified.findings
+      findings: classified.findings,
+      ...(malwareDetectionResults !== undefined ? { malwareDetectionResults } : {})
     };
   });
 
@@ -234,23 +237,51 @@ export class WorkerRuntime {
       fingerprint: FingerprintedArtifact;
       decompiled: DecompiledArtifact;
       classified: ClassifiedArtifact;
+      malwareDetectionResults?: import("@binshield/analysis-types").MalwareDetectionResult[];
     }> = [];
 
+    // Create the malware-engines registry once per process call so all
+    // artifacts share the same instance.
+    const malwareRegistry = AnalyzerRegistry.createDefault();
+
     for (const fingerprint of artifacts) {
+      const binaryBuffer = Buffer.from(fingerprint.bytes);
+
+      // Stage 1: decompile the binary (classifier depends on its output).
       const decompiled = await this.services.decompiler.decompile({
         packageRequest: request,
         packageRoot: acquired.packageRoot,
         artifact: fingerprint
       });
 
-      const classified = await this.services.classifier.classify({
-        packageRequest: request,
-        packageRoot: acquired.packageRoot,
-        artifact: fingerprint,
-        decompiled
-      });
+      // Stage 2: run classifier and malware-engines registry in parallel.
+      // The registry works directly on raw bytes and is independent of
+      // decompiled output, so these two can safely run concurrently.
+      const [classified, malwareRun] = await Promise.all([
+        this.services.classifier.classify({
+          packageRequest: request,
+          packageRoot: acquired.packageRoot,
+          artifact: fingerprint,
+          decompiled
+        }),
+        malwareRegistry.runAll(binaryBuffer)
+      ]);
 
-      classifiedArtifacts.push({ fingerprint, decompiled, classified });
+      const malwareDetectionResults: import("@binshield/analysis-types").MalwareDetectionResult[] =
+        malwareRun.results.map((r) => ({
+          analyzerName: r.analyzerName,
+          analyzerVersion: r.analyzerVersion,
+          detected: r.detected,
+          signals: r.signals,
+          confidence: r.confidence
+        }));
+
+      classifiedArtifacts.push({
+        fingerprint,
+        decompiled,
+        classified,
+        malwareDetectionResults
+      });
     }
 
     const analysis = toAnalysisPackage(request, acquired.manifest, classifiedArtifacts, manifestAnalysis);
