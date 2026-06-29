@@ -1418,6 +1418,76 @@ export function createApp(services = createServices(readApiEnv())) {
   });
 
   // -----------------------------------------------------------------------
+  // POST /packages/pypi/:name/:version/verify-provenance
+  //
+  // Deep PyPI wheel provenance + attestation verification engine (PEP 740).
+  //
+  // Performs:
+  //   1. PEP 740/691 metadata fetch from PyPI
+  //   2. SLSA provenance attestation verification via sigstore + TUF conventions
+  //   3. Build timestamp cross-reference against git commit history (GH API)
+  //   4. Pure-Python repackaging fraud detection
+  //   5. Builder reputation scoring for wheels lacking full provenance
+  //
+  // Body (optional JSON):
+  //   wheelFileList   string[]   — file list from inside the wheel for fraud detection
+  //   skipTimestamp   boolean    — skip GH API build-timestamp check
+  //   skipBuildLog    boolean    — skip GH Actions workflow check
+  //
+  // Returns: WheelProvenanceAttestationResult with structured findings including:
+  //   provenance_verified, attestation_signature_valid, build_timestamp_anomaly,
+  //   repackaging_fraud_suspected, riskScore, riskLevel, slsaLevel, findings[]
+  // -----------------------------------------------------------------------
+
+  app.post("/packages/pypi/:name/:version/verify-provenance", async (c) => {
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    if (!name || name.trim().length === 0) {
+      return c.json({ error: "package name must not be empty" }, 400);
+    }
+    if (!version || version.trim().length === 0) {
+      return c.json({ error: "version must not be empty" }, 400);
+    }
+
+    // Parse optional body
+    let wheelFileList: string[] | undefined;
+    let skipTimestamp = false;
+    let skipBuildLog = false;
+    try {
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      if (Array.isArray(body["wheelFileList"])) {
+        wheelFileList = (body["wheelFileList"] as unknown[])
+          .filter((f): f is string => typeof f === "string")
+          .slice(0, 5000);
+      }
+      if (body["skipTimestamp"] === true) skipTimestamp = true;
+      if (body["skipBuildLog"] === true) skipBuildLog = true;
+    } catch {
+      // body is optional — ignore parse errors
+    }
+
+    const { env } = getServices(c);
+
+    try {
+      const { verifyWheelProvenanceAttestation } = await import("./lib/pypi-wheel-provenance-attestator-proxy.js");
+      const result = await verifyWheelProvenanceAttestation(name, version, {
+        githubToken: env.githubToken,
+        skipTimestampCheck: skipTimestamp || !env.githubToken,
+        skipBuildLogCheck: skipBuildLog || !env.githubToken,
+        _wheelFileListOverride: wheelFileList,
+      });
+      return c.json(result);
+    } catch (err) {
+      console.error(
+        `[BinShield API] verify-provenance failed for pypi/${name}@${version}:`,
+        err instanceof Error ? err.message : err
+      );
+      return c.json({ error: "Provenance verification failed" }, 500);
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // GET /packages/:ecosystem/:name/versions/:version/vulnerabilities/enriched
   // EPSS/CVE enrichment: fetches CVEs from advisories table, queries FIRST
   // EPSS API, checks CISA KEV membership, and returns a structured risk report.

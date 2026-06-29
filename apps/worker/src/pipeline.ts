@@ -19,6 +19,7 @@ import {
 import { buildCacheKey, InMemoryAnalysisCache } from "./cache";
 import { FileSystemBinaryExtractor } from "./extractor";
 import { InMemoryJobStore } from "./job-store";
+import { verifyWheelProvenanceAttestation } from "./pypi-wheel-provenance-attestator.js";
 import {
   createDefaultDecompilerProvider,
   createDefaultClassifierProvider,
@@ -466,6 +467,44 @@ export class WorkerRuntime {
     }
 
     const analysis = toAnalysisPackage(request, acquired.manifest, classifiedArtifacts, manifestAnalysis, supplyChainHealth);
+
+    // PyPI wheel provenance + attestation verification — runs best-effort for
+    // PyPI packages.  Failures are caught so they never block the pipeline.
+    // The result is attached to manifestAnalysis.findings so it flows through
+    // the existing risk-score aggregation.
+    if (request.ecosystem === "pypi") {
+      try {
+        const provenanceResult = await verifyWheelProvenanceAttestation(
+          request.packageName,
+          request.version,
+          {
+            githubToken: process.env.GITHUB_TOKEN,
+            skipTimestampCheck: !process.env.GITHUB_TOKEN, // only run if token available
+            skipBuildLogCheck: !process.env.GITHUB_TOKEN,
+          }
+        );
+        // Merge high-severity provenance findings into the manifest analysis
+        for (const pf of provenanceResult.findings) {
+          if (pf.severity === "high" || pf.severity === "critical") {
+            manifestAnalysis.findings.push({
+              category: "wheelNativeBinary",
+              severity: pf.severity,
+              title: pf.title,
+              description: pf.description,
+              filePath: provenanceResult.wheelFilename ?? request.packageName,
+              evidence: JSON.stringify(pf.evidence),
+              recommendation: pf.recommendation,
+            });
+          }
+        }
+      } catch (err) {
+        console.warn(
+          "[BinShield] pypi wheel provenance attestation failed (non-fatal):",
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+
     this.services.cache.set({
       cacheKey,
       artifactHashes,
