@@ -884,6 +884,19 @@ export {
 } from "./manifest-correlator";
 
 // ---------------------------------------------------------------------------
+// Re-export the live GitHub profiler so consumers can import from one place.
+// ---------------------------------------------------------------------------
+export {
+  GitHubRepositoryProfiler,
+  GitHubProfilerError,
+  type GitHubMaintenanceSignals,
+  type GitHubRepositoryProfile,
+  type GitHubProfilerOptions,
+  type GitHubFetchFn,
+  type GitHubFetchResponse,
+} from "./github-profiler";
+
+// ---------------------------------------------------------------------------
 // Re-export named analyzer classes so consumers can use them individually.
 // ---------------------------------------------------------------------------
 export {
