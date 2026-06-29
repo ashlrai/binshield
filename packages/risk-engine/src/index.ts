@@ -166,10 +166,32 @@ export function epssBoost(epss?: EpssContext): number {
   return 0;
 }
 
+/**
+ * Optional behavior-correlation context passed to scoreBinary.
+ *
+ * When the behavior-correlation analyzer detects a coordinated attack profile
+ * (e.g. Injection+Spawn, Exfil+C2, Persistence+Wiper, CryptoStealing) the
+ * risk engine applies a flat +10 pt boost to reflect the elevated threat level
+ * of multi-technique coordinated attacks versus single-signal detections.
+ */
+export interface BehaviorCorrelationContext {
+  /** True when at least one coordinated attack profile fired with confidence > 0.7. */
+  correlatedProfileDetected: boolean;
+}
+
+/**
+ * Compute the behavior-correlation risk boost (0 or 10).
+ * Returns 10 when a coordinated attack profile was detected, 0 otherwise.
+ */
+export function behaviorCorrelationBoost(correlation?: BehaviorCorrelationContext): number {
+  return correlation?.correlatedProfileDetected ? 10 : 0;
+}
+
 export function scoreBinary(
   binary: Pick<BinaryAnalysis, "behaviors" | "findings" | "importCount" | "functionCount">,
   epss?: EpssContext,
-  kev?: CisaKevContext
+  kev?: CisaKevContext,
+  correlation?: BehaviorCorrelationContext
 ) {
   const baseScore =
     scoreFindings(binary.findings) +
@@ -177,7 +199,9 @@ export function scoreBinary(
     Math.min(binary.importCount / 4, 6) +
     Math.min(binary.functionCount / 20, 5);
 
-  const score = normalizeRisk(baseScore + epssBoost(epss) + cisaKevBoost(kev));
+  const score = normalizeRisk(
+    baseScore + epssBoost(epss) + cisaKevBoost(kev) + behaviorCorrelationBoost(correlation)
+  );
 
   return {
     riskScore: score,

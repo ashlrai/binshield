@@ -5,3 +5,4 @@
 export { YaraAnalyzer } from "./yara-analyzer.js";
 export { HeuristicPatternAnalyzer } from "./heuristic-pattern-analyzer.js";
 export { StringSignatureAnalyzer } from "./string-signature-analyzer.js";
+export { BehaviorCorrelationAnalyzer } from "./behavior-correlation-analyzer.js";
