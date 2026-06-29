@@ -285,7 +285,10 @@ export class PyPiPackageSource implements PackageAcquisitionService {
             // wheel-binary analysis failure is non-fatal — fall through to error
           }
           if (wheelBinaryAnalysis) {
-            await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+            // NOTE: do NOT rm(tempRoot) here — we return it as packageRoot below,
+            // and deleting it would leave downstream consumers with an ENOENT
+            // (use-after-delete). The temp dir must survive until the caller is
+            // done; cleanup is the caller's responsibility.
             const manifest: PackageManifest = {
               name: request.packageName,
               version: request.version,
