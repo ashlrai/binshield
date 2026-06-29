@@ -148,31 +148,37 @@ describe("EpssDailyRateLimiter", () => {
     expect(limiter.requestCount).toBe(5);
   });
 
-  it("calls sleep when window is full", async () => {
-    const sleepSpy = vi.fn().mockResolvedValue(undefined);
+  it("calls sleep when window is full, then proceeds once the window clears", async () => {
+    // acquire() recurses while the window is full, waiting `windowMs` of REAL
+    // wall-clock time between attempts (it filters timestamps by Date.now()).
+    // A naive no-op sleep never advances the clock, so the recursion would
+    // never terminate and would OOM. We drive a fake clock forward inside the
+    // sleep stub so the window genuinely clears, exercising both the
+    // rate-limited path and the eventual success — deterministically.
+    vi.useFakeTimers();
+    try {
+      const windowMs = 60_000;
+      const limiter = new EpssDailyRateLimiter(1, windowMs);
 
-    // 1-request window that fills immediately
-    const limiter = new EpssDailyRateLimiter(1, 60_000);
-    await limiter.acquire(sleepSpy); // fills the window
+      // Advance the fake clock by however long acquire() asked us to wait.
+      const sleepSpy = vi.fn(async (ms: number) => {
+        vi.advanceTimersByTime(ms);
+      });
 
-    // Second acquire should call sleep at least once, then succeed
-    // (after the spy resolves, timestamps reset via the filter logic in a real
-    // scenario; here we just verify sleep was called)
-    // To avoid infinite loop in test, override with a noop after first call:
-    sleepSpy.mockResolvedValue(undefined);
+      await limiter.acquire(sleepSpy); // fills the 1-slot window
+      expect(sleepSpy).not.toHaveBeenCalled();
 
-    // Stamp the window as expired manually by clearing internal timestamps
-    // — we verify sleep is called once (rate limited path entered)
-    const callsBefore = sleepSpy.mock.calls.length;
-    // The second acquire will call sleep because the window is still full
-    // (no real time has passed). We immediately resolve with noop.
-    const acquirePromise = limiter.acquire(sleepSpy);
-    await acquirePromise.catch(() => {
-      /* ignore — this might loop in a real clock; we abort via the mock */
-    });
+      // Second acquire: window is full → must sleep at least once, then (after
+      // the clock advances past windowMs) succeed without infinite recursion.
+      await limiter.acquire(sleepSpy);
 
-    // Sleep must have been called at least once
-    expect(sleepSpy.mock.calls.length).toBeGreaterThanOrEqual(callsBefore);
+      expect(sleepSpy).toHaveBeenCalledTimes(1);
+      expect(sleepSpy.mock.calls[0]![0]).toBeGreaterThanOrEqual(windowMs);
+      // The earlier timestamp has aged out of the window; exactly one slot used.
+      expect(limiter.requestCount).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

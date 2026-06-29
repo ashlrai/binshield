@@ -125,17 +125,28 @@ export class EpssDailyRateLimiter {
    * In tests the injected sleep is a no-op so this resolves immediately.
    */
   async acquire(sleep: (ms: number) => Promise<void>): Promise<void> {
-    const now = Date.now();
-    this.timestamps = this.timestamps.filter((t) => now - t < this.windowMs);
+    // Iterative (not recursive) so a misbehaving clock or no-op sleep cannot
+    // grow an unbounded promise chain / blow the heap. A guard cap converts a
+    // pathological non-advancing clock into a thrown error instead of an OOM.
+    const MAX_WAITS = 10_000;
+    for (let waits = 0; waits < MAX_WAITS; waits++) {
+      const now = Date.now();
+      this.timestamps = this.timestamps.filter((t) => now - t < this.windowMs);
 
-    if (this.timestamps.length >= this.maxRequests) {
+      if (this.timestamps.length < this.maxRequests) {
+        this.timestamps.push(Date.now());
+        return;
+      }
+
       const oldestInWindow = this.timestamps[0]!;
       const waitMs = this.windowMs - (now - oldestInWindow) + 150;
       await sleep(waitMs);
-      return this.acquire(sleep);
     }
 
-    this.timestamps.push(Date.now());
+    throw new Error(
+      `EpssDailyRateLimiter.acquire: exceeded ${MAX_WAITS} wait iterations ` +
+        `without acquiring a slot (clock not advancing?)`
+    );
   }
 
   /** Current number of recorded requests in the window (for testing). */
