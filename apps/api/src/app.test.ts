@@ -1,7 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createApp } from "./app";
 import { app } from "./app";
+import {
+  fetchNpmMetadata,
+  fetchPypiMetadata,
+  parseCycloneDxSbom,
+  parseLockfile,
+  verifySbomProvenance,
+} from "./lib/sbom-provenance-checker";
 
 const headers = {
   "Content-Type": "application/json",
@@ -424,5 +431,460 @@ describe("exploit-activity endpoint", () => {
     for (const v of body.affected_versions as string[]) {
       expect(typeof v).toBe("string");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SBOM Provenance Checker — unit tests
+// ---------------------------------------------------------------------------
+
+/** Minimal valid CycloneDX SBOM with one npm component. */
+function makeSbom(components: object[]): string {
+  return JSON.stringify({
+    bomFormat: "CycloneDX",
+    specVersion: "1.5",
+    serialNumber: "urn:uuid:test",
+    version: 1,
+    components,
+  });
+}
+
+/** Factory for a mock npm registry response. */
+function npmMeta(name: string, version: string, opts: {
+  integrity?: string;
+  shasum?: string;
+  deprecated?: string;
+} = {}) {
+  return {
+    name,
+    versions: {
+      [version]: {
+        dist: {
+          tarball: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`,
+          shasum: opts.shasum ?? "aabbcc",
+          integrity: opts.integrity,
+        },
+        deprecated: opts.deprecated,
+      },
+    },
+    time: { [version]: new Date().toISOString() },
+  };
+}
+
+/** Factory for a mock PyPI registry response. */
+function pypiMeta(name: string, version: string, opts: {
+  sha256?: string;
+  yanked?: boolean;
+  yanked_reason?: string;
+} = {}) {
+  return {
+    info: { name, version },
+    releases: {
+      [version]: [
+        {
+          digests: { md5: "md5hash", sha256: opts.sha256 ?? "abc123" },
+          url: `https://files.pythonhosted.org/${name}-${version}.tar.gz`,
+          yanked: opts.yanked ?? false,
+          yanked_reason: opts.yanked_reason ?? null,
+        },
+      ],
+    },
+  };
+}
+
+describe("parseCycloneDxSbom", () => {
+  it("extracts npm components by purl", () => {
+    const sbom = makeSbom([
+      {
+        type: "library",
+        "bom-ref": "pkg:npm/lodash@4.17.21",
+        name: "lodash",
+        purl: "pkg:npm/lodash@4.17.21",
+        hashes: [{ alg: "SHA-256", content: "sha256-lodash" }],
+      },
+    ]);
+    const deps = parseCycloneDxSbom(sbom, "npm");
+    expect(deps).toHaveLength(1);
+    expect(deps[0]!.packageName).toBe("lodash");
+    expect(deps[0]!.version).toBe("4.17.21");
+    expect(deps[0]!.sbomHash).toBe("sha256-lodash");
+  });
+
+  it("filters out non-matching ecosystem purls", () => {
+    const sbom = makeSbom([
+      { type: "library", purl: "pkg:pypi/requests@2.28.0" },
+    ]);
+    const deps = parseCycloneDxSbom(sbom, "npm");
+    expect(deps).toHaveLength(0);
+  });
+
+  it("throws on invalid JSON", () => {
+    expect(() => parseCycloneDxSbom("not-json", "npm")).toThrow("not valid JSON");
+  });
+
+  it("throws on non-CycloneDX format", () => {
+    expect(() => parseCycloneDxSbom(JSON.stringify({ bomFormat: "SPDX" }), "npm")).toThrow("Unsupported SBOM format");
+  });
+
+  it("handles scoped npm packages", () => {
+    const sbom = makeSbom([
+      { type: "library", purl: "pkg:npm/%40types/node@18.0.0" },
+    ]);
+    const deps = parseCycloneDxSbom(sbom, "npm");
+    expect(deps).toHaveLength(1);
+  });
+
+  it("returns empty array when no components present", () => {
+    const sbom = makeSbom([]);
+    const deps = parseCycloneDxSbom(sbom, "npm");
+    expect(deps).toHaveLength(0);
+  });
+});
+
+describe("parseLockfile", () => {
+  it("parses package-lock.json v2 packages section", () => {
+    const lock = JSON.stringify({
+      name: "my-app",
+      lockfileVersion: 2,
+      packages: {
+        "": { name: "my-app", version: "1.0.0" },
+        "node_modules/lodash": {
+          version: "4.17.21",
+          resolved: "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
+          integrity: "sha512-v2kDE...",
+        },
+      },
+    });
+    const deps = parseLockfile(lock, "npm");
+    expect(deps.some((d) => d.packageName === "lodash" && d.version === "4.17.21")).toBe(true);
+    const lodash = deps.find((d) => d.packageName === "lodash")!;
+    expect(lodash.resolvedUrl).toContain("registry.npmjs.org");
+    expect(lodash.sbomHash).toBe("sha512-v2kDE...");
+  });
+
+  it("returns empty for pypi ecosystem", () => {
+    const lock = JSON.stringify({ packages: {} });
+    expect(parseLockfile(lock, "pypi")).toHaveLength(0);
+  });
+});
+
+describe("verifySbomProvenance — npm", () => {
+  it("passes when registry hash matches SBOM hash", async () => {
+    const integrity = "sha512-AAABBBCCC";
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => npmMeta("lodash", "4.17.21", { integrity }),
+    } as Response);
+
+    const sbom = makeSbom([
+      {
+        type: "library",
+        purl: "pkg:npm/lodash@4.17.21",
+        hashes: [{ alg: "SHA-256", content: integrity }],
+      },
+    ]);
+
+    const result = await verifySbomProvenance({ sbomText: sbom, packageFormat: "npm" }, mockFetch);
+    expect(result.isValid).toBe(true);
+    expect(result.riskLevel).toBe("none");
+    expect(result.checks[0]!.passed).toBe(true);
+  });
+
+  it("detects registry-mismatch (HIGH) when SBOM hash differs from registry", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => npmMeta("evil-package", "1.0.0", { integrity: "sha512-REGISTRY_HASH" }),
+    } as Response);
+
+    const sbom = makeSbom([
+      {
+        type: "library",
+        purl: "pkg:npm/evil-package@1.0.0",
+        hashes: [{ alg: "SHA-256", content: "sha512-TAMPERED_HASH" }],
+      },
+    ]);
+
+    const result = await verifySbomProvenance({ sbomText: sbom, packageFormat: "npm" }, mockFetch);
+    expect(result.isValid).toBe(false);
+    expect(result.checks[0]!.checkType).toBe("registry-mismatch");
+    expect(result.checks[0]!.severity).toBe("high");
+    expect(result.riskLevel).toBe("high");
+  });
+
+  it("detects yanked-version (HIGH) for unpublished package version", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        name: "old-package",
+        versions: {},   // no version entry → yanked/unpublished
+        time: {},
+      }),
+    } as Response);
+
+    const sbom = makeSbom([
+      { type: "library", purl: "pkg:npm/old-package@0.0.1" },
+    ]);
+
+    const result = await verifySbomProvenance({ sbomText: sbom, packageFormat: "npm" }, mockFetch);
+    expect(result.isValid).toBe(false);
+    expect(result.checks[0]!.checkType).toBe("yanked-version");
+    expect(result.checks[0]!.severity).toBe("high");
+  });
+
+  it("detects yanked-version when deprecated with security keyword", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => npmMeta("bad-pkg", "2.0.0", { deprecated: "yanked due to security vulnerability" }),
+    } as Response);
+
+    const sbom = makeSbom([
+      { type: "library", purl: "pkg:npm/bad-pkg@2.0.0" },
+    ]);
+
+    const result = await verifySbomProvenance({ sbomText: sbom, packageFormat: "npm" }, mockFetch);
+    expect(result.isValid).toBe(false);
+    expect(result.checks[0]!.checkType).toBe("yanked-version");
+    expect(result.checks[0]!.severity).toBe("high");
+  });
+
+  it("detects unresolved-dependency (MEDIUM) for non-canonical resolved URL", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => npmMeta("internal-pkg", "1.0.0"),
+    } as Response);
+
+    const lock = JSON.stringify({
+      lockfileVersion: 2,
+      packages: {
+        "node_modules/internal-pkg": {
+          version: "1.0.0",
+          resolved: "https://private.registry.internal/internal-pkg/-/internal-pkg-1.0.0.tgz",
+          integrity: "sha512-localHash",
+        },
+      },
+    });
+
+    const sbom = makeSbom([
+      { type: "library", purl: "pkg:npm/internal-pkg@1.0.0" },
+    ]);
+
+    const result = await verifySbomProvenance(
+      { sbomText: sbom, packageFormat: "npm", lockfileContent: lock },
+      mockFetch
+    );
+    expect(result.isValid).toBe(false);
+    const check = result.checks.find((c) => c.packageName === "internal-pkg");
+    expect(check!.checkType).toBe("unresolved-dependency");
+    expect(check!.severity).toBe("medium");
+  });
+
+  it("handles offline registry gracefully (unresolved-dependency)", async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error("fetch failed: ECONNREFUSED"));
+
+    const sbom = makeSbom([
+      { type: "library", purl: "pkg:npm/some-package@1.2.3" },
+    ]);
+
+    const result = await verifySbomProvenance({ sbomText: sbom, packageFormat: "npm" }, mockFetch);
+    expect(result.isValid).toBe(false);
+    expect(result.checks[0]!.checkType).toBe("unresolved-dependency");
+    expect(result.checks[0]!.severity).toBe("medium");
+  });
+
+  it("returns empty checks for SBOM with no components", async () => {
+    const mockFetch = vi.fn();
+    const sbom = makeSbom([]);
+    const result = await verifySbomProvenance({ sbomText: sbom, packageFormat: "npm" }, mockFetch);
+    expect(result.isValid).toBe(true);
+    expect(result.checks).toHaveLength(0);
+    expect(result.riskLevel).toBe("none");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("verifySbomProvenance — pypi", () => {
+  it("passes when PyPI sha256 matches SBOM hash", async () => {
+    const sha256 = "deadbeefcafe1234";
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => pypiMeta("requests", "2.28.0", { sha256 }),
+    } as Response);
+
+    const sbom = makeSbom([
+      {
+        type: "library",
+        purl: "pkg:pypi/requests@2.28.0",
+        hashes: [{ alg: "SHA-256", content: sha256 }],
+      },
+    ]);
+
+    const result = await verifySbomProvenance({ sbomText: sbom, packageFormat: "pypi" }, mockFetch);
+    expect(result.isValid).toBe(true);
+    expect(result.checks[0]!.passed).toBe(true);
+  });
+
+  it("detects yanked PyPI package version", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => pypiMeta("dangerous-lib", "0.1.0", {
+        yanked: true,
+        yanked_reason: "Contains malicious code",
+      }),
+    } as Response);
+
+    const sbom = makeSbom([
+      { type: "library", purl: "pkg:pypi/dangerous-lib@0.1.0" },
+    ]);
+
+    const result = await verifySbomProvenance({ sbomText: sbom, packageFormat: "pypi" }, mockFetch);
+    expect(result.isValid).toBe(false);
+    expect(result.checks[0]!.checkType).toBe("yanked-version");
+    expect(result.checks[0]!.severity).toBe("high");
+    expect(result.checks[0]!.detail).toContain("yanked");
+  });
+
+  it("detects registry-mismatch for PyPI tampered hash", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => pypiMeta("tampered-lib", "1.0.0", { sha256: "realregistryhash" }),
+    } as Response);
+
+    const sbom = makeSbom([
+      {
+        type: "library",
+        purl: "pkg:pypi/tampered-lib@1.0.0",
+        hashes: [{ alg: "SHA-256", content: "modifiedhash" }],
+      },
+    ]);
+
+    const result = await verifySbomProvenance({ sbomText: sbom, packageFormat: "pypi" }, mockFetch);
+    expect(result.isValid).toBe(false);
+    expect(result.checks[0]!.checkType).toBe("registry-mismatch");
+    expect(result.checks[0]!.severity).toBe("high");
+  });
+
+  it("handles offline PyPI registry gracefully", async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error("Network error"));
+
+    const sbom = makeSbom([
+      { type: "library", purl: "pkg:pypi/offline-package@3.0.0" },
+    ]);
+
+    const result = await verifySbomProvenance({ sbomText: sbom, packageFormat: "pypi" }, mockFetch);
+    expect(result.isValid).toBe(false);
+    expect(result.checks[0]!.checkType).toBe("unresolved-dependency");
+    expect(result.riskLevel).toBe("medium");
+  });
+});
+
+describe("POST /sbom/verify-provenance endpoint", () => {
+  it("returns 400 for missing sbomText", async () => {
+    const res = await app.request("/sbom/verify-provenance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ packageFormat: "npm" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("sbomText");
+  });
+
+  it("returns 400 for invalid packageFormat", async () => {
+    const sbom = makeSbom([]);
+    const res = await app.request("/sbom/verify-provenance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sbomText: sbom, packageFormat: "rubygems" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("packageFormat");
+  });
+
+  it("returns 400 for non-CycloneDX SBOM", async () => {
+    const res = await app.request("/sbom/verify-provenance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sbomText: JSON.stringify({ bomFormat: "SPDX" }),
+        packageFormat: "npm",
+      }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 for invalid JSON body", async () => {
+    const res = await app.request("/sbom/verify-provenance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "not json at all",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns valid provenance result for an SBOM with no components", async () => {
+    const sbom = makeSbom([]);
+    const res = await app.request("/sbom/verify-provenance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sbomText: sbom, packageFormat: "npm" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      isValid: boolean;
+      checks: unknown[];
+      riskLevel: string;
+      recommendations: string[];
+    };
+    expect(typeof body.isValid).toBe("boolean");
+    expect(Array.isArray(body.checks)).toBe(true);
+    expect(typeof body.riskLevel).toBe("string");
+    expect(Array.isArray(body.recommendations)).toBe(true);
+  });
+
+  it("returns 400 for lockfileContent that is not a string", async () => {
+    const sbom = makeSbom([]);
+    const res = await app.request("/sbom/verify-provenance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sbomText: sbom, packageFormat: "npm", lockfileContent: 42 }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("lockfileContent");
+  });
+});
+
+describe("fetchNpmMetadata + fetchPypiMetadata helpers", () => {
+  it("fetchNpmMetadata returns null on 404", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 404 } as Response);
+    const result = await fetchNpmMetadata("nonexistent-pkg", mockFetch);
+    expect(result).toBeNull();
+  });
+
+  it("fetchNpmMetadata returns null on network error", async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    const result = await fetchNpmMetadata("some-pkg", mockFetch);
+    expect(result).toBeNull();
+  });
+
+  it("fetchPypiMetadata returns null on 404", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 404 } as Response);
+    const result = await fetchPypiMetadata("nonexistent", "1.0.0", mockFetch);
+    expect(result).toBeNull();
+  });
+
+  it("fetchPypiMetadata returns null on network error", async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error("timeout"));
+    const result = await fetchPypiMetadata("some-lib", "2.0.0", mockFetch);
+    expect(result).toBeNull();
   });
 });

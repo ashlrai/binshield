@@ -12,6 +12,7 @@ import { rateLimitByIp, rateLimitByAuth } from "./lib/rate-limit";
 import { createServices } from "./lib/repository";
 import type { AppServices } from "./lib/repository";
 import { generateCycloneDxSbom } from "./lib/sbom";
+import { verifySbomProvenance } from "./lib/sbom-provenance-checker";
 import type { AuthPrincipal, Ecosystem, PackageAnalysis, SuppressionSummary } from "./lib/types";
 import { detectLockfileFormat, validateEcosystem, validateReportType } from "./lib/validation";
 
@@ -1478,6 +1479,88 @@ export function createApp(services = createServices(readApiEnv())) {
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : "Webhook processing failed" }, 400);
     }
+  });
+
+  // -----------------------------------------------------------------------
+  // SBOM Provenance Verification — supply-chain resilience checks
+  // POST /sbom/verify-provenance
+  //
+  // Accepts a CycloneDX SBOM and optional lockfile, fetches authoritative
+  // registry metadata for every dependency, and returns per-package
+  // provenance checks: registry-mismatch (HIGH), yanked-version (HIGH),
+  // unresolved-dependency (MEDIUM).
+  // -----------------------------------------------------------------------
+
+  app.post("/sbom/verify-provenance", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ error: "Request body must be a JSON object" }, 400);
+    }
+
+    const { sbomText, packageFormat, lockfileContent } = body as {
+      sbomText?: unknown;
+      packageFormat?: unknown;
+      lockfileContent?: unknown;
+    };
+
+    if (typeof sbomText !== "string" || sbomText.trim().length === 0) {
+      return c.json({ error: "Missing required field: sbomText (non-empty string)" }, 400);
+    }
+
+    if (packageFormat !== "npm" && packageFormat !== "pypi") {
+      return c.json({ error: "packageFormat must be 'npm' or 'pypi'" }, 400);
+    }
+
+    if (lockfileContent !== undefined && typeof lockfileContent !== "string") {
+      return c.json({ error: "lockfileContent must be a string if provided" }, 400);
+    }
+
+    // Size guard: 10 MB hard limit across sbomText + lockfileContent
+    const totalSize = sbomText.length + (typeof lockfileContent === "string" ? lockfileContent.length : 0);
+    if (totalSize > 10 * 1024 * 1024) {
+      return c.json({ error: "Combined sbomText + lockfileContent exceeds 10 MB limit" }, 413);
+    }
+
+    let result;
+    try {
+      result = await verifySbomProvenance({
+        sbomText,
+        packageFormat,
+        lockfileContent: typeof lockfileContent === "string" ? lockfileContent : undefined,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Provenance verification failed";
+      return c.json({ error: message }, 400);
+    }
+
+    // Persist to sbom_provenance_audit_log (fire-and-forget, Supabase only)
+    const { env } = getServices(c);
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      const baseUrl = env.supabaseUrl.replace(/\/$/, "");
+      fetch(`${baseUrl}/rest/v1/sbom_provenance_audit_log`, {
+        method: "POST",
+        headers: {
+          apikey: env.supabaseServiceRoleKey,
+          authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+          "content-type": "application/json",
+          Prefer: "return=minimal",
+        },
+        body: JSON.stringify({
+          package_format: packageFormat,
+          is_valid: result.isValid,
+          check_count: result.checks.length,
+          failed_check_count: result.checks.filter((ch) => !ch.passed).length,
+          risk_level: result.riskLevel,
+          checks: result.checks,
+          recommendations: result.recommendations,
+          created_at: result.checkedAt,
+        }),
+      }).catch((err) => {
+        console.error("[BinShield] Failed to persist provenance audit log:", err instanceof Error ? err.message : err);
+      });
+    }
+
+    return c.json(result);
   });
 
   return app;

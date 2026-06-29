@@ -1,4 +1,62 @@
 export type Ecosystem = "npm" | "pypi";
+
+// ---------------------------------------------------------------------------
+// Supply-chain provenance types
+// ---------------------------------------------------------------------------
+
+/** Category of a supply-chain provenance check finding. */
+export type ProvenanceCheckType =
+  | "registry-mismatch"
+  | "unresolved-dependency"
+  | "yanked-version";
+
+/** A single provenance check result for one dependency. */
+export interface ProvenanceCheck {
+  /** Package name (e.g. "lodash" or "requests"). */
+  packageName: string;
+  /** Version string that appeared in the SBOM/lockfile. */
+  version: string;
+  /** Package ecosystem */
+  ecosystem: "npm" | "pypi";
+  /** Type of finding detected (undefined = no issue). */
+  checkType?: ProvenanceCheckType;
+  /** Severity mapped to the check type. */
+  severity?: "high" | "medium";
+  /** Whether this check passed (no issue found). */
+  passed: boolean;
+  /** Human-readable detail for the finding. */
+  detail: string;
+  /** SBOM-recorded integrity hash (purl/digest) if present. */
+  sbomHash?: string;
+  /** Registry-authoritative tarball hash for comparison. */
+  registryHash?: string;
+  /** Resolved URL recorded in the lockfile (may indicate a private registry). */
+  resolvedUrl?: string;
+  /** ISO timestamp when the registry metadata was fetched. */
+  checkedAt: string;
+}
+
+/** Aggregated result from the SBOM provenance verification endpoint. */
+export interface SbomProvenanceResult {
+  isValid: boolean;
+  checks: ProvenanceCheck[];
+  riskLevel: RiskLevel;
+  recommendations: string[];
+  checkedAt: string;
+}
+
+/** Persisted audit row shape for `sbom_provenance_audit_log`. */
+export interface SbomProvenanceAuditRow {
+  id: string;
+  packageFormat: "npm" | "pypi";
+  isValid: boolean;
+  checkCount: number;
+  failedCheckCount: number;
+  riskLevel: RiskLevel;
+  checks: ProvenanceCheck[];
+  recommendations: string[];
+  createdAt: string;
+}
 export type AnalysisStatus = "queued" | "analyzing" | "complete" | "failed";
 export type RiskLevel = "none" | "low" | "medium" | "high" | "critical";
 export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
