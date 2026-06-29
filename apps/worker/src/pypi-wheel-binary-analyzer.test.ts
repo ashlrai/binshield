@@ -32,8 +32,11 @@ import {
   detectWheelOnlyPackage,
   analyzeWheelBinaries,
   analyzeWheelOnlyPackage,
+  computeWheelBinaryFingerprint,
+  buildFingerprintData,
   type WheelAbiTag,
   type WheelBinaryAnalysis,
+  type WheelBinaryFingerprintData,
 } from "./pypi-wheel-binary-analyzer";
 
 import { SCRIPT_THREAT_CATEGORIES } from "@binshield/analysis-types";
@@ -815,6 +818,327 @@ describe("ScriptFinding wheelNativeBinary category", () => {
       expect(finding.title.length).toBeGreaterThan(0);
       expect(finding.recommendation.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. Binary fingerprinting — computeWheelBinaryFingerprint + helpers
+// ---------------------------------------------------------------------------
+
+describe("computeWheelBinaryFingerprint — fingerprint computation", () => {
+  it("returns a BinaryFingerprint with all required fields", async () => {
+    const elfContent = Buffer.alloc(128, 0);
+    elfContent[0] = 0x7f;
+    elfContent[1] = 0x45; // E
+    elfContent[2] = 0x4c; // L
+    elfContent[3] = 0x46; // F
+
+    const zipBuf = await buildZip([{ name: "mod.so", content: elfContent }]);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () =>
+          zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength),
+      })
+    );
+
+    const result = await analyzeWheelBinaries("modpkg", "1.0.0", {
+      packagetype: "bdist_wheel",
+      url: "https://files.example/mod.whl",
+      filename: "modpkg-1.0.0-cp311-cp311-linux_x86_64.whl",
+    });
+
+    expect(result.hasNativeExtensions).toBe(true);
+    expect(result.binaryFingerprints).toHaveLength(1);
+
+    const fpData = result.binaryFingerprints[0]!;
+    expect(fpData.ecosystem).toBe("pypi");
+    expect(fpData.packageName).toBe("modpkg");
+    expect(fpData.version).toBe("1.0.0");
+    expect(typeof fpData.fingerprint.sha256).toBe("string");
+    expect(fpData.fingerprint.hashAlgorithm).toBe("sha256");
+    expect(typeof fpData.fingerprint.importSig).toBe("string");
+    expect(typeof fpData.fingerprint.syscallSig).toBe("string");
+    expect(typeof fpData.fingerprint.ssdeepFuzzyHash).toBe("string");
+    expect(fpData.fingerprint.ssdeepFuzzyHash!.length).toBe(64);
+  });
+
+  it("produces an empty binaryFingerprints array for pure-Python wheels", async () => {
+    const zipBuf = await buildZip([
+      { name: "mypkg/__init__.py", content: Buffer.from("") },
+    ]);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () =>
+          zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength),
+      })
+    );
+
+    const result = await analyzeWheelBinaries("purepy", "2.0.0", {
+      packagetype: "bdist_wheel",
+      url: "https://files.example/purepy.whl",
+      filename: "purepy-2.0.0-py3-none-any.whl",
+    });
+
+    expect(result.hasNativeExtensions).toBe(false);
+    expect(result.binaryFingerprints).toHaveLength(0);
+  });
+
+  it("importSig is a 64-char hex string", async () => {
+    const elfContent = Buffer.alloc(64, 0);
+    elfContent[0] = 0x7f;
+    elfContent[1] = 0x45;
+    elfContent[2] = 0x4c;
+    elfContent[3] = 0x46;
+
+    const zipBuf = await buildZip([{ name: "lib.so", content: elfContent }]);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () =>
+          zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength),
+      })
+    );
+
+    const result = await analyzeWheelBinaries("libpkg", "1.0.0", {
+      packagetype: "bdist_wheel",
+      url: "https://files.example/lib.whl",
+      filename: "libpkg-1.0.0-cp311-cp311-linux_x86_64.whl",
+    });
+
+    expect(result.binaryFingerprints.length).toBeGreaterThan(0);
+    const sig = result.binaryFingerprints[0]!.fingerprint.importSig;
+    expect(sig).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("syscallSig is a 64-char hex string", async () => {
+    const elfContent = Buffer.alloc(64, 0);
+    elfContent[0] = 0x7f;
+    elfContent[1] = 0x45;
+    elfContent[2] = 0x4c;
+    elfContent[3] = 0x46;
+
+    const zipBuf = await buildZip([{ name: "syscall.so", content: elfContent }]);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () =>
+          zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength),
+      })
+    );
+
+    const result = await analyzeWheelBinaries("syscallpkg", "1.0.0", {
+      packagetype: "bdist_wheel",
+      url: "https://files.example/syscall.whl",
+      filename: "syscallpkg-1.0.0-cp311-cp311-linux_x86_64.whl",
+    });
+
+    expect(result.binaryFingerprints.length).toBeGreaterThan(0);
+    const sig = result.binaryFingerprints[0]!.fingerprint.syscallSig;
+    expect(sig).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("two identical binaries produce identical fingerprint signals", async () => {
+    const elfContent = Buffer.alloc(128, 0xab);
+    elfContent[0] = 0x7f;
+    elfContent[1] = 0x45;
+    elfContent[2] = 0x4c;
+    elfContent[3] = 0x46;
+
+    const zipBuf = await buildZip([{ name: "clone.so", content: elfContent }]);
+    const makeResponse = () => ({
+      ok: true,
+      arrayBuffer: async () =>
+        zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength),
+    });
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(makeResponse()));
+    const result1 = await analyzeWheelBinaries("pkga", "1.0.0", {
+      packagetype: "bdist_wheel",
+      url: "https://files.example/pkga.whl",
+      filename: "pkga-1.0.0-cp311-cp311-linux_x86_64.whl",
+    });
+    vi.restoreAllMocks();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(makeResponse()));
+    const result2 = await analyzeWheelBinaries("pkgb", "2.0.0", {
+      packagetype: "bdist_wheel",
+      url: "https://files.example/pkgb.whl",
+      filename: "pkgb-2.0.0-cp311-cp311-linux_x86_64.whl",
+    });
+
+    expect(result1.binaryFingerprints.length).toBe(1);
+    expect(result2.binaryFingerprints.length).toBe(1);
+
+    const fp1 = result1.binaryFingerprints[0]!.fingerprint;
+    const fp2 = result2.binaryFingerprints[0]!.fingerprint;
+
+    // Identical binary bytes → identical similarity signals
+    expect(fp1.importSig).toBe(fp2.importSig);
+    expect(fp1.syscallSig).toBe(fp2.syscallSig);
+    expect(fp1.ssdeepFuzzyHash).toBe(fp2.ssdeepFuzzyHash);
+  });
+
+  it("buildFingerprintData sets ecosystem=pypi and normalises packageName", async () => {
+    const elfContent = Buffer.alloc(64, 0);
+    elfContent[0] = 0x7f; elfContent[1] = 0x45; elfContent[2] = 0x4c; elfContent[3] = 0x46;
+
+    const zipBuf = await buildZip([{ name: "ext.so", content: elfContent }]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () =>
+        zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength),
+    }));
+
+    const result = await analyzeWheelBinaries("MyPkg", "3.1.0", {
+      packagetype: "bdist_wheel",
+      url: "https://files.example/mypkg.whl",
+      filename: "MyPkg-3.1.0-cp311-cp311-linux_x86_64.whl",
+    });
+
+    expect(result.binaryFingerprints.length).toBeGreaterThan(0);
+    const fpd = result.binaryFingerprints[0]!;
+    expect(fpd.ecosystem).toBe("pypi");
+    // packageName should be lowercased
+    expect(fpd.packageName).toBe("mypkg");
+    expect(fpd.version).toBe("3.1.0");
+    expect(typeof fpd.computedAt).toBe("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. Fuzzy matching & deduplication resilience
+// ---------------------------------------------------------------------------
+
+describe("binary fingerprint fuzzy-match resilience", () => {
+  it("two binaries differing only in one byte produce different sha256 but may share importSig", async () => {
+    // Build two binaries that are identical except for one non-significant byte
+    const mkElf = (fillByte: number) => {
+      const b = Buffer.alloc(128, fillByte);
+      b[0] = 0x7f; b[1] = 0x45; b[2] = 0x4c; b[3] = 0x46;
+      return b;
+    };
+
+    const makeZip = (content: Buffer) =>
+      buildZip([{ name: "mod.so", content }]);
+
+    const zip1 = await makeZip(mkElf(0xaa));
+    const zip2 = await makeZip(mkElf(0xbb));
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => zip1.buffer.slice(zip1.byteOffset, zip1.byteOffset + zip1.byteLength),
+    }));
+    const res1 = await analyzeWheelBinaries("pka", "1.0.0", {
+      packagetype: "bdist_wheel", url: "https://x/a.whl",
+      filename: "pka-1.0.0-cp311-cp311-linux_x86_64.whl",
+    });
+    vi.restoreAllMocks();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => zip2.buffer.slice(zip2.byteOffset, zip2.byteOffset + zip2.byteLength),
+    }));
+    const res2 = await analyzeWheelBinaries("pkb", "1.0.0", {
+      packagetype: "bdist_wheel", url: "https://x/b.whl",
+      filename: "pkb-1.0.0-cp311-cp311-linux_x86_64.whl",
+    });
+
+    // sha256 must differ (different bytes)
+    expect(res1.binaryFingerprints[0]!.fingerprint.sha256).not.toBe(
+      res2.binaryFingerprints[0]!.fingerprint.sha256
+    );
+    // Both have importSig and syscallSig as valid hex
+    expect(res1.binaryFingerprints[0]!.fingerprint.importSig).toMatch(/^[0-9a-f]{64}$/);
+    expect(res2.binaryFingerprints[0]!.fingerprint.importSig).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("multiple .so files in one wheel each get their own fingerprint entry", async () => {
+    const mkElf = (byte: number) => {
+      const b = Buffer.alloc(64, byte);
+      b[0] = 0x7f; b[1] = 0x45; b[2] = 0x4c; b[3] = 0x46;
+      return b;
+    };
+
+    const zipBuf = await buildZip([
+      { name: "ext1.so", content: mkElf(0x01) },
+      { name: "ext2.so", content: mkElf(0x02) },
+      { name: "ext3.so", content: mkElf(0x03) },
+    ]);
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () =>
+        zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength),
+    }));
+
+    const result = await analyzeWheelBinaries("multipkg", "1.0.0", {
+      packagetype: "bdist_wheel",
+      url: "https://files.example/multi.whl",
+      filename: "multipkg-1.0.0-cp311-cp311-linux_x86_64.whl",
+    });
+
+    expect(result.nativeExtensions).toHaveLength(3);
+    expect(result.binaryFingerprints).toHaveLength(3);
+
+    // Each fingerprint entry should have a distinct binaryPath
+    const paths = result.binaryFingerprints.map((fp) => fp.binaryPath);
+    const uniquePaths = new Set(paths);
+    expect(uniquePaths.size).toBe(3);
+  });
+
+  it("fingerprint computedAt is a valid ISO timestamp", async () => {
+    const elfContent = Buffer.alloc(64, 0);
+    elfContent[0] = 0x7f; elfContent[1] = 0x45; elfContent[2] = 0x4c; elfContent[3] = 0x46;
+
+    const zipBuf = await buildZip([{ name: "ts.so", content: elfContent }]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () =>
+        zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength),
+    }));
+
+    const result = await analyzeWheelBinaries("tspkg", "1.0.0", {
+      packagetype: "bdist_wheel",
+      url: "https://files.example/ts.whl",
+      filename: "tspkg-1.0.0-cp311-cp311-linux_x86_64.whl",
+    });
+
+    expect(result.binaryFingerprints.length).toBeGreaterThan(0);
+    const ts = result.binaryFingerprints[0]!.computedAt;
+    expect(() => new Date(ts)).not.toThrow();
+    expect(new Date(ts).getFullYear()).toBeGreaterThan(2020);
+  });
+
+  it("fingerprint packageVersionKey follows pypi:<name>@<version> format", async () => {
+    const elfContent = Buffer.alloc(64, 0);
+    elfContent[0] = 0x7f; elfContent[1] = 0x45; elfContent[2] = 0x4c; elfContent[3] = 0x46;
+
+    const zipBuf = await buildZip([{ name: "key.so", content: elfContent }]);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () =>
+        zipBuf.buffer.slice(zipBuf.byteOffset, zipBuf.byteOffset + zipBuf.byteLength),
+    }));
+
+    const result = await analyzeWheelBinaries("keypkg", "4.2.1", {
+      packagetype: "bdist_wheel",
+      url: "https://files.example/key.whl",
+      filename: "keypkg-4.2.1-cp311-cp311-linux_x86_64.whl",
+    });
+
+    expect(result.binaryFingerprints.length).toBeGreaterThan(0);
+    const pvk = result.binaryFingerprints[0]!.fingerprint.packageVersionKey;
+    expect(pvk).toBe("pypi:keypkg@4.2.1");
   });
 });
 

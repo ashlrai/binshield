@@ -27,6 +27,7 @@ import type {
   WatchlistPackageSummary,
   WatchlistSummary
 } from "./types";
+import type { BinaryFingerprint } from "@binshield/analysis-types";
 import type { ApiEnv } from "./env";
 
 interface OrganizationRow {
@@ -251,6 +252,60 @@ function toSuppressionSummary(row: SuppressionRow): SuppressionSummary {
 }
 
 // ---------------------------------------------------------------------------
+// Binary fingerprint types for cross-package similarity clustering
+// ---------------------------------------------------------------------------
+
+/**
+ * Stored record for a single native binary fingerprint, linking a
+ * (ecosystem, packageName, version, binaryPath) coordinate to all
+ * computed similarity signals.
+ */
+export interface StoredBinaryFingerprint {
+  id: string;
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  binaryPath: string;
+  sha256: string;
+  importSig: string;
+  syscallSig: string;
+  ssdeepFuzzyHash: string;
+  computedAt: string;
+  createdAt: string;
+}
+
+/**
+ * Input shape for `storeBinaryFingerprint()`.
+ * Mirrors WheelBinaryFingerprintData from the worker but lives in the API
+ * layer to avoid a cross-package dependency cycle.
+ */
+export interface BinaryFingerprintInput {
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  binaryPath: string;
+  fingerprint: BinaryFingerprint;
+  computedAt: string;
+}
+
+/**
+ * A similar-binary match returned by `queryByFingerprints()`.
+ * Each entry represents a different (packageName, version) that shares one
+ * or more fingerprint signals with the queried binary.
+ */
+export interface SimilarBinaryMatch {
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  binaryPath: string;
+  sha256: string;
+  /** Number of fingerprint dimensions that matched (importSig, syscallSig, ssdeepFuzzyHash). */
+  matchScore: number;
+  /** Which signals matched ("importSig" | "syscallSig" | "ssdeepFuzzyHash"). */
+  matchedSignals: string[];
+}
+
+// ---------------------------------------------------------------------------
 // Failed scan queue types
 // ---------------------------------------------------------------------------
 
@@ -369,6 +424,29 @@ interface BaseRepository {
     }
   ): Promise<SuppressionSummary>;
   deleteSuppression(orgId: string, suppressionId: string): Promise<boolean>;
+
+  // Binary fingerprint similarity clustering
+  /**
+   * Persist a computed binary fingerprint for cross-package similarity lookup.
+   * Idempotent: re-inserting a fingerprint for the same (ecosystem, packageName,
+   * version, binaryPath) replaces the previous record.
+   */
+  storeBinaryFingerprint(fingerprintData: BinaryFingerprintInput): Promise<StoredBinaryFingerprint>;
+  /**
+   * Query the fingerprint store for binaries across the entire scanned corpus
+   * that share one or more similarity signals with the provided hash signatures.
+   *
+   * @param ecosystem  Ecosystem to search within (e.g. "pypi").
+   * @param hashSigs   Object containing one or more of: importSig, syscallSig,
+   *                   ssdeepFuzzyHash.  A binary is a match if it shares at
+   *                   least one non-empty signal value.
+   * @param limit      Maximum cluster size to return (default 50).
+   */
+  queryByFingerprints(
+    ecosystem: string,
+    hashSigs: { importSig?: string; syscallSig?: string; ssdeepFuzzyHash?: string },
+    limit?: number
+  ): Promise<SimilarBinaryMatch[]>;
 }
 
 function now() {
@@ -1309,6 +1387,93 @@ class LocalRepository implements BaseRepository {
   }
 
   // ---------------------------------------------------------------------------
+  // Binary fingerprint similarity clustering — in-memory implementation
+  // ---------------------------------------------------------------------------
+
+  private binaryFingerprints: StoredBinaryFingerprint[] = [];
+
+  async storeBinaryFingerprint(fingerprintData: BinaryFingerprintInput): Promise<StoredBinaryFingerprint> {
+    const key = `${fingerprintData.ecosystem}:${fingerprintData.packageName}@${fingerprintData.version}:${fingerprintData.binaryPath}`;
+    // Remove existing entry for this coordinate (upsert behaviour)
+    this.binaryFingerprints = this.binaryFingerprints.filter(
+      (fp) =>
+        !(fp.ecosystem === fingerprintData.ecosystem &&
+          fp.packageName === fingerprintData.packageName &&
+          fp.version === fingerprintData.version &&
+          fp.binaryPath === fingerprintData.binaryPath)
+    );
+    const row: StoredBinaryFingerprint = {
+      id: randomId("bfp"),
+      ecosystem: fingerprintData.ecosystem,
+      packageName: fingerprintData.packageName,
+      version: fingerprintData.version,
+      binaryPath: fingerprintData.binaryPath,
+      sha256: fingerprintData.fingerprint.sha256,
+      importSig: fingerprintData.fingerprint.importSig ?? "",
+      syscallSig: fingerprintData.fingerprint.syscallSig ?? "",
+      ssdeepFuzzyHash: fingerprintData.fingerprint.ssdeepFuzzyHash ?? "",
+      computedAt: fingerprintData.computedAt,
+      createdAt: now()
+    };
+    // Suppress unused-variable warning for key (used as documentation only)
+    void key;
+    this.binaryFingerprints.push(row);
+    return row;
+  }
+
+  async queryByFingerprints(
+    ecosystem: string,
+    hashSigs: { importSig?: string; syscallSig?: string; ssdeepFuzzyHash?: string },
+    limit = 50
+  ): Promise<SimilarBinaryMatch[]> {
+    const { importSig, syscallSig, ssdeepFuzzyHash } = hashSigs;
+
+    const matches: SimilarBinaryMatch[] = [];
+
+    for (const fp of this.binaryFingerprints) {
+      if (fp.ecosystem !== ecosystem) continue;
+
+      const matchedSignals: string[] = [];
+      if (importSig && importSig.length > 0 && fp.importSig === importSig) {
+        matchedSignals.push("importSig");
+      }
+      if (syscallSig && syscallSig.length > 0 && fp.syscallSig === syscallSig) {
+        matchedSignals.push("syscallSig");
+      }
+      if (ssdeepFuzzyHash && ssdeepFuzzyHash.length > 0 && fp.ssdeepFuzzyHash === ssdeepFuzzyHash) {
+        matchedSignals.push("ssdeepFuzzyHash");
+      }
+
+      if (matchedSignals.length > 0) {
+        matches.push({
+          ecosystem: fp.ecosystem,
+          packageName: fp.packageName,
+          version: fp.version,
+          binaryPath: fp.binaryPath,
+          sha256: fp.sha256,
+          matchScore: matchedSignals.length,
+          matchedSignals
+        });
+      }
+    }
+
+    // Sort by descending matchScore so highest-confidence matches come first,
+    // then deduplicate by (packageName, version, binaryPath) and enforce limit.
+    matches.sort((a, b) => b.matchScore - a.matchScore);
+    const seen = new Set<string>();
+    const deduped: SimilarBinaryMatch[] = [];
+    for (const m of matches) {
+      const dedupeKey = `${m.packageName}@${m.version}:${m.binaryPath}`;
+      if (!seen.has(dedupeKey)) {
+        seen.add(dedupeKey);
+        deduped.push(m);
+        if (deduped.length >= limit) break;
+      }
+    }
+    return deduped;
+  }
+
+  // ---------------------------------------------------------------------------
   // FailedScanQueue — in-memory implementation
   // ---------------------------------------------------------------------------
 
@@ -2196,6 +2361,107 @@ class SupabaseRepository implements BaseRepository {
     } catch {
       return false;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Binary fingerprint similarity clustering — Supabase implementation
+  // ---------------------------------------------------------------------------
+
+  async storeBinaryFingerprint(fingerprintData: BinaryFingerprintInput): Promise<StoredBinaryFingerprint> {
+    const rows = await this.request<Array<{
+      id: string; ecosystem: string; package_name: string; version: string;
+      binary_path: string; sha256: string; import_sig: string;
+      syscall_sig: string; ssdeep_fuzzy_hash: string;
+      computed_at: string; created_at: string;
+    }>>(`/binary_fingerprints?on_conflict=ecosystem,package_name,version,binary_path&select=*`, {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify({
+        ecosystem: fingerprintData.ecosystem,
+        package_name: fingerprintData.packageName,
+        version: fingerprintData.version,
+        binary_path: fingerprintData.binaryPath,
+        sha256: fingerprintData.fingerprint.sha256,
+        import_sig: fingerprintData.fingerprint.importSig ?? "",
+        syscall_sig: fingerprintData.fingerprint.syscallSig ?? "",
+        ssdeep_fuzzy_hash: fingerprintData.fingerprint.ssdeepFuzzyHash ?? "",
+        computed_at: fingerprintData.computedAt
+      })
+    });
+    const row = rows[0]!;
+    return {
+      id: row.id,
+      ecosystem: row.ecosystem,
+      packageName: row.package_name,
+      version: row.version,
+      binaryPath: row.binary_path,
+      sha256: row.sha256,
+      importSig: row.import_sig,
+      syscallSig: row.syscall_sig,
+      ssdeepFuzzyHash: row.ssdeep_fuzzy_hash,
+      computedAt: row.computed_at,
+      createdAt: row.created_at
+    };
+  }
+
+  async queryByFingerprints(
+    ecosystem: string,
+    hashSigs: { importSig?: string; syscallSig?: string; ssdeepFuzzyHash?: string },
+    limit = 50
+  ): Promise<SimilarBinaryMatch[]> {
+    const { importSig, syscallSig, ssdeepFuzzyHash } = hashSigs;
+
+    // Build an OR filter across the three signal columns
+    const orClauses: string[] = [];
+    if (importSig && importSig.length > 0) {
+      orClauses.push(`import_sig.eq.${encodeURIComponent(importSig)}`);
+    }
+    if (syscallSig && syscallSig.length > 0) {
+      orClauses.push(`syscall_sig.eq.${encodeURIComponent(syscallSig)}`);
+    }
+    if (ssdeepFuzzyHash && ssdeepFuzzyHash.length > 0) {
+      orClauses.push(`ssdeep_fuzzy_hash.eq.${encodeURIComponent(ssdeepFuzzyHash)}`);
+    }
+    if (orClauses.length === 0) return [];
+
+    const rows = await this.select<{
+      id: string; ecosystem: string; package_name: string; version: string;
+      binary_path: string; sha256: string; import_sig: string;
+      syscall_sig: string; ssdeep_fuzzy_hash: string;
+      computed_at: string; created_at: string;
+    }>(
+      "binary_fingerprints",
+      `select=*&ecosystem=eq.${encodeURIComponent(ecosystem)}&or=(${orClauses.join(",")})&order=created_at.desc&limit=${limit * 2}`
+    );
+
+    const matches: SimilarBinaryMatch[] = [];
+    const seen = new Set<string>();
+
+    for (const fp of rows) {
+      const matchedSignals: string[] = [];
+      if (importSig && importSig.length > 0 && fp.import_sig === importSig) matchedSignals.push("importSig");
+      if (syscallSig && syscallSig.length > 0 && fp.syscall_sig === syscallSig) matchedSignals.push("syscallSig");
+      if (ssdeepFuzzyHash && ssdeepFuzzyHash.length > 0 && fp.ssdeep_fuzzy_hash === ssdeepFuzzyHash) matchedSignals.push("ssdeepFuzzyHash");
+      if (matchedSignals.length === 0) continue;
+
+      const dedupeKey = `${fp.package_name}@${fp.version}:${fp.binary_path}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      matches.push({
+        ecosystem: fp.ecosystem,
+        packageName: fp.package_name,
+        version: fp.version,
+        binaryPath: fp.binary_path,
+        sha256: fp.sha256,
+        matchScore: matchedSignals.length,
+        matchedSignals
+      });
+      if (matches.length >= limit) break;
+    }
+
+    matches.sort((a, b) => b.matchScore - a.matchScore);
+    return matches;
   }
 
   // ---------------------------------------------------------------------------

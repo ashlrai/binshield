@@ -14,7 +14,7 @@ import { readApiEnv } from "./lib/env";
 import { requireFeature, requireRepoQuota, requireScanQuota, trackScanUsage } from "./lib/middleware";
 import { rateLimitByIp, rateLimitByAuth } from "./lib/rate-limit";
 import { createServices } from "./lib/repository";
-import type { AppServices, FailedScanEntry } from "./lib/repository";
+import type { AppServices, FailedScanEntry, SimilarBinaryMatch } from "./lib/repository";
 import { generateCycloneDxSbom } from "./lib/sbom";
 import { verifySbomProvenance } from "./lib/sbom-provenance-checker";
 import type { AuthPrincipal, Ecosystem, PackageAnalysis, SuppressionSummary } from "./lib/types";
@@ -351,6 +351,73 @@ export function createApp(services = createServices(readApiEnv())) {
     c.header("Content-Type", "application/json");
     c.header("Content-Disposition", `attachment; filename="sbom-${name}-${version}.cdx.json"`);
     return c.json(sbom);
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /packages/:ecosystem/:name/versions/:version/similar-binaries
+  //
+  // Returns wheels in the scanned corpus that share one or more binary
+  // fingerprint signals (importSig, syscallSig, ssdeepFuzzyHash) with the
+  // native binaries in the requested package version.
+  //
+  // Query params:
+  //   importSig       — SHA-256 of import/API symbol list to match against
+  //   syscallSig      — SHA-256 of attack-pattern IDs to match against
+  //   ssdeepFuzzyHash — rolling block hash to match against
+  //   limit           — max results to return (1–200, default 50)
+  //
+  // At least one of importSig, syscallSig, or ssdeepFuzzyHash must be provided.
+  // Results are sorted by descending matchScore (most signals matched first).
+  // -------------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/:name/versions/:version/similar-binaries", async (c) => {
+    const ecosystem = c.req.param("ecosystem");
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    const importSig = c.req.query("importSig");
+    const syscallSig = c.req.query("syscallSig");
+    const ssdeepFuzzyHash = c.req.query("ssdeepFuzzyHash");
+    const limitRaw = Number(c.req.query("limit") ?? 50);
+    const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
+
+    // At least one hash signal is required
+    if (!importSig && !syscallSig && !ssdeepFuzzyHash) {
+      return c.json(
+        {
+          error:
+            "At least one of importSig, syscallSig, or ssdeepFuzzyHash must be provided as a query parameter."
+        },
+        400
+      );
+    }
+
+    const { repository } = getServices(c);
+
+    // Verify the package/version exists (404 if not)
+    const analysis = await repository.getPackage(ecosystem as Parameters<typeof repository.getPackage>[0], name, version);
+    if (!analysis) {
+      return c.json({ error: "Analysis not found" }, 404);
+    }
+
+    const matches: SimilarBinaryMatch[] = await repository.queryByFingerprints(
+      ecosystem,
+      { importSig, syscallSig, ssdeepFuzzyHash },
+      limit
+    );
+
+    return c.json({
+      ecosystem,
+      packageName: name,
+      version,
+      queriedSignals: {
+        importSig: importSig ?? null,
+        syscallSig: syscallSig ?? null,
+        ssdeepFuzzyHash: ssdeepFuzzyHash ?? null
+      },
+      total: matches.length,
+      matches
+    });
   });
 
   app.get("/packages/:ecosystem/:name/diff", async (c) => {

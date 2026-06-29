@@ -164,6 +164,158 @@ export interface PythonBuildThreatDetails {
   suspiciousPatterns: string[];
 }
 
+// ---------------------------------------------------------------------------
+// PyPI native extension provenance types (pypi-extension-simulator)
+// ---------------------------------------------------------------------------
+
+/**
+ * Severity levels for extension-level findings (mirrors FindingSeverity but
+ * imported here to keep analysis-types self-contained).
+ */
+export type ExtensionFindingSeverity = "info" | "low" | "medium" | "high" | "critical";
+
+/** A single FFI call site found during Cython simulation. */
+export interface FfiCallSite {
+  /** Classification of the FFI mechanism. */
+  mechanism:
+    | "ctypes.WinDLL"
+    | "ctypes.CDLL"
+    | "ctypes.cdll"
+    | "cffi.dlopen"
+    | "cffi.cdef"
+    | "cdef extern"
+    | "cimport"
+    | "other";
+  /** The raw matched snippet (truncated). */
+  snippet: string;
+  /** Approximate line number containing the call. */
+  approximateLine?: number;
+  /** Human-readable description. */
+  description: string;
+  /** Assessed severity for this call site. */
+  severity: ExtensionFindingSeverity;
+}
+
+/** A cross-referenced risk finding produced by the Cython simulator. */
+export interface CythonRiskFinding {
+  title: string;
+  description: string;
+  evidence: string;
+  severity: ExtensionFindingSeverity;
+  /** MITRE ATT&CK technique identifier, if applicable. */
+  mitreAttack?: string;
+  recommendation: string;
+}
+
+/**
+ * Result of deep Cython simulation for a single .pyx / .pxd file.
+ *
+ * Produced by `simulateCythonFile()` in `pypi-extension-simulator.ts`.
+ * Extends basic CythonFileAnalysis with risk classification and
+ * cross-referenced FFI call categorisation.
+ */
+export interface CythonSimulationResult {
+  /** Relative path to the .pyx or .pxd file. */
+  filePath: string;
+  /** Every FFI call site identified (ctypes, cffi, cdef extern). */
+  ffiCallSites: FfiCallSite[];
+  /** Risk findings cross-referenced against the known-dangerous pattern library. */
+  riskFindings: CythonRiskFinding[];
+  /** Highest severity among all riskFindings, or "info" when none found. */
+  overallSeverity: ExtensionFindingSeverity;
+  /** Whether any Windows-specific DLL injection risk was detected. */
+  hasWindowsInjectionRisk: boolean;
+  /** Whether the file accesses credential/secret environment variables. */
+  hasCredentialAccess: boolean;
+  /** Whether the file performs any network socket operations. */
+  hasNetworkAccess: boolean;
+}
+
+/** A custom cmdclass entry in setup.py. */
+export interface CmdclassEntry {
+  /** Hook name (e.g. "install", "build_ext", "develop"). */
+  hookName: string;
+  /** Class name implementing the hook. */
+  className: string;
+  /** Whether the class body contains suspicious code patterns. */
+  isSuspicious: boolean;
+  /** Specific suspicious patterns found in the class body. */
+  suspiciousPatterns: string[];
+}
+
+/** A suspicious compiler/linker flag found in an Extension definition. */
+export interface CompilerFlagFinding {
+  flag: string;
+  riskDescription: string;
+  severity: ExtensionFindingSeverity;
+}
+
+/** A finding from the sandboxed setup.py execution simulation. */
+export interface SandboxFinding {
+  category:
+    | "env-theft"
+    | "network-call"
+    | "file-write-outside-build"
+    | "process-execution"
+    | "eval-exec"
+    | "dynamic-import"
+    | "credential-access";
+  description: string;
+  evidence: string;
+  severity: ExtensionFindingSeverity;
+  recommendation: string;
+}
+
+/**
+ * Result of deep setuptools / distutils hook extraction and analysis.
+ *
+ * Produced by `analyzeSetuptoolsHooks()` in `pypi-extension-simulator.ts`.
+ * Covers ext_modules, custom cmdclass entries, compiler flags, and sandboxed
+ * simulation of install-time code paths.
+ */
+export interface SetuptoolsHookAnalysis {
+  /** True when ext_modules are declared (C/Cython code compiled at install). */
+  hasExtModules: boolean;
+  /** Names of Extension objects found in ext_modules. */
+  extModuleNames: string[];
+  /** Custom cmdclass entries mapped to their class names. */
+  customCmdclassEntries: CmdclassEntry[];
+  /** Suspicious compiler/linker flags found in Extension definitions. */
+  suspiciousCompilerFlags: CompilerFlagFinding[];
+  /** Sensitive packages imported by custom build commands. */
+  buildCommandDependencies: string[];
+  /** Risk findings from the sandboxed simulation of install-time code paths. */
+  sandboxFindings: SandboxFinding[];
+  /** Highest severity among all findings. */
+  overallSeverity: ExtensionFindingSeverity;
+}
+
+/**
+ * Result of wheel provenance matching for a package that ships both sdist and
+ * compiled wheel distributions.
+ *
+ * Produced by `matchWheelProvenance()` in `pypi-extension-simulator.ts`.
+ */
+export interface WheelProvenanceResult {
+  packageName: string;
+  version: string;
+  /** Whether all wheel native binaries can be traced to sdist ext_modules. */
+  extensionModulesMatch: boolean;
+  /** Extension modules declared in the sdist build config. */
+  sdistDeclaredExtensions: string[];
+  /** Native binary filenames found in the wheel. */
+  wheelNativeBinaries: string[];
+  /**
+   * Wheel binaries that cannot be traced to a sdist ext_modules declaration
+   * ("Wheel binary origin unknown").
+   */
+  untracedWheelBinaries: string[];
+  /** True when the wheel ships more native binaries than the sdist declares. */
+  hasProvenanceMismatch: boolean;
+  summary: string;
+  severity: ExtensionFindingSeverity;
+}
+
 export interface ManifestAnalysis {
   id: string;
   ecosystem: Ecosystem;
@@ -207,6 +359,30 @@ export interface BinaryFingerprint {
   sha256: string;
   packageVersionKey: string;
   binaryKey: string;
+  /**
+   * Hash algorithm used for the cryptographic fingerprint.
+   * Currently always "sha256".
+   */
+  hashAlgorithm?: "sha256";
+  /**
+   * SHA-256 of the sorted, deduplicated import/API symbol names extracted from
+   * the binary (post-decompilation). Used for import-level similarity matching
+   * across packages that share the same malware payload.
+   */
+  importSig?: string;
+  /**
+   * SHA-256 of the sorted, deduplicated syscall sequence extracted from
+   * decompilation output (Rizin/Ghidra pseudocode comments). Used for
+   * syscall-pattern similarity matching.
+   */
+  syscallSig?: string;
+  /**
+   * ssdeep-style fuzzy hash of the binary content, represented as a
+   * 96-byte hex string (simulated via block-level rolling hash since
+   * ssdeep is not a native Node dependency). Enables approximate matching
+   * of variant malware payloads that differ by only a few bytes.
+   */
+  ssdeepFuzzyHash?: string;
 }
 
 /**
