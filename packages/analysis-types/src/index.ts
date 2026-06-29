@@ -128,7 +128,15 @@ export type ScriptThreatCategory =
    * match (copy/fork) or a fuzzy-hash similarity above the 85% threshold
    * (likely variant or backdoored fork).
    */
-  | "pypi_binary_repackaging";
+  | "pypi_binary_repackaging"
+  /**
+   * Cross-ecosystem name confusion detected: a package on npm and a package on
+   * PyPI share a highly similar or identical name (Jaro-Winkler / Levenshtein
+   * similarity >= 0.85), which attackers exploit by publishing a malicious
+   * package on one ecosystem knowing developers from the other might accidentally
+   * install it (e.g. `pip install left-pad` in a Python CI that also uses npm).
+   */
+  | "crossEcosystemConfusion";
 
 export interface ScriptFinding {
   category: ScriptThreatCategory;
@@ -801,7 +809,7 @@ export const SCRIPT_THREAT_KEYS: Array<keyof ScriptThreatSummary> = [
   "remoteCodeExecution"
 ];
 
-/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, pythonBinaryExtension, PyPI build-system categories, wheelNativeBinary, and pypi_binary_repackaging. */
+/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, pythonBinaryExtension, PyPI build-system categories, wheelNativeBinary, pypi_binary_repackaging, and crossEcosystemConfusion. */
 export const SCRIPT_THREAT_CATEGORIES: ScriptThreatCategory[] = [
   ...SCRIPT_THREAT_KEYS,
   "obfuscation",
@@ -810,7 +818,8 @@ export const SCRIPT_THREAT_CATEGORIES: ScriptThreatCategory[] = [
   "setupToolsHookExecution",
   "cythonBinaryExtension",
   "wheelNativeBinary",
-  "pypi_binary_repackaging"
+  "pypi_binary_repackaging",
+  "crossEcosystemConfusion"
 ];
 
 export function entitlementForPlan(plan: PlanName): EntitlementRecord {
