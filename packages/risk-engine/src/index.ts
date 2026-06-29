@@ -84,13 +84,41 @@ export function riskLevelFromScore(score: number): RiskLevel {
   return "none";
 }
 
-export function scoreBinary(binary: Pick<BinaryAnalysis, "behaviors" | "findings" | "importCount" | "functionCount">) {
-  const score = normalizeRisk(
+/**
+ * Optional EPSS context passed to scoreBinary / scoreManifest.
+ * When epssPercentile > 0.75 the engine boosts the risk score by 15–25 pts
+ * to reflect active real-world exploitation rather than theoretical severity.
+ *
+ * epssPercentile > 0.90 → +25 pt boost ("Exploited in the Wild")
+ * epssPercentile > 0.75 → +15 pt boost ("High real-world exploit activity")
+ */
+export interface EpssContext {
+  /** Highest EPSS percentile among all CVEs affecting this package/version [0,1] */
+  maxEpssPercentile: number;
+}
+
+/**
+ * Compute the EPSS risk boost (0 | 15 | 25) for a given EPSS context.
+ * Returns 0 when no context is provided or percentile is below threshold.
+ */
+export function epssBoost(epss?: EpssContext): number {
+  if (!epss) return 0;
+  if (epss.maxEpssPercentile > 0.9) return 25;
+  if (epss.maxEpssPercentile > 0.75) return 15;
+  return 0;
+}
+
+export function scoreBinary(
+  binary: Pick<BinaryAnalysis, "behaviors" | "findings" | "importCount" | "functionCount">,
+  epss?: EpssContext
+) {
+  const baseScore =
     scoreFindings(binary.findings) +
-      scoreBehaviors(binary.behaviors) +
-      Math.min(binary.importCount / 4, 6) +
-      Math.min(binary.functionCount / 20, 5)
-  );
+    scoreBehaviors(binary.behaviors) +
+    Math.min(binary.importCount / 4, 6) +
+    Math.min(binary.functionCount / 20, 5);
+
+  const score = normalizeRisk(baseScore + epssBoost(epss));
 
   return {
     riskScore: score,
@@ -102,13 +130,19 @@ export function scoreBinary(binary: Pick<BinaryAnalysis, "behaviors" | "findings
  * Score a manifest / install-script analysis. A confirmed known-malware match
  * forces a maximum-severity verdict — a package on a malware advisory must
  * never score "low" just because its visible script happened to look benign.
+ *
+ * Optional EPSS context boosts the score when the package's CVEs have a high
+ * real-world exploit probability (epssPercentile > 0.75 → +15 pts,
+ * epssPercentile > 0.90 → +25 pts).
  */
-export function scoreManifest(manifest: ManifestAnalysis): { riskScore: number; riskLevel: RiskLevel } {
+export function scoreManifest(manifest: ManifestAnalysis, epss?: EpssContext): { riskScore: number; riskLevel: RiskLevel } {
   if (manifest.knownMalwareAdvisoryIds.length > 0) {
     return { riskScore: 100, riskLevel: "critical" };
   }
 
-  const score = normalizeRisk(scoreScriptFindings(manifest.findings) + scoreScriptThreats(manifest.threats));
+  const score = normalizeRisk(
+    scoreScriptFindings(manifest.findings) + scoreScriptThreats(manifest.threats) + epssBoost(epss)
+  );
   return {
     riskScore: score,
     riskLevel: riskLevelFromScore(score)

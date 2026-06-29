@@ -133,6 +133,31 @@ export interface AdvisorySyncResult {
   sources: Record<string, number>;
 }
 
+export interface EpssScore {
+  cveId: string;
+  packageName: string;
+  ecosystem: string;
+  version: string;
+  epssScore: number;
+  epssPercentile: number;
+  modelVersion: string;
+  scoreDate: string;
+  updatedAt: string;
+  /** Badge shown when epssPercentile > 0.9 */
+  exploitedInTheWild?: boolean;
+}
+
+export interface RiskCorrelation {
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  cves: string[];
+  cvssScores: Array<{ cveId: string; cvssScore: number; severity?: string }>;
+  epssScores: EpssScore[];
+  /** Weighted composite risk 0–100: CVSS severity × EPSS exploit probability */
+  compositeExploitRisk: number;
+}
+
 export interface NotificationChannelSummary {
   id: string;
   orgId: string;

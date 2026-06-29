@@ -830,6 +830,46 @@ export function createApp(services = createServices(readApiEnv())) {
     return c.json({ items: advisories, total: advisories.length });
   });
 
+  // -----------------------------------------------------------------------
+  // Risk-correlation endpoint — EPSS + CVSS enrichment
+  // GET /packages/:ecosystem/:name/versions/:version/risk-correlation
+  // Returns: { cves, cvssScores[], epssScores[], compositeExploitRisk }
+  // -----------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/:name/versions/:version/risk-correlation", async (c) => {
+    const ecosystem = c.req.param("ecosystem") as Ecosystem;
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    const { env } = getServices(c);
+    if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
+      // In local/dev mode return a mock correlation based on seed data
+      const advisories = await getServices(c).repository.getPackageAdvisories(ecosystem, name);
+      const cves = [...new Set(
+        advisories
+          .map((a) => a.sourceId)
+          .filter((id) => id.toUpperCase().startsWith("CVE-"))
+      )];
+      const cvssScores = advisories
+        .filter((a) => a.cvssScore != null)
+        .map((a) => ({ cveId: a.sourceId, cvssScore: a.cvssScore!, severity: a.severity }));
+      const compositeExploitRisk = cvssScores.length > 0
+        ? Math.min(100, Math.round((Math.max(...cvssScores.map((c) => c.cvssScore)) / 10) * 100))
+        : 0;
+      return c.json({ ecosystem, packageName: name, version, cves, cvssScores, epssScores: [], compositeExploitRisk });
+    }
+
+    const advisoryService = new AdvisoryService({
+      supabaseUrl: env.supabaseUrl,
+      supabaseServiceRoleKey: env.supabaseServiceRoleKey,
+      githubToken: env.githubToken,
+      nvdApiKey: env.nvdApiKey
+    });
+
+    const correlation = await advisoryService.getRiskCorrelation(ecosystem, name, version);
+    return c.json(correlation);
+  });
+
   app.get("/advisories/recent", async (c) => {
     const limit = Math.min(Number(c.req.query("limit") ?? 50), 200);
     const advisories = await getServices(c).repository.getRecentAdvisories(limit);

@@ -1,4 +1,29 @@
-import type { Advisory, AdvisorySyncResult } from "./types";
+import type { Advisory, AdvisorySyncResult, EpssScore, RiskCorrelation } from "./types";
+
+// ---------------------------------------------------------------------------
+// EPSS feed row (FIRST / Cyentia CSV feed, JSON variant)
+// ---------------------------------------------------------------------------
+
+interface EpssFeedRow {
+  cve: string;
+  epss: string;
+  percentile: string;
+  date?: string;
+  model_version?: string;
+}
+
+interface EpssScoreRow {
+  id: string;
+  cve_id: string;
+  package_name: string;
+  ecosystem: string;
+  version: string;
+  epss_score: number;
+  epss_percentile: number;
+  model_version: string;
+  score_date: string;
+  updated_at: string;
+}
 
 // ---------------------------------------------------------------------------
 // Internal row types matching Supabase schema
@@ -713,5 +738,226 @@ export class AdvisoryService {
         patchedVersion: pa.patched_version ?? undefined
       }))
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // EPSS enrichment
+  // -------------------------------------------------------------------------
+
+  /**
+   * Fetch EPSS scores for a set of CVE IDs from the FIRST/Cyentia EPSS API
+   * (https://api.first.org/data/v1/epss) and upsert them into the
+   * `epss_scores` table keyed to the given package.
+   *
+   * The FIRST EPSS REST API accepts up to 100 CVE IDs per request and returns
+   * JSON — no auth required.
+   */
+  async syncEpssScores(
+    ecosystem: string,
+    packageName: string,
+    version: string,
+    cveIds: string[]
+  ): Promise<EpssScore[]> {
+    if (cveIds.length === 0) return [];
+
+    const feedRows = await this.fetchEpssFromApi(cveIds);
+    if (feedRows.length === 0) return [];
+
+    const today = new Date().toISOString().slice(0, 10);
+    const upsertRows = feedRows.map((row) => ({
+      cve_id: row.cve,
+      package_name: packageName,
+      ecosystem,
+      version,
+      epss_score: parseFloat(row.epss),
+      epss_percentile: parseFloat(row.percentile),
+      model_version: row.model_version ?? "",
+      score_date: row.date ?? today
+    }));
+
+    // Upsert — idempotent on (cve_id, package_name, ecosystem, version, score_date)
+    await this.dbRequest<void>(
+      "/epss_scores?on_conflict=cve_id,package_name,ecosystem,version,score_date",
+      {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify(upsertRows)
+      }
+    );
+
+    return this.mapEpssRows(
+      upsertRows.map((r, i) => ({
+        id: `epss_${i}`,
+        ...r,
+        updated_at: new Date().toISOString()
+      }))
+    );
+  }
+
+  /**
+   * Retrieve stored EPSS scores for a package version from the database.
+   */
+  async getEpssScores(ecosystem: string, packageName: string, version: string): Promise<EpssScore[]> {
+    const rows = await this.dbSelect<EpssScoreRow>(
+      "epss_scores",
+      `select=*&ecosystem=eq.${encodeURIComponent(ecosystem)}&package_name=eq.${encodeURIComponent(packageName)}&version=eq.${encodeURIComponent(version)}&order=epss_percentile.desc`
+    );
+    return this.mapEpssRows(rows);
+  }
+
+  /**
+   * Build a risk-correlation response for a specific package version:
+   * joins advisory CVE/CVSS data with live EPSS percentiles and computes
+   * a composite exploit risk score.
+   *
+   * composite_exploit_risk formula:
+   *   For each (CVE, CVSS, EPSS) triple, contribution = cvssScore × epssPercentile × 10
+   *   Final score = min(100, sum of top-3 contributions)
+   *   If no EPSS data, falls back to max(cvssScores) × 10 / 10 (straight CVSS)
+   */
+  async getRiskCorrelation(
+    ecosystem: string,
+    packageName: string,
+    version: string
+  ): Promise<RiskCorrelation> {
+    const advisories = await this.getPackageAdvisories(ecosystem, packageName);
+
+    // Collect unique CVE IDs from all advisories
+    const cveIds = [
+      ...new Set(
+        advisories
+          .map((a) => a.sourceId)
+          .filter((id) => id.toUpperCase().startsWith("CVE-"))
+          .concat(
+            // also pull CVE aliases from raw advisory source IDs (e.g. NVD source)
+            advisories.filter((a) => a.source === "nvd").map((a) => a.sourceId)
+          )
+      )
+    ];
+
+    const cvssScores = advisories
+      .filter((a) => a.cvssScore != null)
+      .map((a) => ({
+        cveId: a.sourceId,
+        cvssScore: a.cvssScore!,
+        severity: a.severity
+      }));
+
+    // Fetch/sync EPSS scores for all CVEs we know about
+    let epssScores: EpssScore[] = [];
+    try {
+      // Try fetching from the database first (may already be cached)
+      epssScores = await this.getEpssScores(ecosystem, packageName, version);
+      // If stale or empty, re-sync from EPSS API
+      if (epssScores.length === 0 && cveIds.length > 0) {
+        epssScores = await this.syncEpssScores(ecosystem, packageName, version, cveIds);
+      }
+    } catch (err) {
+      // EPSS enrichment is best-effort; don't fail the whole request
+      console.warn(`[advisory-service] EPSS fetch failed for ${ecosystem}/${packageName}@${version}:`, err);
+    }
+
+    const compositeExploitRisk = this.computeCompositeExploitRisk(cvssScores, epssScores);
+
+    return {
+      ecosystem,
+      packageName,
+      version,
+      cves: cveIds,
+      cvssScores,
+      epssScores,
+      compositeExploitRisk
+    };
+  }
+
+  /**
+   * Composite exploit risk:
+   *   contribution_i = cvssScore_i × epssPercentile_i × 10
+   *   result = min(100, sum of top-3 contributions)
+   *
+   * Falls back to straight CVSS-based risk if no EPSS data is available.
+   */
+  computeCompositeExploitRisk(
+    cvssScores: Array<{ cveId: string; cvssScore: number }>,
+    epssScores: EpssScore[]
+  ): number {
+    if (cvssScores.length === 0) return 0;
+
+    const epssMap = new Map(epssScores.map((e) => [e.cveId, e]));
+
+    // If we have EPSS data, compute composite contributions
+    if (epssMap.size > 0) {
+      const contributions = cvssScores
+        .map((c) => {
+          const epss = epssMap.get(c.cveId);
+          if (!epss) return c.cvssScore; // no EPSS → use CVSS/10 as fallback contribution
+          return (c.cvssScore / 10) * epss.epssPercentile * 100;
+        })
+        .sort((a, b) => b - a)
+        .slice(0, 3);
+
+      return Math.min(100, Math.round(contributions.reduce((s, v) => s + v, 0)));
+    }
+
+    // Fallback: scale max CVSS score to 0–100
+    const maxCvss = Math.max(...cvssScores.map((c) => c.cvssScore));
+    return Math.min(100, Math.round((maxCvss / 10) * 100));
+  }
+
+  // -------------------------------------------------------------------------
+  // EPSS API fetch (FIRST REST API)
+  // -------------------------------------------------------------------------
+
+  private async fetchEpssFromApi(cveIds: string[]): Promise<EpssFeedRow[]> {
+    // FIRST EPSS API: GET https://api.first.org/data/v1/epss?cve=CVE-A,CVE-B,...
+    // Max 100 CVEs per request; free, no auth required.
+    const batchSize = 100;
+    const results: EpssFeedRow[] = [];
+
+    for (let i = 0; i < cveIds.length; i += batchSize) {
+      const batch = cveIds.slice(i, i + batchSize);
+      const url = `https://api.first.org/data/v1/epss?cve=${batch.join(",")}`;
+      try {
+        const response = await fetch(url, {
+          headers: { accept: "application/json" }
+        });
+        if (!response.ok) {
+          console.warn(`[advisory-service] EPSS API returned ${response.status} for batch`);
+          continue;
+        }
+        const data = (await response.json()) as {
+          status: string;
+          status_code: number;
+          version: string;
+          access: string;
+          total: number;
+          offset: number;
+          limit: number;
+          data?: Array<{ cve: string; epss: string; percentile: string; date?: string; model_version?: string }>;
+        };
+        if (data.data && Array.isArray(data.data)) {
+          results.push(...data.data);
+        }
+      } catch (err) {
+        console.warn(`[advisory-service] EPSS fetch error for batch starting at ${i}:`, err);
+      }
+    }
+
+    return results;
+  }
+
+  private mapEpssRows(rows: EpssScoreRow[]): EpssScore[] {
+    return rows.map((row) => ({
+      cveId: row.cve_id,
+      packageName: row.package_name,
+      ecosystem: row.ecosystem,
+      version: row.version,
+      epssScore: row.epss_score,
+      epssPercentile: row.epss_percentile,
+      modelVersion: row.model_version,
+      scoreDate: row.score_date,
+      updatedAt: row.updated_at,
+      exploitedInTheWild: row.epss_percentile > 0.9
+    }));
   }
 }
