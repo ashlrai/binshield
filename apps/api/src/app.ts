@@ -972,7 +972,59 @@ export function createApp(services = createServices(readApiEnv())) {
     const ecosystem = c.req.param("ecosystem") as Ecosystem;
     const name = c.req.param("name");
     const advisories = await getServices(c).repository.getPackageAdvisories(ecosystem, name);
-    return c.json({ items: advisories, total: advisories.length });
+
+    // Enrich each advisory with vendor patch context when available.
+    // The advisory service parses patchedVersion from the affectedPackages
+    // array already stored in the advisory row, so no extra network call is needed.
+    const { env } = getServices(c);
+    const advisoryService = (env.supabaseUrl && env.supabaseServiceRoleKey)
+      ? new AdvisoryService({
+          supabaseUrl: env.supabaseUrl,
+          supabaseServiceRoleKey: env.supabaseServiceRoleKey,
+          githubToken: env.githubToken,
+          nvdApiKey: env.nvdApiKey
+        })
+      : null;
+
+    // Build a synthetic VendorAdvisoryJson array from the existing advisory
+    // rows so parseVendorAdvisoryPatches can derive VendorPatchContext entries
+    // without an additional DB round-trip.
+    const vendorAdvisoryJsons = advisories.map((a) => ({
+      id: a.sourceId,
+      cve_id: a.sourceId.toUpperCase().startsWith("CVE-") ? a.sourceId : null,
+      vulnerabilities: a.affectedPackages.map((ap) => ({
+        package: { name: ap.packageName, ecosystem: ap.ecosystem },
+        patched_versions: ap.patchedVersion ?? null,
+        first_patched_version: ap.patchedVersion ? { identifier: ap.patchedVersion } : null,
+        vulnerable_version_range: ap.vulnerableRange ?? null
+      })),
+      published_at: a.publishedAt ?? null,
+      updated_at: a.updatedAt ?? null,
+      withdrawn_at: null
+    }));
+
+    const { patches } = advisoryService
+      ? advisoryService.parseVendorAdvisoryPatches(vendorAdvisoryJsons, name)
+      : { patches: [] };
+
+    // Build a map of cveId → VendorPatchContext for O(1) lookup
+    const patchMap = new Map(patches.map((p) => [p.cveId.toUpperCase(), p]));
+
+    const enrichedItems = advisories.map((advisory) => {
+      const patch = patchMap.get(advisory.sourceId.toUpperCase());
+      return {
+        ...advisory,
+        vendorPatch: patch
+          ? {
+              patchedVersion: patch.patchedVersion,
+              daysToFix: patch.daysToFix,
+              vendorConfidence: patch.vendorConfidence
+            }
+          : null
+      };
+    });
+
+    return c.json({ items: enrichedItems, total: enrichedItems.length });
   });
 
   // -----------------------------------------------------------------------

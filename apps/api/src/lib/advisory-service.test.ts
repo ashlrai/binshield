@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { AdvisoryService } from "./advisory-service";
+import type { VendorAdvisoryJson } from "./advisory-service";
 import type { EpssScore } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -146,5 +147,203 @@ describe("AdvisoryService.computeCompositeExploitRisk", () => {
     expect(highRisk).toBeGreaterThan(lowRisk);
     // high: (5.5/10) * 0.92 * 100 = 50.6 → 51
     expect(highRisk).toBeGreaterThan(40);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AdvisoryService.parseVendorAdvisoryPatches
+// ---------------------------------------------------------------------------
+
+function makeGhsaAdvisory(overrides: Partial<VendorAdvisoryJson> = {}): VendorAdvisoryJson {
+  return {
+    id: "GHSA-xxxx-yyyy-zzzz",
+    cve_id: "CVE-2024-1234",
+    vulnerabilities: [
+      {
+        package: { name: "test-pkg", ecosystem: "npm" },
+        first_patched_version: { identifier: "2.0.0" },
+        patched_versions: ">= 2.0.0",
+        vulnerable_version_range: ">= 1.0.0, < 2.0.0"
+      }
+    ],
+    published_at: "2024-01-01T00:00:00.000Z",
+    updated_at: "2024-01-10T00:00:00.000Z",
+    withdrawn_at: null,
+    ...overrides
+  };
+}
+
+describe("AdvisoryService.parseVendorAdvisoryPatches", () => {
+  const svc = makeService();
+
+  it("returns empty result for empty input", () => {
+    const result = svc.parseVendorAdvisoryPatches([]);
+    expect(result.patches).toHaveLength(0);
+    expect(result.parsed).toBe(0);
+    expect(result.skipped).toBe(0);
+  });
+
+  it("parses a GHSA advisory with first_patched_version as high-confidence", () => {
+    const result = svc.parseVendorAdvisoryPatches([makeGhsaAdvisory()]);
+    expect(result.patches).toHaveLength(1);
+    expect(result.parsed).toBe(1);
+    expect(result.skipped).toBe(0);
+    const patch = result.patches[0]!;
+    expect(patch.cveId).toBe("CVE-2024-1234");
+    expect(patch.patchedVersion).toBe("2.0.0");
+    expect(patch.vendorConfidence).toBe("high");
+    expect(patch.daysToFix).toBeGreaterThan(0);
+  });
+
+  it("uses cve_id when present (GHSA → CVE mapping)", () => {
+    const advisory = makeGhsaAdvisory({ id: "GHSA-aaaa-bbbb-cccc", cve_id: "CVE-2024-5678" });
+    const result = svc.parseVendorAdvisoryPatches([advisory]);
+    expect(result.patches[0]!.cveId).toBe("CVE-2024-5678");
+  });
+
+  it("falls back to advisory id when no cve_id", () => {
+    const advisory = makeGhsaAdvisory({ id: "CVE-2024-9999", cve_id: null });
+    const result = svc.parseVendorAdvisoryPatches([advisory]);
+    expect(result.patches[0]!.cveId).toBe("CVE-2024-9999");
+  });
+
+  it("skips withdrawn advisories", () => {
+    const advisory = makeGhsaAdvisory({ withdrawn_at: "2024-06-01T00:00:00.000Z" });
+    const result = svc.parseVendorAdvisoryPatches([advisory]);
+    expect(result.patches).toHaveLength(0);
+    expect(result.skipped).toBe(1);
+  });
+
+  it("skips advisories with no vulnerabilities array", () => {
+    const advisory = makeGhsaAdvisory({ vulnerabilities: [] });
+    const result = svc.parseVendorAdvisoryPatches([advisory]);
+    expect(result.patches).toHaveLength(0);
+    expect(result.skipped).toBe(1);
+  });
+
+  it("skips advisories with no patched version in any vuln entry", () => {
+    const advisory = makeGhsaAdvisory({
+      vulnerabilities: [
+        {
+          package: { name: "test-pkg", ecosystem: "npm" },
+          first_patched_version: null,
+          patched_versions: null,
+          vulnerable_version_range: ">= 1.0.0"
+        }
+      ]
+    });
+    const result = svc.parseVendorAdvisoryPatches([advisory]);
+    expect(result.patches).toHaveLength(0);
+    expect(result.skipped).toBe(1);
+  });
+
+  it("applies packageName filter — skips non-matching packages", () => {
+    const advisory = makeGhsaAdvisory({
+      vulnerabilities: [
+        {
+          package: { name: "other-pkg", ecosystem: "npm" },
+          first_patched_version: { identifier: "3.0.0" },
+          patched_versions: ">= 3.0.0",
+          vulnerable_version_range: ">= 1.0.0, < 3.0.0"
+        }
+      ]
+    });
+    const result = svc.parseVendorAdvisoryPatches([advisory], "test-pkg");
+    expect(result.patches).toHaveLength(0);
+    expect(result.skipped).toBe(1);
+  });
+
+  it("classifies non-GHSA ids as medium confidence", () => {
+    const advisory = makeGhsaAdvisory({ id: "CVE-2024-9999", cve_id: null });
+    const result = svc.parseVendorAdvisoryPatches([advisory]);
+    expect(result.patches[0]!.vendorConfidence).toBe("medium");
+  });
+
+  it("extracts patched version from patched_versions string when first_patched_version absent", () => {
+    const advisory = makeGhsaAdvisory({
+      vulnerabilities: [
+        {
+          package: { name: "test-pkg", ecosystem: "npm" },
+          first_patched_version: null,
+          patched_versions: ">= 1.5.3",
+          vulnerable_version_range: ">= 1.0.0, < 1.5.3"
+        }
+      ]
+    });
+    const result = svc.parseVendorAdvisoryPatches([advisory]);
+    expect(result.patches[0]!.patchedVersion).toBe("1.5.3");
+  });
+
+  it("processes multiple advisories and counts correctly", () => {
+    const advisories = [
+      makeGhsaAdvisory({ id: "GHSA-aaaa-0001-0001", cve_id: "CVE-2024-0001" }),
+      makeGhsaAdvisory({ id: "GHSA-aaaa-0002-0002", cve_id: "CVE-2024-0002", withdrawn_at: "2024-05-01T00:00:00.000Z" }),
+      makeGhsaAdvisory({ id: "GHSA-aaaa-0003-0003", cve_id: "CVE-2024-0003" })
+    ];
+    const result = svc.parseVendorAdvisoryPatches(advisories);
+    expect(result.parsed).toBe(2);
+    expect(result.skipped).toBe(1);
+    expect(result.patches).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AdvisoryService.buildLockfileResolutionContexts
+// ---------------------------------------------------------------------------
+
+describe("AdvisoryService.buildLockfileResolutionContexts", () => {
+  const svc = makeService();
+
+  const patches = [
+    { cveId: "CVE-2024-0001", patchedVersion: "2.0.0", daysToFix: 30, vendorConfidence: "high" as const },
+    { cveId: "CVE-2024-0002", patchedVersion: "1.5.0", daysToFix: 15, vendorConfidence: "medium" as const }
+  ];
+
+  it("marks lockfile as unpatched when resolved version is older than patched version", () => {
+    const contexts = svc.buildLockfileResolutionContexts("1.0.0", patches);
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0]!.isUnpatched).toBe(true); // 1.0.0 < 2.0.0
+    expect(contexts[1]!.isUnpatched).toBe(true); // 1.0.0 < 1.5.0
+  });
+
+  it("marks lockfile as patched when resolved version equals patched version", () => {
+    const contexts = svc.buildLockfileResolutionContexts("2.0.0", patches);
+    expect(contexts[0]!.isUnpatched).toBe(false); // 2.0.0 = 2.0.0
+    expect(contexts[1]!.isUnpatched).toBe(false); // 2.0.0 > 1.5.0
+  });
+
+  it("marks lockfile as patched when resolved version is newer than patched version", () => {
+    const contexts = svc.buildLockfileResolutionContexts("3.1.0", patches);
+    expect(contexts.every((c) => !c.isUnpatched)).toBe(true);
+  });
+
+  it("returns empty array when no patches provided", () => {
+    expect(svc.buildLockfileResolutionContexts("1.0.0", [])).toEqual([]);
+  });
+
+  it("preserves cveId and version strings in each context", () => {
+    const contexts = svc.buildLockfileResolutionContexts("1.0.0", [patches[0]!]);
+    expect(contexts[0]!.cveId).toBe("CVE-2024-0001");
+    expect(contexts[0]!.resolvedVersion).toBe("1.0.0");
+    expect(contexts[0]!.patchedVersion).toBe("2.0.0");
+  });
+
+  // E2E-style: real CVE with vendor patch — CVE-2021-44228 (Log4Shell)
+  // Patched in log4j 2.15.0; if lockfile pins 2.14.1 it should be flagged.
+  it("real-world scenario: log4j-style patch detection", () => {
+    const log4jPatch = [{
+      cveId: "CVE-2021-44228",
+      patchedVersion: "2.15.0",
+      daysToFix: 7,
+      vendorConfidence: "high" as const
+    }];
+    const vulnerable = svc.buildLockfileResolutionContexts("2.14.1", log4jPatch);
+    expect(vulnerable[0]!.isUnpatched).toBe(true);
+
+    const patched = svc.buildLockfileResolutionContexts("2.15.0", log4jPatch);
+    expect(patched[0]!.isUnpatched).toBe(false);
+
+    const newer = svc.buildLockfileResolutionContexts("2.17.1", log4jPatch);
+    expect(newer[0]!.isUnpatched).toBe(false);
   });
 });

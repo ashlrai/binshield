@@ -11,6 +11,155 @@ import type {
   ScriptThreatSummary
 } from "@binshield/analysis-types";
 
+// ---------------------------------------------------------------------------
+// Vendor Patch Context — intelligent risk downgrade for patched CVEs
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-CVE vendor patch context.  When a patched version has been released the
+ * risk engine applies a -15 pt penalty to the raw score because the attack
+ * surface shrinks as soon as the fix is deployed.
+ *
+ * daysToFix  – calendar days from CVE disclosure to patch release (0 = same-day).
+ * vendorConfidence – how confident we are in the patch data:
+ *   "high"   = authoritative vendor advisory (GHSA, NVD confirmed patched)
+ *   "medium" = OSV-derived, may be inaccurate for multi-range vulnerabilities
+ *   "low"    = inferred or community-reported, treat as provisional
+ */
+export interface VendorPatchContext {
+  cveId: string;
+  patchedVersion: string;
+  daysToFix: number;
+  vendorConfidence: "high" | "medium" | "low";
+}
+
+/**
+ * Lockfile resolution context.
+ *
+ * Carries the package version that the lockfile currently pins alongside
+ * whatever patched version is available.  The risk engine uses this to decide
+ * whether to emit a "Patchable vulnerability" finding instead of a raw
+ * CRITICAL/HIGH severity.
+ */
+export interface LockfileResolutionContext {
+  /** The version string that appears in the lockfile today. */
+  resolvedVersion: string;
+  /** The earliest version that fully remediates the vulnerability. */
+  patchedVersion: string;
+  /** CVE ID this context belongs to. */
+  cveId: string;
+  /**
+   * True when `resolvedVersion` is still in the vulnerable range and
+   * `patchedVersion` is available but has not been pinned in the lockfile.
+   */
+  isUnpatched: boolean;
+}
+
+/**
+ * Patch deployment correlation context.
+ *
+ * Links the patch availability date to ecosystem-wide adoption telemetry.
+ * A patch released 90 days ago with < 5 % adoption is treated differently
+ * from one released yesterday.
+ */
+export interface PatchDeploymentContext {
+  cveId: string;
+  /** ISO date when the patch was first published. */
+  patchPublishedAt: string;
+  /** Number of calendar days since the patch was published (computed by caller). */
+  daysSincePatch: number;
+  /**
+   * Fraction [0, 1] of the ecosystem that has adopted the patched version,
+   * e.g. 0.05 = 5 %.  undefined = unknown / not enough telemetry.
+   */
+  ecosystemAdoptionRate?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Patch penalty / adjustment helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the vendor-patch risk penalty.
+ *
+ * Returns a *negative* number (penalty) to be subtracted from the raw score:
+ *   - Patch exists, high confidence → -15 pts
+ *   - Patch exists, medium confidence → -10 pts
+ *   - Patch exists, low confidence  →  -5 pts
+ *   - No patch context              →   0 pts
+ */
+export function vendorPatchPenalty(patches?: VendorPatchContext[]): number {
+  if (!patches || patches.length === 0) return 0;
+
+  // Use the best-confidence patch signal available
+  const best = patches.reduce<VendorPatchContext | undefined>((acc, p) => {
+    if (!acc) return p;
+    const rank = { high: 3, medium: 2, low: 1 } as const;
+    return rank[p.vendorConfidence] > rank[acc.vendorConfidence] ? p : acc;
+  }, undefined);
+
+  if (!best) return 0;
+
+  switch (best.vendorConfidence) {
+    case "high":
+      return -15;
+    case "medium":
+      return -10;
+    case "low":
+      return -5;
+  }
+}
+
+/**
+ * Build a MEDIUM "Patchable-Vulnerability" finding for each lockfile entry
+ * where a patch is available but the lockfile has not been updated.
+ *
+ * The generated findings are MEDIUM rather than the raw CVE severity because
+ * the existence of a patch substantially reduces risk compared to an
+ * unmitigated vulnerability.
+ */
+export function buildLockfilePatchableFindings(resolutions?: LockfileResolutionContext[]): Finding[] {
+  if (!resolutions || resolutions.length === 0) return [];
+
+  return resolutions
+    .filter((r) => r.isUnpatched)
+    .map((r) => ({
+      severity: "medium" as FindingSeverity,
+      title: `Patchable vulnerability: ${r.cveId}`,
+      description:
+        `Your lockfile resolves to version ${r.resolvedVersion} which is still vulnerable to ${r.cveId}. ` +
+        `A patched version (${r.patchedVersion}) is available but has not been applied.`,
+      recommendation:
+        `Update your lockfile to resolve ${r.cveId.split("-")[0]}/${r.cveId.split("-").slice(1).join("-")} ` +
+        `to ${r.patchedVersion} or later and re-lock dependencies.`
+    }));
+}
+
+/**
+ * Compute a patch-deployment urgency modifier [-10, 0].
+ *
+ * When a patch has been available for a long time but ecosystem adoption
+ * remains very low, the vulnerability is still practically exploitable —
+ * return 0 (no downgrade).  When the patch is mature and widely adopted,
+ * apply an additional -10 to further de-prioritise the finding.
+ *
+ * Urgency modifiers (applied on top of vendorPatchPenalty):
+ *   daysSincePatch < 7                    → 0  (too new to judge)
+ *   daysSincePatch >= 7, adoption < 5 %   → 0  (patch exists but not adopted)
+ *   daysSincePatch >= 30, adoption >= 25 %→ -5  (gaining traction)
+ *   daysSincePatch >= 90, adoption >= 50 %→ -10 (widely deployed)
+ */
+export function patchDeploymentModifier(deployment?: PatchDeploymentContext): number {
+  if (!deployment) return 0;
+  const { daysSincePatch, ecosystemAdoptionRate } = deployment;
+
+  if (daysSincePatch < 7) return 0;
+  if (ecosystemAdoptionRate == null || ecosystemAdoptionRate < 0.05) return 0;
+  if (daysSincePatch >= 90 && ecosystemAdoptionRate >= 0.5) return -10;
+  if (daysSincePatch >= 30 && ecosystemAdoptionRate >= 0.25) return -5;
+  return 0;
+}
+
 const severityWeight: Record<FindingSeverity, number> = {
   info: 2,
   low: 8,
@@ -191,7 +340,9 @@ export function scoreBinary(
   binary: Pick<BinaryAnalysis, "behaviors" | "findings" | "importCount" | "functionCount">,
   epss?: EpssContext,
   kev?: CisaKevContext,
-  correlation?: BehaviorCorrelationContext
+  correlation?: BehaviorCorrelationContext,
+  patches?: VendorPatchContext[],
+  deployment?: PatchDeploymentContext
 ) {
   const baseScore =
     scoreFindings(binary.findings) +
@@ -200,7 +351,12 @@ export function scoreBinary(
     Math.min(binary.functionCount / 20, 5);
 
   const score = normalizeRisk(
-    baseScore + epssBoost(epss) + cisaKevBoost(kev) + behaviorCorrelationBoost(correlation)
+    baseScore +
+    epssBoost(epss) +
+    cisaKevBoost(kev) +
+    behaviorCorrelationBoost(correlation) +
+    vendorPatchPenalty(patches) +
+    patchDeploymentModifier(deployment)
   );
 
   return {
@@ -221,7 +377,9 @@ export function scoreBinary(
 export function scoreManifest(
   manifest: ManifestAnalysis,
   epss?: EpssContext,
-  kev?: CisaKevContext
+  kev?: CisaKevContext,
+  patches?: VendorPatchContext[],
+  deployment?: PatchDeploymentContext
 ): { riskScore: number; riskLevel: RiskLevel } {
   if (manifest.knownMalwareAdvisoryIds.length > 0) {
     return { riskScore: 100, riskLevel: "critical" };
@@ -231,7 +389,9 @@ export function scoreManifest(
     scoreScriptFindings(manifest.findings) +
     scoreScriptThreats(manifest.threats) +
     epssBoost(epss) +
-    cisaKevBoost(kev)
+    cisaKevBoost(kev) +
+    vendorPatchPenalty(patches) +
+    patchDeploymentModifier(deployment)
   );
   return {
     riskScore: score,

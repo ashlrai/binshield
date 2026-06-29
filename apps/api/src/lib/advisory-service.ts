@@ -1,6 +1,48 @@
 import type { Advisory, AdvisorySyncResult, EpssScore, RiskCorrelation } from "./types";
 import type { VulnerabilityEnrichment, EnrichedFinding, ExploitMaturity } from "@binshield/analysis-types";
 import { EpssCache } from "./epss-cache";
+import type { VendorPatchContext, LockfileResolutionContext } from "@binshield/risk-engine";
+
+// ---------------------------------------------------------------------------
+// Vendor advisory JSON shape (GitHub Security Advisories + generic feed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal shape of a vendor advisory JSON file.
+ * Accepts both GitHub Security Advisory (GHSA) feed format and a simplified
+ * generic vendor feed used by some ecosystem registries.
+ */
+export interface VendorAdvisoryJson {
+  /** GHSA or CVE identifier */
+  id: string;
+  /** CVE alias when the primary id is a GHSA */
+  cve_id?: string | null;
+  /** Affected packages / version ranges */
+  vulnerabilities?: Array<{
+    package?: { name?: string; ecosystem?: string };
+    vulnerable_version_range?: string | null;
+    patched_versions?: string | null;
+    first_patched_version?: { identifier: string } | null;
+  }>;
+  /** ISO publish date (used to compute daysToFix relative to now) */
+  published_at?: string | null;
+  /** ISO date the advisory was last updated */
+  updated_at?: string | null;
+  /** Withdrawn advisories must be ignored */
+  withdrawn_at?: string | null;
+}
+
+/**
+ * Result from parsing a batch of vendor advisory JSON files.
+ */
+export interface VendorAdvisoryParseResult {
+  /** Per-CVE vendor patch contexts extracted from the advisories */
+  patches: VendorPatchContext[];
+  /** How many advisories were parsed */
+  parsed: number;
+  /** How many were skipped (withdrawn or malformed) */
+  skipped: number;
+}
 
 // ---------------------------------------------------------------------------
 // EPSS feed row (FIRST / Cyentia CSV feed, JSON variant)
@@ -740,6 +782,165 @@ export class AdvisoryService {
         patchedVersion: pa.patched_version ?? undefined
       }))
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Vendor patch parsing — public API
+  // -------------------------------------------------------------------------
+
+  /**
+   * Parse an array of vendor advisory JSON objects (e.g. GitHub Security
+   * Advisories fetched from the GHSA REST API or a local vendor feed) and
+   * extract VendorPatchContext entries for each CVE that has a known
+   * patched version.
+   *
+   * Withdrawn advisories are skipped.  Advisories without a patched version
+   * are also skipped (they provide no mitigation signal).
+   *
+   * @param advisories   Raw advisory JSON objects (already parsed from JSON).
+   * @param packageName  Filter: only emit patches for this package name.
+   *                     If omitted, all packages in the advisories are included.
+   */
+  parseVendorAdvisoryPatches(
+    advisories: VendorAdvisoryJson[],
+    packageName?: string
+  ): VendorAdvisoryParseResult {
+    let parsed = 0;
+    let skipped = 0;
+    const patches: VendorPatchContext[] = [];
+
+    for (const advisory of advisories) {
+      // Skip withdrawn advisories — the patch may have been retracted
+      if (advisory.withdrawn_at) {
+        skipped++;
+        continue;
+      }
+
+      const cveId = advisory.cve_id ?? advisory.id;
+      if (!cveId) {
+        skipped++;
+        continue;
+      }
+
+      const vulns = advisory.vulnerabilities ?? [];
+      if (vulns.length === 0) {
+        skipped++;
+        continue;
+      }
+
+      let emittedForThisAdvisory = false;
+
+      for (const vuln of vulns) {
+        // Optional package name filter
+        if (packageName && vuln.package?.name && vuln.package.name.toLowerCase() !== packageName.toLowerCase()) {
+          continue;
+        }
+
+        // Resolve the patched version — prefer first_patched_version (more
+        // precise from GHSA) then fall back to patched_versions string.
+        const patchedVersion =
+          vuln.first_patched_version?.identifier ??
+          this.extractFirstPatchedVersion(vuln.patched_versions ?? null);
+
+        if (!patchedVersion) {
+          continue; // No patch yet — nothing to downgrade
+        }
+
+        // Compute daysToFix from published_at to now
+        const daysToFix = advisory.published_at
+          ? Math.max(0, Math.floor((Date.now() - new Date(advisory.published_at).getTime()) / 86_400_000))
+          : 0;
+
+        // Confidence: GHSA advisories sourced via GitHub API are "high";
+        // plain vendor feeds with only patched_versions string are "medium".
+        const vendorConfidence: VendorPatchContext["vendorConfidence"] =
+          advisory.id.toUpperCase().startsWith("GHSA-") ? "high" : "medium";
+
+        patches.push({ cveId, patchedVersion, daysToFix, vendorConfidence });
+        emittedForThisAdvisory = true;
+        parsed++;
+        break; // One patch per advisory is enough for risk scoring
+      }
+
+      if (!emittedForThisAdvisory) {
+        skipped++;
+      }
+    }
+
+    return { patches, parsed, skipped };
+  }
+
+  /**
+   * Build LockfileResolutionContext entries by comparing the version pinned in
+   * the lockfile against the list of known patched versions.
+   *
+   * This is a simple semver-range-free comparison that works for the common
+   * case where the lockfile pins an exact version.  For more complex ranges,
+   * callers should use a full semver library before calling this helper.
+   *
+   * @param resolvedVersion  The exact version string pinned in the lockfile.
+   * @param patches          VendorPatchContext entries from parseVendorAdvisoryPatches.
+   */
+  buildLockfileResolutionContexts(
+    resolvedVersion: string,
+    patches: VendorPatchContext[]
+  ): LockfileResolutionContext[] {
+    return patches.map((patch) => ({
+      cveId: patch.cveId,
+      resolvedVersion,
+      patchedVersion: patch.patchedVersion,
+      // Treat as unpatched when the resolved version string is not the same as
+      // (or does not start with) the patched version.  This is intentionally
+      // conservative: if the lockfile pins exactly the patched version we mark
+      // it as patched; otherwise we flag it for review.
+      isUnpatched: !this.isVersionPatched(resolvedVersion, patch.patchedVersion)
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Private patch helpers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Extract the first version string from a GHSA `patched_versions` string
+   * like ">= 1.2.3" or "= 1.2.3" or just "1.2.3".
+   */
+  private extractFirstPatchedVersion(patched: string | null): string | undefined {
+    if (!patched) return undefined;
+    // Strip leading operators: >=, >, =, ^, ~
+    const match = patched.trim().match(/[>=^~]*\s*([\d]+\.[\d]+\.[\d]+[\w.-]*)/);
+    return match?.[1];
+  }
+
+  /**
+   * Returns true when the resolved version is equal to or "newer than" the
+   * patched version using simple dotted-number comparison.
+   *
+   * This is intentionally conservative: if either version is non-numeric we
+   * fall back to strict string equality so we never incorrectly mark a
+   * vulnerable version as patched.
+   */
+  private isVersionPatched(resolved: string, patched: string): boolean {
+    if (resolved === patched) return true;
+
+    const parseSemver = (v: string): number[] | null => {
+      const parts = v.replace(/^[v=^~>=<]+/, "").split(".").map(Number);
+      if (parts.some(isNaN)) return null;
+      return parts;
+    };
+
+    const r = parseSemver(resolved);
+    const p = parseSemver(patched);
+    if (!r || !p) return false;
+
+    const len = Math.max(r.length, p.length);
+    for (let i = 0; i < len; i++) {
+      const rv = r[i] ?? 0;
+      const pv = p[i] ?? 0;
+      if (rv > pv) return true;
+      if (rv < pv) return false;
+    }
+    return true; // equal
   }
 
   // -------------------------------------------------------------------------
