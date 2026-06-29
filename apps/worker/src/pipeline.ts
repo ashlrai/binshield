@@ -6,7 +6,13 @@ import type { ManifestAnalysis, PackageAnalysis } from "@binshield/analysis-type
 import { AnalyticsCollector } from "@binshield/analytics-collector";
 import { AnalyzerRegistry, getSharedMatchingEngine, PyPiBinaryRepackagingAnalyzer, BinaryProvenanceRegistry } from "@binshield/malware-engines";
 import type { OsvMatchResult } from "@binshield/malware-engines";
-import { aggregatePackageRiskWithManifest, summarizePackage, scoreBinary } from "@binshield/risk-engine";
+import {
+  aggregatePackageRiskWithManifest,
+  summarizePackage,
+  scoreBinary,
+  scoreWithActiveVulnerabilities
+} from "@binshield/risk-engine";
+import type { ActiveVulnerability } from "@binshield/risk-engine";
 import { SupplyChainHealthAnalyzer, toHealthFinding } from "@binshield/supply-chain-health";
 import {
   DepGraphEnricher,
@@ -128,7 +134,8 @@ function toAnalysisPackage(
     malwareDetectionResults?: import("@binshield/analysis-types").MalwareDetectionResult[];
   }>,
   manifestAnalysis: ManifestAnalysis,
-  supplyChainHealth?: import("@binshield/analysis-types").SupplyChainHealthResult
+  supplyChainHealth?: import("@binshield/analysis-types").SupplyChainHealthResult,
+  depGraphEnrichment?: DepGraphEnrichmentResult[]
 ): PackageAnalysis {
   const binaries = classifiedArtifacts.map(({ fingerprint, decompiled, classified, malwareDetectionResults }) => {
     const scored = scoreBinary({
@@ -178,7 +185,38 @@ function toAnalysisPackage(
     ...(supplyChainHealth !== undefined ? { supplyChainHealth } : {})
   };
 
-  const aggregate = aggregatePackageRiskWithManifest(binaries, manifestAnalysis);
+  // Build ActiveVulnerability list from dep-graph enrichment results.
+  // Each enrichment entry carries matched CVE IDs, KEV flag, and EPSS
+  // percentile — enough to drive scoreWithActiveVulnerabilities.
+  // feedUpdatedAt is set to the enrichedAt timestamp of each entry so the
+  // staleness guard in the risk engine works correctly.
+  const activeVulnerabilities: ActiveVulnerability[] = [];
+  if (depGraphEnrichment && depGraphEnrichment.length > 0) {
+    for (const entry of depGraphEnrichment) {
+      for (const cveId of entry.matchedCveIds) {
+        activeVulnerabilities.push({
+          cveId,
+          epssPercentile: entry.highestEpssPercentile,
+          isKev: entry.hasKevMatch,
+          exploitMaturity: entry.hasKevMatch ? "active-exploitation" : undefined,
+          // No patch info available at this level — treat as no-patch-context
+          patchedVersion: undefined,
+          patchAvailableButUnmerged: undefined,
+          feedUpdatedAt: entry.enrichedAt
+        });
+      }
+    }
+  }
+
+  let aggregate: { riskScore: number; riskLevel: import("@binshield/analysis-types").RiskLevel };
+  if (activeVulnerabilities.length > 0) {
+    const scored = scoreWithActiveVulnerabilities(binaries, manifestAnalysis, activeVulnerabilities);
+    aggregate = { riskScore: scored.riskScore, riskLevel: scored.riskLevel };
+    packageAnalysis.activeThreatContext = scored.activeThreatContext;
+  } else {
+    aggregate = aggregatePackageRiskWithManifest(binaries, manifestAnalysis);
+  }
+
   packageAnalysis.riskScore = aggregate.riskScore;
   packageAnalysis.riskLevel = aggregate.riskLevel;
   packageAnalysis.summary = buildPackageSummary(packageAnalysis);
@@ -466,7 +504,7 @@ export class WorkerRuntime {
       );
     }
 
-    const analysis = toAnalysisPackage(request, acquired.manifest, classifiedArtifacts, manifestAnalysis, supplyChainHealth);
+    const analysis = toAnalysisPackage(request, acquired.manifest, classifiedArtifacts, manifestAnalysis, supplyChainHealth, depGraphEnrichment);
 
     // PyPI wheel provenance + attestation verification — runs best-effort for
     // PyPI packages.  Failures are caught so they never block the pipeline.

@@ -535,6 +535,24 @@ export interface PackageAnalysis extends PackageCoordinate {
    * yet been run (e.g. offline / sandbox mode).
    */
   supplyChainHealth?: SupplyChainHealthResult;
+  /**
+   * Real-time CVE/EPSS/KEV threat context derived from live feed correlation.
+   * Present when the worker pipeline successfully fetched and correlated
+   * vulnerability feeds for this package. Absent on legacy/cached records.
+   */
+  activeThreatContext?: {
+    /** CVE IDs confirmed as actively exploited (KEV active-exploitation or widespread). */
+    exploitedCVEs: string[];
+    /** Number of vulnerabilities where no fix has been applied yet. */
+    unfixed_count: number;
+    /** Highest EPSS percentile across all active vulnerabilities [0, 1]. */
+    highest_epss_pct: number;
+    /**
+     * Net risk adjustment vs. the base score (positive = higher risk).
+     * Aggregated across all transitive deps.
+     */
+    risk_adjusted_from_base: number;
+  };
 }
 
 export interface PackageDiff {
@@ -1588,6 +1606,54 @@ export interface EnrichedAdvisory extends Advisory {
   matchedMalwareAnalyzers: string[];
   /** ISO timestamp when the correlation was computed. */
   correlatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Manifest Behavior Correlation Engine types
+// ---------------------------------------------------------------------------
+
+/**
+ * A canonical attack profile that the behavior correlator recognises.
+ * Each profile aggregates multiple threat categories into a named attack
+ * pattern (e.g. "env-exfil" = environmentTheft + remoteCodeExecution).
+ */
+export interface AttackProfile {
+  /** Stable machine-readable identifier, e.g. "env-exfil". */
+  id: string;
+  /** Human-readable display name. */
+  name: string;
+  /**
+   * Threat categories that must be present for this profile to fire.
+   * Matching requires >= 2 signals present AND combined confidence >= confidenceFloor.
+   */
+  threatSignals: ScriptThreatCategory[];
+  /**
+   * Minimum combined confidence [0, 1] required to emit this profile.
+   * Combined confidence = mean of per-signal confidences for matched signals.
+   */
+  confidenceFloor: number;
+  /** Human-readable description of the attack pattern. */
+  description: string;
+}
+
+/**
+ * Result of running the ManifestBehaviorCorrelator against a set of findings.
+ * One BehaviorCorrelationResult is emitted per matched AttackProfile.
+ */
+export interface BehaviorCorrelationResult {
+  /** ID of the matched AttackProfile. */
+  profileId: string;
+  /** Display name of the matched AttackProfile. */
+  profileName: string;
+  /** ScriptThreatCategory IDs that were actually matched (subset of profile.threatSignals). */
+  matchedThreatIds: ScriptThreatCategory[];
+  /**
+   * Aggregated confidence [0, 1] — mean of the per-signal confidences for
+   * each matched threat, further weighted by matched / required signal ratio.
+   */
+  aggregatedConfidence: number;
+  /** Description from the matched AttackProfile. */
+  description: string;
 }
 
 export function getSampleAnalysis(packageName: string, version?: string): PackageAnalysis | undefined {
