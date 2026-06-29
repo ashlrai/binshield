@@ -16,7 +16,7 @@
     "@binshield/risk-engine": "workspace:*",
     "@supabase/supabase-js": "^2.56.0",
     "hono": "^4.7.2"
-    ,"stripe": "^18.5.0"
+    ,"stripe": "^22.1.1"
   },
   "devDependencies": {
     "@hono/node-server": "^1.13.8",
