@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 
 import { isPythonNativeExtension, hasPyPiAbiTag } from "./native-indicators";
 import { analyzePypiBuildSystem } from "./pypi-sdist-analyzer";
+import { detectWheelOnlyPackage, selectBestWheel, analyzeWheelBinaries } from "./pypi-wheel-binary-analyzer";
 
 import type { AcquiredPackage, PackageManifest, PackageAcquisitionService, WorkerScanRequest } from "./types";
 import type { BuildSystemType, PythonBuildThreatDetails } from "@binshield/analysis-types";
@@ -271,6 +272,35 @@ export class PyPiPackageSource implements PackageAcquisitionService {
       };
       const sdist = meta.urls?.find((entry) => entry.packagetype === "sdist");
       if (!sdist) {
+        // No sdist available — attempt the wheel-binary analysis path instead.
+        // This handles wheel-only packages (e.g. cryptography, numpy binaries)
+        // that never publish a source distribution.
+        const wheels = (meta.urls ?? []).filter((entry) => entry.packagetype === "bdist_wheel");
+        const best = selectBestWheel(wheels);
+        if (best) {
+          let wheelBinaryAnalysis;
+          try {
+            wheelBinaryAnalysis = await analyzeWheelBinaries(request.packageName, request.version, best);
+          } catch {
+            // wheel-binary analysis failure is non-fatal — fall through to error
+          }
+          if (wheelBinaryAnalysis) {
+            await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+            const manifest: PackageManifest = {
+              name: request.packageName,
+              version: request.version,
+              scripts: {},
+              dependencies: {},
+              optionalDependencies: {}
+            };
+            return {
+              sourceKind: "tarball",
+              packageRoot: tempRoot,
+              packageJsonPath: path.join(tempRoot, "package.json"),
+              manifest
+            };
+          }
+        }
         throw new Error(`No source distribution published for ${spec}`);
       }
 

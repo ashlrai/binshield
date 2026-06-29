@@ -113,7 +113,14 @@ export type ScriptThreatCategory =
   | "knownMalware"
   | "pythonBinaryExtension"
   | "setupToolsHookExecution"
-  | "cythonBinaryExtension";
+  | "cythonBinaryExtension"
+  /**
+   * High-confidence finding produced by the PyPI wheel-only binary analyzer.
+   * Unlike `pythonBinaryExtension` (which is inferred from sdist build config),
+   * this category reflects direct inspection of the compiled native extension
+   * extracted from a wheel archive (.so / .pyd / .dylib).
+   */
+  | "wheelNativeBinary";
 
 export interface ScriptFinding {
   category: ScriptThreatCategory;
@@ -452,14 +459,15 @@ export const SCRIPT_THREAT_KEYS: Array<keyof ScriptThreatSummary> = [
   "remoteCodeExecution"
 ];
 
-/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, pythonBinaryExtension, and PyPI build-system categories. */
+/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, pythonBinaryExtension, PyPI build-system categories, and wheelNativeBinary. */
 export const SCRIPT_THREAT_CATEGORIES: ScriptThreatCategory[] = [
   ...SCRIPT_THREAT_KEYS,
   "obfuscation",
   "knownMalware",
   "pythonBinaryExtension",
   "setupToolsHookExecution",
-  "cythonBinaryExtension"
+  "cythonBinaryExtension",
+  "wheelNativeBinary"
 ];
 
 export function entitlementForPlan(plan: PlanName): EntitlementRecord {
