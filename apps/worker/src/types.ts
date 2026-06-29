@@ -17,6 +17,15 @@ export interface WorkerScanRequest extends ScanRequest {
   packageTarball?: string;
   packageSource?: PackageSourceKind;
   forceReanalyze?: boolean;
+  /**
+   * Optional comma-separated analyzer names (or pre-split array) enabling
+   * per-scan control over which MalwareAnalyzer plugins are active.
+   * Corresponds to the `--analyzers=yara,heuristic,string-sig` CLI flag.
+   * When absent or empty, all registered analyzers run.
+   *
+   * @example ["yara", "string-sig"]   // skip heuristic for this scan
+   */
+  analyzerFilter?: string[];
 }
 
 export interface PackageManifest {

@@ -11,6 +11,7 @@ import type {
   WorkerScanRequest
 } from "./types";
 import { collapseConfidence } from "./types";
+import { AnalyzerRegistry } from "./malware-analyzer.js";
 import { summarizeBinaryText } from "./fingerprint";
 import { extractTokenHints as tokenHintsFromStrings } from "./fingerprint";
 import { ManifestAnalyzer, mergeManifestAnalysis } from "./manifest-analyzer";
@@ -549,4 +550,62 @@ export async function createLiveScriptAnalyzerProvider(): Promise<ScriptAnalyzer
     new HeuristicScriptAnalyzerProvider(),
     new GrokScriptAnalyzerProvider()
   );
+}
+
+// ---------------------------------------------------------------------------
+// MalwareAnalyzerProvider — AnalyzerRegistry integration
+// ---------------------------------------------------------------------------
+
+export interface MalwareAnalysis {
+  findings: import("@binshield/analysis-types").Finding[];
+  behaviorSignals: Partial<import("@binshield/analysis-types").BehaviorSummary>;
+  confidence: number;
+  analyzerVersions: Record<string, string>;
+}
+
+/**
+ * Provider that wraps `AnalyzerRegistry` so callers don't need to import the
+ * registry directly.  The registry is lazily initialised with all three
+ * built-in analyzers on first use.
+ *
+ * Usage (binary pipeline):
+ *   const provider = new MalwareAnalyzerProvider();
+ *   const result = await provider.analyze(artifact, request.analyzerFilter);
+ *   // result.analyzerVersions → persist in BinaryAnalysis.analyzerVersions
+ */
+export class MalwareAnalyzerProvider {
+  private registry: AnalyzerRegistry | null = null;
+
+  /** Lazily initialise the registry with all built-in analyzers. */
+  private async getRegistry(analyzerFilter?: string[]): Promise<AnalyzerRegistry> {
+    if (!this.registry) {
+      this.registry = await AnalyzerRegistry.createDefault(analyzerFilter);
+    } else if (analyzerFilter && analyzerFilter.length > 0) {
+      // Per-call filter: create an ephemeral registry scoped to this call.
+      return AnalyzerRegistry.createDefault(analyzerFilter);
+    }
+    return this.registry;
+  }
+
+  async analyze(
+    artifact: FingerprintedArtifact,
+    analyzerFilter?: string[]
+  ): Promise<MalwareAnalysis> {
+    const registry = await this.getRegistry(analyzerFilter);
+    const merged = await registry.analyze(artifact, analyzerFilter);
+    return {
+      findings: merged.findings,
+      behaviorSignals: merged.behaviorSignals,
+      confidence: merged.confidence,
+      analyzerVersions: merged.analyzerVersions
+    };
+  }
+}
+
+/** Create a `MalwareAnalyzerProvider` pre-loaded with all built-in analyzers. */
+export async function createMalwareAnalyzerProvider(): Promise<MalwareAnalyzerProvider> {
+  const provider = new MalwareAnalyzerProvider();
+  // Eagerly warm the registry so the first scan has no lazy-init latency.
+  await (provider as unknown as { getRegistry: () => Promise<AnalyzerRegistry> }).getRegistry();
+  return provider;
 }

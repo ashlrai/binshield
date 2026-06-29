@@ -137,6 +137,13 @@ export interface BinaryAnalysis {
   fingerprint?: BinaryFingerprint;
   behaviors: BehaviorSummary;
   findings: Finding[];
+  /**
+   * Per-analyzer version strings recorded at scan time for traceability.
+   * Keys are analyzer names (e.g. "yara", "heuristic", "string-sig");
+   * values are semver version strings for the rule-set / analyzer used.
+   * Absent on legacy records produced before the plugin system was introduced.
+   */
+  analyzerVersions?: Record<string, string>;
 }
 
 export interface PackageCoordinate {
