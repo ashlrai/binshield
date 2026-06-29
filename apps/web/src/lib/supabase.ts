@@ -77,7 +77,32 @@ export async function getOrgContext(userId: string): Promise<OrgContext | null> 
 
 /** Client-side Supabase client (for use in "use client" components). */
 export function createBrowserClient() {
-  const { url, anonKey } = getSupabaseConfig();
+  // NEXT_PUBLIC_* values are inlined into the client bundle at build time, so in
+  // the browser these are always concrete strings. During Next's server-side
+  // prerender pass of a "use client" component (e.g. the static shell of /login),
+  // this same code runs on the server where the vars may be absent at build time.
+  // Throwing there would abort the production build, so we degrade gracefully:
+  // the placeholder client is never actually invoked during SSR (Supabase calls
+  // only fire from browser event handlers), and a correctly-configured deploy
+  // ships real values. A misconfigured deploy surfaces the failure at first use,
+  // not at build time.
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!url || !anonKey) {
+    // In the browser, missing vars mean a genuinely misconfigured deploy — fail loud.
+    if (typeof window !== "undefined") {
+      throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY");
+    }
+    // On the server during Next's static prerender of this "use client" shell, the
+    // vars can be absent at build time. @supabase/ssr requires non-empty url+key at
+    // construction, so we hand it a syntactically valid placeholder. This client is
+    // never invoked during SSR (Supabase calls only fire from browser event
+    // handlers), and the browser bundle gets the real inlined NEXT_PUBLIC_* values.
+    return createBrowserSupabaseClient(
+      "https://placeholder.supabase.co",
+      "placeholder-anon-key"
+    );
+  }
   return createBrowserSupabaseClient(url, anonKey);
 }
 
