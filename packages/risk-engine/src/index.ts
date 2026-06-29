@@ -11,6 +11,16 @@ import type {
   ScriptThreatSummary
 } from "@binshield/analysis-types";
 
+// Re-export EPSS/CVE risk correlation engine
+export {
+  cisaKevBoostPoints,
+  correlateEpssWithMalware,
+  correlatedSeverityFromScore,
+  cvssFloor,
+  epssBoostPoints,
+  malwareSignalBoostPoints
+} from "./epss-correlator";
+
 // ---------------------------------------------------------------------------
 // Active Vulnerability — real-time CVE/EPSS/KEV input shape
 // ---------------------------------------------------------------------------

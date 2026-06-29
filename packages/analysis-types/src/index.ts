@@ -120,7 +120,15 @@ export type ScriptThreatCategory =
    * this category reflects direct inspection of the compiled native extension
    * extracted from a wheel archive (.so / .pyd / .dylib).
    */
-  | "wheelNativeBinary";
+  | "wheelNativeBinary"
+  /**
+   * Supply-chain repackaging attack detected via cross-package binary similarity.
+   * Fired when a native binary (.so/.pyd/.dylib) inside a PyPI wheel matches
+   * a binary registered under a different package name — either an exact SHA-256
+   * match (copy/fork) or a fuzzy-hash similarity above the 85% threshold
+   * (likely variant or backdoored fork).
+   */
+  | "pypi_binary_repackaging";
 
 export interface ScriptFinding {
   category: ScriptThreatCategory;
@@ -449,6 +457,63 @@ export interface PackageCoordinate {
   version: string;
 }
 
+// ---------------------------------------------------------------------------
+// Supply-Chain Health types
+// ---------------------------------------------------------------------------
+
+/**
+ * Supply-chain health signals measured for a specific package version.
+ * All numeric fields are optional — unavailable when the underlying registry
+ * data does not expose the required metadata (e.g. no public VCS history).
+ */
+export interface SupplyChainSignals {
+  /** Average commits per 90-day rolling window (proxy via publish frequency). */
+  commit_velocity_90d: number | undefined;
+  /** Average days between consecutive releases; undefined for single-release packages. */
+  release_cadence_days: number | undefined;
+  /** Fraction [0–1] of contributors who left in the last 12 months. */
+  contributor_turnover: number | undefined;
+  /** Percentile rank (0–100) of transitive dependency age — higher = older deps. */
+  dependency_age_percentile: number | undefined;
+  /** Number of circular dependency pairs detected in the direct-dep graph. */
+  circular_dep_count: number;
+  /** Number of declared dependencies never referenced by other deps ("orphaned"). */
+  orphaned_dep_count: number;
+  /** True when the declared SPDX license identifier is deprecated or missing. */
+  license_deprecated: boolean;
+}
+
+/**
+ * A single degraded supply-chain signal finding in the threat taxonomy.
+ * Structurally parallel to `ScriptFinding` so UI components can render both.
+ */
+export interface SupplyChainHealthFinding {
+  /** Which supply-chain signal triggered this finding. */
+  signal: keyof SupplyChainSignals;
+  severity: FindingSeverity;
+  title: string;
+  description: string;
+  /** Observed metric value (stringified for display). */
+  observed: string;
+  /** Healthy threshold breached (stringified for display). */
+  threshold: string;
+  recommendation: string;
+}
+
+/** Aggregated supply-chain health result for one package@version. */
+export interface SupplyChainHealthResult {
+  packageName: string;
+  version: string;
+  ecosystem: "npm" | "pypi";
+  signals: SupplyChainSignals;
+  findings: SupplyChainHealthFinding[];
+  /** Composite risk score 0–100 (deterministic from signal weights). */
+  riskScore: number;
+  riskLevel: RiskLevel;
+  summary: string;
+  analyzedAt: string;
+}
+
 export interface PackageAnalysis extends PackageCoordinate {
   id: string;
   status: AnalysisStatus;
@@ -464,6 +529,12 @@ export interface PackageAnalysis extends PackageCoordinate {
   binaries: BinaryAnalysis[];
   /** Install-script / manifest analysis. Optional — absent on legacy records. */
   manifestAnalysis?: ManifestAnalysis;
+  /**
+   * Supply-chain health assessment for this package version.
+   * Optional — absent on legacy records and when the health check has not
+   * yet been run (e.g. offline / sandbox mode).
+   */
+  supplyChainHealth?: SupplyChainHealthResult;
 }
 
 export interface PackageDiff {
@@ -635,7 +706,7 @@ export const SCRIPT_THREAT_KEYS: Array<keyof ScriptThreatSummary> = [
   "remoteCodeExecution"
 ];
 
-/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, pythonBinaryExtension, PyPI build-system categories, and wheelNativeBinary. */
+/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, pythonBinaryExtension, PyPI build-system categories, wheelNativeBinary, and pypi_binary_repackaging. */
 export const SCRIPT_THREAT_CATEGORIES: ScriptThreatCategory[] = [
   ...SCRIPT_THREAT_KEYS,
   "obfuscation",
@@ -643,7 +714,8 @@ export const SCRIPT_THREAT_CATEGORIES: ScriptThreatCategory[] = [
   "pythonBinaryExtension",
   "setupToolsHookExecution",
   "cythonBinaryExtension",
-  "wheelNativeBinary"
+  "wheelNativeBinary",
+  "pypi_binary_repackaging"
 ];
 
 export function entitlementForPlan(plan: PlanName): EntitlementRecord {
@@ -1442,6 +1514,80 @@ export interface VulnerabilityEnrichment {
   recommendations: string[];
   /** ISO timestamp when this enrichment was generated. */
   enrichedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// EPSS/CVE Risk Correlation Engine types
+// ---------------------------------------------------------------------------
+
+/**
+ * Input advisory record for the EPSS/CVE risk correlation engine.
+ * Callers populate this from NVD + EPSS + CISA KEV feed output.
+ */
+export interface Advisory {
+  /** CVE identifier, e.g. "CVE-2024-12345". */
+  cveId: string;
+  /** Human-readable advisory title. */
+  title: string;
+  /**
+   * CVSS v3 base score [0, 10].
+   * When undefined the engine falls back to a floor of 0.
+   */
+  cvssV3Score?: number;
+  /**
+   * EPSS probability percentile [0, 1].
+   * When undefined no EPSS boost is applied.
+   */
+  epssPercentile?: number;
+  /**
+   * True when this CVE appears in the CISA Known Exploited Vulnerabilities
+   * catalogue and has confirmed in-the-wild exploitation.
+   */
+  cisaKev?: boolean;
+  /** ISO timestamp of the advisory's last update. */
+  updatedAt?: string;
+}
+
+/** Which scoring signals contributed to the final correlated risk score. */
+export interface CorrelationBreakdown {
+  /** Risk floor derived from CVSS v3 score (0–55). */
+  cvssFloor: number;
+  /** Points added for high EPSS percentile (0 | 10 | 20). */
+  epssBoost: number;
+  /** Points added for CISA KEV active exploitation status (0 | 15). */
+  cisaKevBoost: number;
+  /** Points added from correlated malware-engine detection signals (0–15). */
+  malwareSignalBoost: number;
+  /** Final composite score after all boosts, capped at 100. */
+  finalScore: number;
+}
+
+/** Severity tier derived from the final correlated score. */
+export type CorrelatedSeverity = "none" | "low" | "medium" | "high" | "critical";
+
+/**
+ * Enriched advisory returned by `correlateEpssWithMalware`.
+ * Extends the input `Advisory` with correlated threat signals and a
+ * deterministic composite risk score [0–100].
+ */
+export interface EnrichedAdvisory extends Advisory {
+  /**
+   * Composite correlated risk score [0, 100].
+   * Deterministic: same inputs always produce the same score.
+   */
+  correlatedScore: number;
+  /** Severity tier mapped from `correlatedScore`. */
+  correlatedSeverity: CorrelatedSeverity;
+  /** Full breakdown of how each signal contributed to the final score. */
+  scoreBreakdown: CorrelationBreakdown;
+  /**
+   * Names of malware-engine analyzers that produced detection signals
+   * that were included in the correlation.  Empty when no malware signals
+   * matched this CVE.
+   */
+  matchedMalwareAnalyzers: string[];
+  /** ISO timestamp when the correlation was computed. */
+  correlatedAt: string;
 }
 
 export function getSampleAnalysis(packageName: string, version?: string): PackageAnalysis | undefined {
