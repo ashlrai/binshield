@@ -117,6 +117,8 @@ interface WatchlistRow {
   name: string;
   channel: "email" | "slack" | "webhook";
   destination: string;
+  internal_package_pattern?: string | null;
+  trusted_domains?: string[] | null;
   created_at: string;
 }
 
@@ -258,7 +260,7 @@ interface BaseRepository {
   listRepos(orgId: string): Promise<RepoRecord[]>;
   createRepo(orgId: string, githubRepo: string): Promise<RepoRecord>;
   listWatchlists(orgId: string): Promise<WatchlistSummary[]>;
-  createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string }): Promise<WatchlistSummary>;
+  createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string; internalPackagePattern?: string; trustedDomains?: string[] }): Promise<WatchlistSummary>;
   addWatchlistPackage(
     orgId: string,
     watchlistId: string,
@@ -783,17 +785,21 @@ class LocalRepository implements BaseRepository {
         channel: watchlist.channel,
         destination: watchlist.destination,
         createdAt: watchlist.created_at,
-        packageCount: this.watchlistPackages.get(watchlist.id)?.length ?? 0
+        packageCount: this.watchlistPackages.get(watchlist.id)?.length ?? 0,
+        internalPackagePattern: watchlist.internal_package_pattern ?? undefined,
+        trustedDomains: watchlist.trusted_domains ?? undefined
       }));
   }
 
-  async createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string }) {
+  async createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string; internalPackagePattern?: string; trustedDomains?: string[] }) {
     const row: WatchlistRow = {
       id: randomId("watchlist"),
       org_id: orgId,
       name: input.name,
       channel: input.channel,
       destination: input.destination,
+      internal_package_pattern: input.internalPackagePattern ?? null,
+      trusted_domains: input.trustedDomains ?? null,
       created_at: now()
     };
     this.watchlists.set(row.id, row);
@@ -806,7 +812,9 @@ class LocalRepository implements BaseRepository {
       channel: row.channel,
       destination: row.destination,
       createdAt: row.created_at,
-      packageCount: 0
+      packageCount: 0,
+      internalPackagePattern: row.internal_package_pattern ?? undefined,
+      trustedDomains: row.trusted_domains ?? undefined
     };
   }
 
@@ -1549,16 +1557,20 @@ class SupabaseRepository implements BaseRepository {
       channel: watchlist.channel,
       destination: watchlist.destination,
       createdAt: watchlist.created_at,
-      packageCount: 0
+      packageCount: 0,
+      internalPackagePattern: watchlist.internal_package_pattern ?? undefined,
+      trustedDomains: watchlist.trusted_domains ?? undefined
     }));
   }
 
-  async createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string }) {
+  async createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string; internalPackagePattern?: string; trustedDomains?: string[] }) {
     const [row] = await this.insert<WatchlistRow>("watchlists", {
       org_id: orgId,
       name: input.name,
       channel: input.channel,
-      destination: input.destination
+      destination: input.destination,
+      internal_package_pattern: input.internalPackagePattern ?? null,
+      trusted_domains: input.trustedDomains ?? null
     });
     return {
       id: row.id,
@@ -1567,7 +1579,9 @@ class SupabaseRepository implements BaseRepository {
       channel: row.channel,
       destination: row.destination,
       createdAt: row.created_at,
-      packageCount: 0
+      packageCount: 0,
+      internalPackagePattern: row.internal_package_pattern ?? undefined,
+      trustedDomains: row.trusted_domains ?? undefined
     };
   }
 

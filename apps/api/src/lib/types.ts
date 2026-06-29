@@ -65,6 +65,10 @@ export interface WatchlistSummary {
   destination: string;
   createdAt: string;
   packageCount: number;
+  /** Regex pattern matching this org's internal/private package names (e.g. `@myorg/.*`). */
+  internalPackagePattern?: string;
+  /** Trusted npm scopes or registry hostnames from which internal packages are allowed (e.g. `["@myorg", "npm.myorg.internal"]`). */
+  trustedDomains?: string[];
 }
 
 export interface WatchlistPackageSummary {

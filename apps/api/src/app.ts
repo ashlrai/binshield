@@ -427,7 +427,31 @@ export function createApp(services = createServices(readApiEnv())) {
       return c.json({ error: validationError }, 400);
     }
 
-    const watchlist = await getServices(c).repository.createWatchlist(orgId, body);
+    // Validate internalPackagePattern if provided
+    if (body.internalPackagePattern !== undefined) {
+      if (typeof body.internalPackagePattern !== "string") {
+        return c.json({ error: "internalPackagePattern must be a string" }, 400);
+      }
+      try {
+        new RegExp(body.internalPackagePattern);
+      } catch {
+        return c.json({ error: "internalPackagePattern is not a valid regular expression" }, 400);
+      }
+    }
+    // Validate trustedDomains if provided
+    if (body.trustedDomains !== undefined) {
+      if (!Array.isArray(body.trustedDomains) || !body.trustedDomains.every((d: unknown) => typeof d === "string")) {
+        return c.json({ error: "trustedDomains must be an array of strings" }, 400);
+      }
+    }
+
+    const watchlist = await getServices(c).repository.createWatchlist(orgId, {
+      name: body.name,
+      channel: body.channel,
+      destination: body.destination,
+      internalPackagePattern: body.internalPackagePattern,
+      trustedDomains: body.trustedDomains
+    });
 
     logAudit(getAuditConfig(c), orgId, "watchlist.created", "watchlist", watchlist.id, auth.userId, {
       name: body.name,
