@@ -6,6 +6,7 @@ import { readEnv } from "@binshield/config";
 import { AnalysisPipeline } from "./pipeline";
 import { WorkerDaemon } from "./daemon";
 import { FeedFollower } from "./feed-follower";
+import { EpssFeedIngester } from "./epss-feed-ingester";
 
 function requireSupabase() {
   const env = readEnv();
@@ -85,6 +86,24 @@ async function runFeed() {
   await follower.start();
 }
 
+async function runEpss() {
+  const { supabaseUrl, supabaseServiceRoleKey } = requireSupabase();
+
+  const ingester = new EpssFeedIngester({
+    supabaseUrl,
+    supabaseServiceRoleKey,
+    topN: Number(process.env.EPSS_TOP_N ?? 10_000),
+    pollIntervalMs: Number(process.env.EPSS_POLL_INTERVAL_MS ?? 21_600_000),
+  });
+
+  const controller = new AbortController();
+  process.on("SIGTERM", () => controller.abort());
+  process.on("SIGINT", () => controller.abort());
+
+  console.log("[BinShield EPSS] Starting EPSS feed ingester daemon");
+  await ingester.startPolling(controller.signal);
+}
+
 async function runCrawl() {
   const { supabaseUrl, supabaseServiceRoleKey } = requireSupabase();
 
@@ -114,6 +133,9 @@ async function main() {
       break;
     case "feed":
       await runFeed();
+      break;
+    case "epss":
+      await runEpss();
       break;
     case "crawl":
       await runCrawl();

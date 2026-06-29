@@ -865,4 +865,95 @@ describe("E2E: EPSS/CISA KEV enrichment boost verification", () => {
     expect(body.compositeExploitRisk).toBeGreaterThan(0);
     expect(body.compositeExploitRisk).toBeLessThanOrEqual(100);
   });
+
+  it("tiered EPSS boost: +25 pts for percentile > 0.90 appears in /vulnerabilities/enriched response", async () => {
+    // Verify that the three-tier boost policy (defined in epss-cache.ts) correctly
+    // surfaces in the enriched API response when a CVE has a high EPSS percentile.
+    // percentile=0.97 → tier-1 boost (+25 pts); finalScore = min(100, baseScore + 25 + epssBoost)
+    const { AdvisoryService } = await import("./lib/advisory-service");
+    const { EpssCache, computeEpssBoostDelta } = await import("./lib/epss-cache");
+
+    const originalFetch = globalThis.fetch;
+    // Mock FIRST EPSS API: CVE-2025-1234 at percentile 0.97 (tier-1 zone)
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: "OK",
+        status_code: 200,
+        version: "1.0",
+        access: "public",
+        total: 1,
+        offset: 0,
+        limit: 100,
+        data: [{ cve: "CVE-2025-1234", epss: "0.97312", percentile: "0.97" }],
+      }),
+    } as Response);
+
+    try {
+      const svc = new AdvisoryService({
+        supabaseUrl: "https://fake.supabase.co",
+        supabaseServiceRoleKey: "fake-key",
+      });
+
+      svc.getPackageAdvisories = async () => [
+        {
+          id: "adv_epss_boost",
+          source: "nvd",
+          sourceId: "CVE-2025-1234",
+          title: "sqlite3 use-after-free in FTS5 extension",
+          severity: "critical",
+          cvssScore: 9.8,
+          cweIds: ["CWE-416"],
+          references: [],
+          affectedPackages: [
+            { ecosystem: "npm", packageName: "sqlite3", vulnerableRange: "<5.1.8" },
+          ],
+        } as Awaited<ReturnType<typeof svc.getPackageAdvisories>>[0],
+      ];
+
+      const cache = new EpssCache();
+      const result = await svc.enrichCvesWithEpss("npm", "sqlite3", "5.1.6", cache);
+
+      // Verify the tiered boost helper agrees: percentile 0.97 → +25 delta
+      expect(computeEpssBoostDelta(0.97)).toBe(25);
+
+      // EPSS percentile 0.97 is in the > 0.90 tier → boost must be non-zero
+      expect(result.riskBoost.epssBoost).toBeGreaterThan(0);
+      expect(result.maxEpssPercentile).toBeCloseTo(0.97, 2);
+
+      // finalScore must exceed baseScore
+      expect(result.riskBoost.finalScore).toBeGreaterThan(result.riskBoost.baseScore);
+      expect(result.riskBoost.finalScore).toBeLessThanOrEqual(100);
+
+      // The finding for CVE-2025-1234 must be present with epssPercentile populated
+      const finding = result.findings.find((f) => f.cvId === "CVE-2025-1234");
+      expect(finding).toBeDefined();
+      expect(finding!.epssPercentile).toBeCloseTo(0.97, 2);
+
+      // exploitMaturity should be "widespread" for percentile >= 0.95
+      expect(["widespread", "active-exploitation"]).toContain(finding!.exploitMaturity);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("tiered EPSS boost: +15 pts for percentile in (0.75, 0.90] and +8 for (0.50, 0.75]", async () => {
+    const { computeEpssBoostDelta, computeEpssBoost } = await import("./lib/epss-cache");
+
+    // Tier 2: percentile = 0.80 → +15
+    expect(computeEpssBoostDelta(0.80)).toBe(15);
+    expect(computeEpssBoost(0.80, 70)).toBe(85);
+
+    // Tier 3: percentile = 0.60 → +8
+    expect(computeEpssBoostDelta(0.60)).toBe(8);
+    expect(computeEpssBoost(0.60, 70)).toBe(78);
+
+    // Below threshold: percentile = 0.40 → +0
+    expect(computeEpssBoostDelta(0.40)).toBe(0);
+    expect(computeEpssBoost(0.40, 70)).toBe(70);
+
+    // Cap at 100
+    expect(computeEpssBoost(0.95, 90)).toBe(100); // 90 + 25 = 115, capped
+  });
 });

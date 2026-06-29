@@ -13,7 +13,44 @@
  *     fetched_at  timestamptz,
  *     PRIMARY KEY (ecosystem, cve_id)
  *   )
+ *
+ * Tiered EPSS risk boost (applied via `computeEpssBoost`):
+ *   percentile > 0.90  → +25 pts
+ *   percentile > 0.75  → +15 pts
+ *   percentile > 0.50  → +8 pts
+ *   otherwise          → 0 pts
  */
+
+// ---------------------------------------------------------------------------
+// Tiered EPSS boost helpers (exported so callers don't duplicate the logic)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the boost delta for a given EPSS percentile according to the
+ * three-tier policy:
+ *
+ *   percentile > 0.90  → +25 pts
+ *   percentile > 0.75  → +15 pts
+ *   percentile > 0.50  → +8 pts
+ *   otherwise          → 0 pts
+ */
+export function computeEpssBoostDelta(percentile: number): number {
+  if (percentile > 0.90) return 25;
+  if (percentile > 0.75) return 15;
+  if (percentile > 0.50) return 8;
+  return 0;
+}
+
+/**
+ * Apply the tiered EPSS boost to a base score, capping at 100.
+ *
+ * @param percentile - EPSS percentile in [0, 1]
+ * @param baseScore  - Current numeric risk score (0–100)
+ * @returns Final score capped at 100
+ */
+export function computeEpssBoost(percentile: number, baseScore: number): number {
+  return Math.min(100, baseScore + computeEpssBoostDelta(percentile));
+}
 
 export interface EpssCacheEntry {
   ecosystem: string;
