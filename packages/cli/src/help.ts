@@ -49,6 +49,10 @@ ${bold("COMMANDS")}
   ${cmd("config")} [get|set|path]
     Manage persistent settings (API key, API URL).
 
+  ${cmd("audit-names")} [path]
+    Check a lockfile for typosquat / confusable package name patterns.
+    Detects Levenshtein lookalikes, homoglyphs, and known typosquats.
+
   ${cmd("search")} <query>
     Search the public package database.
 
@@ -277,6 +281,45 @@ ${indent([
   "binshield search sqlite",
   "binshield search native image",
   "binshield search bcrypt --json",
+])}
+`;
+}
+
+export function helpAuditNames(): string {
+  return `
+${bold("binshield audit-names")} — check lockfile for typosquat / confusable package names
+
+${bold("USAGE")}
+  binshield audit-names [path] [flags]
+
+${bold("ARGUMENTS")}
+  path   Path to lockfile (default: auto-detect in current directory)
+         Supported: package-lock.json, pnpm-lock.yaml, requirements.txt
+
+${bold("WHAT IT CHECKS")}
+  - Levenshtein distance matches against ${dim("popular packages")} (catches single-char typos,
+    transpositions, and insertions like "axois" → "axios")
+  - Homoglyph / look-alike characters (Cyrillic, Greek, digit substitution)
+  - Known typosquat corpus (versioned list of historically observed attacks)
+  - Cross-ecosystem confusion (same name on npm + PyPI)
+
+${bold("FLAGS")}
+  ${flag("--fail-on <level>")}   Exit 2 when any risky package >= level  [low|medium|high|critical]
+                       Default: high
+  ${flag("--json")}              JSON output
+  ${flag("--no-color")}          Plain output
+
+${bold("EXIT CODES")}
+  0   No risky names found at or above threshold
+  1   Error (lockfile not found, parse failure)
+  2   One or more risky names at or above --fail-on threshold
+
+${bold("EXAMPLES")}
+${indent([
+  "binshield audit-names",
+  "binshield audit-names ./package-lock.json",
+  "binshield audit-names ./requirements.txt --fail-on medium",
+  "binshield audit-names --json | jq '.risky[].packageName'",
 ])}
 `;
 }

@@ -35,6 +35,9 @@ importers:
       '@binshield/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@binshield/package-intelligence':
+        specifier: workspace:*
+        version: link:../../packages/package-intelligence
       '@binshield/risk-engine':
         specifier: workspace:*
         version: link:../../packages/risk-engine
@@ -124,6 +127,9 @@ importers:
       '@binshield/malware-engines':
         specifier: workspace:*
         version: link:../../packages/malware-engines
+      '@binshield/package-intelligence':
+        specifier: workspace:*
+        version: link:../../packages/package-intelligence
       '@binshield/risk-engine':
         specifier: workspace:*
         version: link:../../packages/risk-engine
@@ -138,6 +144,9 @@ importers:
       '@ashlr/cli-common':
         specifier: file:../../../ashlr-cli-common
         version: file:../ashlr-cli-common
+      '@binshield/package-intelligence':
+        specifier: workspace:*
+        version: link:../package-intelligence
     devDependencies:
       vitest:
         specifier: ^3.2.4
@@ -150,6 +159,8 @@ importers:
       '@binshield/analysis-types':
         specifier: workspace:*
         version: link:../analysis-types
+
+  packages/package-intelligence: {}
 
   packages/risk-engine:
     dependencies:

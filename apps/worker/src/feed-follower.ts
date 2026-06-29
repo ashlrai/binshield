@@ -11,6 +11,8 @@
 
 import type { SupabaseWorkerConfig } from "./supabase-store";
 import { hasNativeIndicators as checkNativeIndicators, hasInstallScripts } from "./native-indicators";
+import { PackageNameIntelligence } from "@binshield/package-intelligence";
+import type { Ecosystem as PkgEcosystem } from "@binshield/package-intelligence";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -89,6 +91,7 @@ export class FeedFollower {
   private readonly config: FeedFollowerConfig;
   private readonly baseUrl: string;
   private readonly serviceRoleKey: string;
+  private readonly nameIntelligence: PackageNameIntelligence;
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopping = false;
@@ -99,6 +102,7 @@ export class FeedFollower {
     this.config = config;
     this.baseUrl = config.supabaseUrl.replace(/\/$/, "");
     this.serviceRoleKey = config.supabaseServiceRoleKey;
+    this.nameIntelligence = new PackageNameIntelligence();
   }
 
   private headers(): Record<string, string> {
@@ -268,6 +272,35 @@ export class FeedFollower {
           const alreadyExists = await this.packageExists(doc.name, latestTag);
           if (!alreadyExists) {
             await this.queueScan(doc.name, latestTag);
+
+            // Run name-intelligence check on every newly-discovered package
+            const nameResult = this.nameIntelligence.analyze(
+              doc.name,
+              "npm" as PkgEcosystem
+            );
+            if (nameResult.isRisky) {
+              const advisory = this.nameIntelligence.buildAdvisory(nameResult);
+              log(`[NAME-INTELLIGENCE] ${advisory}`);
+              // Emit a CRITICAL feed event for risky names so watchers are notified
+              events.push({
+                ecosystem: "npm",
+                package_name: doc.name,
+                version: latestTag,
+                event_type: "typosquat_risk",
+                risk_score: nameResult.riskLevel === "critical" ? 100
+                  : nameResult.riskLevel === "high" ? 80
+                  : nameResult.riskLevel === "medium" ? 50 : 25,
+                risk_level: nameResult.riskLevel,
+                metadata: {
+                  downloads,
+                  source: "feed",
+                  reason: "name-intelligence",
+                  matches: nameResult.matches,
+                  isKnownTyposquat: nameResult.isKnownTyposquat,
+                },
+              });
+            }
+
             events.push({
               ecosystem: "npm",
               package_name: doc.name,

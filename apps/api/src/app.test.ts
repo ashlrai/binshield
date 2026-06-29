@@ -1764,3 +1764,107 @@ describe("fetchNpmMetadata + fetchPypiMetadata helpers", () => {
     expect(result).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// GET /packages/:ecosystem/confusable/:name — name intelligence endpoint
+// ---------------------------------------------------------------------------
+
+describe("confusable name intelligence endpoint", () => {
+  it("returns 400 for unsupported ecosystem", async () => {
+    const res = await app.request("/packages/crates/confusable/serde");
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("npm");
+  });
+
+  it("returns a clean result for a safe npm package name", async () => {
+    const res = await app.request("/packages/npm/confusable/lodash");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      packageName: string;
+      ecosystem: string;
+      isRisky: boolean;
+      riskLevel: string;
+      matches: unknown[];
+    };
+    expect(body.packageName).toBe("lodash");
+    expect(body.ecosystem).toBe("npm");
+    expect(body.isRisky).toBe(false);
+    expect(body.matches).toHaveLength(0);
+  });
+
+  it("flags crossenv as a known typosquat (npm)", async () => {
+    const res = await app.request("/packages/npm/confusable/crossenv");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      isRisky: boolean;
+      riskLevel: string;
+      isKnownTyposquat: boolean;
+      matches: Array<{ targetPackage: string; riskLevel: string }>;
+    };
+    expect(body.isRisky).toBe(true);
+    expect(body.riskLevel).toBe("critical");
+    expect(body.isKnownTyposquat).toBe(true);
+    expect(body.matches.some((m) => m.targetPackage === "cross-env")).toBe(true);
+  });
+
+  it("flags axois (transposition of axios) on npm", async () => {
+    const res = await app.request("/packages/npm/confusable/axois");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { isRisky: boolean; riskLevel: string; isKnownTyposquat: boolean };
+    expect(body.isRisky).toBe(true);
+    expect(body.isKnownTyposquat).toBe(true);
+  });
+
+  it("flags requets (transposition of requests) on PyPI", async () => {
+    const res = await app.request("/packages/pypi/confusable/requets");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { isRisky: boolean; riskLevel: string; isKnownTyposquat: boolean };
+    expect(body.isRisky).toBe(true);
+    expect(body.isKnownTyposquat).toBe(true);
+    expect(body.riskLevel).toBe("critical");
+  });
+
+  it("flags l0dash (digit-substitution homoglyph) on npm", async () => {
+    const res = await app.request("/packages/npm/confusable/l0dash");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      isRisky: boolean;
+      riskLevel: string;
+      matches: Array<{ reason: string }>;
+    };
+    expect(body.isRisky).toBe(true);
+    expect(body.riskLevel).toBe("critical");
+    expect(body.matches.some((m) => m.reason.toLowerCase().includes("homoglyph"))).toBe(true);
+  });
+
+  it("flags axio (close to axios) as risky", async () => {
+    // axio is in the known corpus so it gets a corpus match (critical, no editDistance)
+    const res = await app.request("/packages/npm/confusable/axio");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      isRisky: boolean;
+      riskLevel: string;
+      matches: Array<{ targetPackage: string; editDistance?: number }>;
+    };
+    expect(body.isRisky).toBe(true);
+    expect(["high", "critical"]).toContain(body.riskLevel);
+    const axiosMatch = body.matches.find((m) => m.targetPackage === "axios");
+    expect(axiosMatch).toBeDefined();
+  });
+
+  it("accepts crossEcosystem=true query param", async () => {
+    const res = await app.request("/packages/npm/confusable/boto3-helper?crossEcosystem=true");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { crossEcosystemFlag: boolean; isRisky: boolean };
+    expect(body.crossEcosystemFlag).toBe(true);
+    expect(body.isRisky).toBe(true);
+  });
+
+  it("returns analyzedAt ISO timestamp", async () => {
+    const res = await app.request("/packages/npm/confusable/lodash");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { analyzedAt: string };
+    expect(new Date(body.analyzedAt).getTime()).toBeGreaterThan(0);
+  });
+});

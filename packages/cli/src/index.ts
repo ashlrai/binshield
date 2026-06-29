@@ -45,8 +45,13 @@ import {
   helpInit,
   helpConfig,
   helpSearch,
+  helpAuditNames,
   VERSION,
 } from "./help.js";
+import {
+  parseLockfile,
+  auditLockfileNames,
+} from "@binshield/package-intelligence";
 
 // ---------------------------------------------------------------------------
 // Risk ordering
@@ -155,6 +160,7 @@ async function main(): Promise<void> {
     case "scan":          return handleScan();
     case "audit":         return handleAudit();
     case "scan-lockfile": return handleScanLockfile();
+    case "audit-names":   return handleAuditNames();
     case "init":          return handleInit();
     case "config":        return handleConfig();
     case "search":        return handleSearch();
@@ -673,6 +679,112 @@ async function handleSearch(): Promise<void> {
   } catch (err) {
     printError(friendlyApiError(err));
     process.exitCode = 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// audit-names [path] — typosquat / confusable name detection
+// ---------------------------------------------------------------------------
+
+const RISK_LEVEL_ORDER: Record<string, number> = {
+  low: 1, medium: 2, high: 3, critical: 4,
+};
+
+function riskNameAtOrAbove(level: string, threshold: string): boolean {
+  return (RISK_LEVEL_ORDER[level] ?? 0) >= (RISK_LEVEL_ORDER[threshold] ?? 3);
+}
+
+async function handleAuditNames(): Promise<void> {
+  if (flags.help) {
+    process.stdout.write(helpAuditNames());
+    return;
+  }
+
+  let lockfilePath = positionals[1];
+
+  if (!lockfilePath) {
+    const found = detectLockfile(process.cwd());
+    if (!found) {
+      printError(
+        "No lockfile found in current directory.\n" +
+        "  Supported: package-lock.json, pnpm-lock.yaml, requirements.txt\n" +
+        "  Pass a path: binshield audit-names ./package-lock.json",
+      );
+      process.exitCode = 1;
+      return;
+    }
+    lockfilePath = found;
+  } else {
+    lockfilePath = resolve(process.cwd(), lockfilePath);
+  }
+
+  if (!existsSync(lockfilePath)) {
+    printError(`Lockfile not found: ${lockfilePath}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  let content: string;
+  try {
+    content = readFileSync(lockfilePath, "utf-8");
+  } catch (err) {
+    printError(`Cannot read lockfile: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const filename = basename(lockfilePath);
+  const failOn = (flags["fail-on"] as string | undefined) ?? "high";
+
+  if (!flags.quiet && !flags.json) {
+    printInfo(`Checking package names in ${filename}`);
+  }
+
+  const packages = parseLockfile(filename, content);
+
+  if (packages.length === 0) {
+    printError(
+      `Could not parse any packages from ${filename}.\n` +
+      "  Supported formats: package-lock.json (v1/v2), pnpm-lock.yaml, requirements.txt"
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const result = auditLockfileNames(packages);
+
+  if (flags.json) {
+    process.stdout.write(JSON.stringify(result, null, 2) + "\n");
+  } else {
+    process.stdout.write(`\n${bold("Name Intelligence Audit")} — ${dim(filename)}\n\n`);
+    process.stdout.write(`  Scanned: ${result.scanned} packages\n`);
+    process.stdout.write(`  Risky:   ${result.risky.length}\n`);
+    process.stdout.write(`  Clean:   ${result.clean}\n\n`);
+
+    if (result.risky.length > 0) {
+      process.stdout.write(`${bold("Risky packages:")}\n\n`);
+      for (const r of result.risky) {
+        const badge = r.riskLevel === "critical" ? "CRITICAL"
+          : r.riskLevel === "high" ? "HIGH    "
+          : r.riskLevel === "medium" ? "MEDIUM  "
+          : "LOW     ";
+        process.stdout.write(`  ${bold(badge)}  ${cyan(r.packageName)}\n`);
+        for (const m of r.matches) {
+          process.stdout.write(`           ${dim("•")} ${m.reason}\n`);
+        }
+        process.stdout.write("\n");
+      }
+    }
+
+    process.stdout.write(`${dim(result.summary)}\n\n`);
+  }
+
+  const hasRisky = result.risky.some((r) => riskNameAtOrAbove(r.riskLevel, failOn));
+  if (hasRisky) {
+    if (!flags.json) {
+      printError(`Lockfile contains package names at or above --fail-on threshold "${failOn}"`);
+    }
+    process.exitCode = 2;
   }
 }
 

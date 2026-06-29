@@ -2,6 +2,9 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
 
+import { PackageNameIntelligence } from "@binshield/package-intelligence";
+import type { Ecosystem as PkgIntelEcosystem } from "@binshield/package-intelligence";
+
 import { AdvisoryService } from "./lib/advisory-service";
 import { EpssCache } from "./lib/epss-cache";
 import { logAudit } from "./lib/audit";
@@ -1748,6 +1751,38 @@ export function createApp(services = createServices(readApiEnv())) {
         console.error("[BinShield] Failed to persist provenance audit log:", err instanceof Error ? err.message : err);
       });
     }
+
+    return c.json(result);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /packages/:ecosystem/confusable/:name
+  // Package name intelligence — returns Levenshtein + homoglyph + corpus
+  // analysis for the given package name in the given ecosystem.
+  // -----------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/confusable/:name", async (c) => {
+    const rawEcosystem = c.req.param("ecosystem");
+    const name = decodeURIComponent(c.req.param("name"));
+
+    if (rawEcosystem !== "npm" && rawEcosystem !== "pypi") {
+      return c.json(
+        { error: "ecosystem must be 'npm' or 'pypi' for name intelligence checks" },
+        400
+      );
+    }
+
+    const ecosystem = rawEcosystem as PkgIntelEcosystem;
+
+    if (!name || name.trim().length === 0) {
+      return c.json({ error: "package name must not be empty" }, 400);
+    }
+
+    // Optional: caller can assert the name is present on both ecosystems
+    const crossEcosystem = c.req.query("crossEcosystem") === "true";
+
+    const intelligence = new PackageNameIntelligence();
+    const result = intelligence.analyze(name, ecosystem, crossEcosystem);
 
     return c.json(result);
   });

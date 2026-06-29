@@ -13,6 +13,7 @@
   "dependencies": {
     "@binshield/analysis-types": "workspace:*",
     "@binshield/config": "workspace:*",
+    "@binshield/package-intelligence": "workspace:*",
     "@binshield/risk-engine": "workspace:*",
     "@supabase/supabase-js": "^2.56.0",
     "hono": "^4.7.2"
