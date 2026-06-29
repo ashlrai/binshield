@@ -20,6 +20,13 @@ import { generateCycloneDxSbom } from "./lib/sbom";
 import { verifySbomProvenance } from "./lib/sbom-provenance-checker";
 import type { AuthPrincipal, Ecosystem, PackageAnalysis, SuppressionSummary } from "./lib/types";
 import { detectLockfileFormat, validateEcosystem, validateReportType } from "./lib/validation";
+import {
+  analyzeLockfileGraph,
+  buildNpmLockfileGraph,
+  buildPnpmLockfileGraph,
+  buildRequirementsTxtGraph,
+} from "./lib/lockfile-graph-analyzer";
+import type { LockfileGraphAnalysis } from "./lib/lockfile-graph-analyzer";
 
 type AppVariables = {
   auth: AuthPrincipal | null;
@@ -2144,6 +2151,116 @@ export function createApp(services = createServices(readApiEnv())) {
     // Local/demo mode: aggregate from in-memory buffer
     const kpis = dashboardAggregator.compute(analyticsCollector.snapshot(), windowDays);
     return c.json(kpis);
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /lockfiles/analyze — deterministic dependency graph risk aggregation
+  // -----------------------------------------------------------------------
+  // Accepts a lockfile (package-lock.json JSON or pnpm-lock.yaml/requirements.txt text),
+  // builds a full adjacency graph, and returns risk aggregation + circular dep detection.
+  // No auth required — purely computational, no data persisted.
+  // -----------------------------------------------------------------------
+  app.post("/lockfiles/analyze", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Request body must be valid JSON" }, 400);
+    }
+
+    if (!body || typeof body !== "object") {
+      return c.json({ error: "Request body must be a JSON object" }, 400);
+    }
+
+    const {
+      filename,
+      content,
+      riskScores: rawRiskScores,
+      directDeps: rawDirectDeps,
+    } = body as Record<string, unknown>;
+
+    if (!filename || typeof filename !== "string" || filename.trim() === "") {
+      return c.json({ error: "Missing required field: filename" }, 400);
+    }
+    if (!content || typeof content !== "string") {
+      return c.json({ error: "Missing required field: content (lockfile text or JSON string)" }, 400);
+    }
+    if (content.length > 10 * 1024 * 1024) {
+      return c.json({ error: "Lockfile content exceeds 10 MB limit" }, 413);
+    }
+
+    // Build optional risk score map
+    const riskScoreMap = new Map<string, number>();
+    if (rawRiskScores && typeof rawRiskScores === "object" && !Array.isArray(rawRiskScores)) {
+      for (const [pkg, score] of Object.entries(rawRiskScores as Record<string, unknown>)) {
+        if (typeof score === "number" && score >= 0 && score <= 100) {
+          riskScoreMap.set(pkg, score);
+        }
+      }
+    }
+
+    // Build optional direct-dep list (used for orphan detection)
+    const directDepNames: string[] = [];
+    if (Array.isArray(rawDirectDeps)) {
+      for (const d of rawDirectDeps) {
+        if (typeof d === "string" && d.trim()) directDepNames.push(d.trim());
+      }
+    }
+
+    // Detect format and build the graph
+    const base = filename.split("/").pop()?.toLowerCase() ?? filename.toLowerCase();
+
+    let analysis: LockfileGraphAnalysis;
+    try {
+      if (base === "package-lock.json" || base === "npm-shrinkwrap.json") {
+        let lockJson: Record<string, unknown>;
+        try {
+          lockJson = JSON.parse(content) as Record<string, unknown>;
+        } catch {
+          return c.json({ error: "package-lock.json content is not valid JSON" }, 400);
+        }
+        const nodes = buildNpmLockfileGraph(lockJson, riskScoreMap);
+        analysis = analyzeLockfileGraph(nodes, directDepNames);
+      } else if (base === "pnpm-lock.yaml" || base === "pnpm-lock.yml") {
+        const nodes = buildPnpmLockfileGraph(content, riskScoreMap);
+        analysis = analyzeLockfileGraph(nodes, directDepNames);
+      } else if (base === "requirements.txt") {
+        const nodes = buildRequirementsTxtGraph(content, riskScoreMap);
+        analysis = analyzeLockfileGraph(nodes, directDepNames);
+      } else {
+        // Try content-based auto-detection
+        const detected = detectLockfileFormat(filename, content);
+        if (detected === "npm") {
+          let lockJson: Record<string, unknown>;
+          try {
+            lockJson = JSON.parse(content) as Record<string, unknown>;
+          } catch {
+            return c.json({ error: "Detected npm lockfile but content is not valid JSON" }, 400);
+          }
+          const nodes = buildNpmLockfileGraph(lockJson, riskScoreMap);
+          analysis = analyzeLockfileGraph(nodes, directDepNames);
+        } else if (detected === "pnpm") {
+          const nodes = buildPnpmLockfileGraph(content, riskScoreMap);
+          analysis = analyzeLockfileGraph(nodes, directDepNames);
+        } else {
+          return c.json(
+            {
+              error:
+                "Unrecognized lockfile format. Supported filenames: " +
+                "package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, requirements.txt",
+            },
+            400
+          );
+        }
+      }
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : "Graph analysis failed" },
+        500
+      );
+    }
+
+    return c.json(analysis, 200);
   });
 
   app.get("/packages/:ecosystem/confusable/:name", async (c) => {
