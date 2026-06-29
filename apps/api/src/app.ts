@@ -2160,6 +2160,109 @@ export function createApp(services = createServices(readApiEnv())) {
   });
 
   // -----------------------------------------------------------------------
+  // GET /orgs/:orgId/packages/:pkg/health
+  //
+  // Org-scoped supply-chain health endpoint.
+  //
+  // Route pattern: /orgs/{orgId}/packages/{pkg}@{ver}/health
+  // where `pkg` is URL-encoded and may include "@version" suffix
+  // (e.g. "lodash%401.0.0" or "lodash" — version defaults to "latest").
+  //
+  // Also supports explicit ?version=<ver> query param.
+  //
+  // Returns: SupplyChainHealthResult from @binshield/supply-chain-health
+  // -----------------------------------------------------------------------
+
+  app.get("/orgs/:orgId/packages/:pkg/health", async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    // Parse package name + version from the :pkg segment.
+    // Callers may encode as "lodash%401.2.3" (@ URL-encoded) or pass
+    // ?version= separately; both forms are supported.
+    const rawPkg = decodeURIComponent(c.req.param("pkg"));
+    const atIndex = rawPkg.lastIndexOf("@");
+
+    let packageName: string;
+    let version: string;
+
+    if (atIndex > 0) {
+      // "lodash@4.17.21" — split on last @
+      packageName = rawPkg.slice(0, atIndex);
+      version = rawPkg.slice(atIndex + 1);
+    } else {
+      packageName = rawPkg;
+      version = c.req.query("version") ?? "latest";
+    }
+
+    // Allow explicit ?version= to override the @version suffix
+    const versionOverride = c.req.query("version");
+    if (versionOverride) version = versionOverride;
+
+    const ecosystemParam = (c.req.query("ecosystem") ?? "npm") as Ecosystem;
+
+    if (!packageName || packageName.trim().length === 0) {
+      return c.json({ error: "Package name must not be empty" }, 400);
+    }
+
+    // Attempt to load stored analysis first (fast path)
+    const analysis = await getServices(c).repository.getPackage(
+      ecosystemParam,
+      packageName,
+      version === "latest" ? undefined : version
+    );
+
+    if (analysis?.supplyChainHealth) {
+      return c.json(analysis.supplyChainHealth);
+    }
+
+    // Slow path: compute on-the-fly via SupplyChainHealthAnalyzer
+    try {
+      const { SupplyChainHealthAnalyzer } = await import("@binshield/supply-chain-health");
+      const schAnalyzer = new SupplyChainHealthAnalyzer();
+
+      const resolvedVersion = analysis?.version ?? version;
+
+      const registryMeta =
+        ecosystemParam === "pypi"
+          ? SupplyChainHealthAnalyzer.buildPypiMetadata({
+              info: {
+                name: packageName,
+                version: resolvedVersion,
+                license: null,
+                requires_dist: null,
+                author: null,
+                maintainer: null,
+              },
+              releases: {},
+            })
+          : SupplyChainHealthAnalyzer.buildNpmMetadata({
+              name: packageName,
+              versions: {
+                [resolvedVersion]: {
+                  dependencies: {},
+                  license: undefined,
+                },
+              },
+              maintainers: [],
+            });
+
+      const health = schAnalyzer.analyze(registryMeta, resolvedVersion, {}, []);
+      return c.json(health);
+    } catch (err) {
+      console.error(
+        `[BinShield API] org-scoped supply-chain health failed for ` +
+        `org=${orgId} pkg=${packageName}@${version}:`,
+        err instanceof Error ? err.message : err
+      );
+      return c.json({ error: "Supply-chain health analysis failed" }, 500);
+    }
+  });
+
+  // -----------------------------------------------------------------------
   // GET /api/analytics/dashboard
   //
   // Returns aggregated product KPIs for the past 7 days (or custom window).
