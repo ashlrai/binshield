@@ -5,7 +5,7 @@ import { cors } from "hono/cors";
 import { PackageNameIntelligence } from "@binshield/package-intelligence";
 import type { Ecosystem as PkgIntelEcosystem } from "@binshield/package-intelligence";
 
-import { AdvisoryService } from "./lib/advisory-service";
+import { AdvisoryService, getHeatMapData } from "./lib/advisory-service";
 import { EpssCache } from "./lib/epss-cache";
 import { logAudit } from "./lib/audit";
 import { assertSameOrg, resolvePrincipal } from "./lib/auth";
@@ -1812,6 +1812,59 @@ export function createApp(services = createServices(readApiEnv())) {
   // Package name intelligence — returns Levenshtein + homoglyph + corpus
   // analysis for the given package name in the given ecosystem.
   // -----------------------------------------------------------------------
+
+  // -----------------------------------------------------------------------
+  // GET /orgs/:orgId/cve-heat-map?limit=100&ecosystem=npm|pypi|all
+  // CVE/EPSS Risk Heat Map — top CVEs by exploitability × severity × adoption.
+  // Returns HeatMapData: [{cveId, cvssScore, epssPercentile, heatScore, tier, …}]
+  // -----------------------------------------------------------------------
+
+  app.get("/orgs/:orgId/cve-heat-map", async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const limitParam = Number.parseInt(c.req.query("limit") ?? "100", 10);
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 100;
+    const ecosystemParam = (c.req.query("ecosystem") ?? "npm").toLowerCase();
+    const validEcosystems = ["npm", "pypi", "crates", "go", "all"];
+    if (!validEcosystems.includes(ecosystemParam)) {
+      return c.json({ error: `ecosystem must be one of: ${validEcosystems.join(", ")}` }, 400);
+    }
+
+    const { env } = getServices(c);
+
+    // Fetch recent advisories — Supabase or local seeded data
+    let advisories: import("./lib/types").Advisory[];
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      const advisoryService = new AdvisoryService({
+        supabaseUrl: env.supabaseUrl,
+        supabaseServiceRoleKey: env.supabaseServiceRoleKey,
+        githubToken: env.githubToken,
+        nvdApiKey: env.nvdApiKey
+      });
+      advisories = await advisoryService.getRecentAdvisories(500);
+    } else {
+      // Local/dev mode — use in-memory seeded advisories
+      advisories = await getServices(c).repository.getRecentAdvisories(500);
+    }
+
+    const heatMap = await getHeatMapData(
+      {
+        supabaseUrl: env.supabaseUrl ?? "",
+        supabaseServiceRoleKey: env.supabaseServiceRoleKey ?? "",
+        githubToken: env.githubToken,
+        nvdApiKey: env.nvdApiKey
+      },
+      advisories,
+      ecosystemParam,
+      limit
+    );
+
+    return c.json(heatMap);
+  });
 
   app.get("/packages/:ecosystem/confusable/:name", async (c) => {
     const rawEcosystem = c.req.param("ecosystem");

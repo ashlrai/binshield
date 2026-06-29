@@ -13,6 +13,7 @@
  *  6. Concurrent scans with quota enforcement
  *  7. Watchlist alert matching across scans
  *  8. EPSS/CISA KEV enrichment boost verification
+ *  9. CVE/EPSS Risk Heat Map — advisory correlation + adoption inference
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -955,5 +956,199 @@ describe("E2E: EPSS/CISA KEV enrichment boost verification", () => {
 
     // Cap at 100
     expect(computeEpssBoost(0.95, 90)).toBe(100); // 90 + 25 = 115, capped
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. CVE/EPSS Risk Heat Map — advisory correlation + adoption inference
+// ---------------------------------------------------------------------------
+
+describe("E2E: CVE/EPSS Risk Heat Map — advisory correlation + adoption inference", () => {
+  it("GET /orgs/org_demo/cve-heat-map returns HeatMapData shape with items array", async () => {
+    const app = createApp();
+
+    const res = await app.request("/orgs/org_demo/cve-heat-map?limit=100&ecosystem=npm", {
+      headers: AUTH_HEADERS,
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      items: Array<{
+        cveId: string;
+        packageName: string;
+        ecosystem: string;
+        cvssScore: number;
+        epssPercentile: number;
+        severity: string;
+        activeExploit: boolean;
+        patchAvailable: boolean;
+        adoptionPct: number;
+        blastRadius: number;
+        heatScore: number;
+        tier: string;
+      }>;
+      total: number;
+      generatedAt: string;
+      ecosystem: string;
+    };
+
+    // Shape checks
+    expect(Array.isArray(body.items)).toBe(true);
+    expect(typeof body.total).toBe("number");
+    expect(typeof body.generatedAt).toBe("string");
+    expect(() => new Date(body.generatedAt)).not.toThrow();
+    expect(body.ecosystem).toBe("npm");
+  });
+
+  it("heat map items include the seeded CVE-2025-1234 for sqlite3 with correct CVSS", async () => {
+    const app = createApp();
+
+    const res = await app.request("/orgs/org_demo/cve-heat-map?limit=100&ecosystem=npm", {
+      headers: AUTH_HEADERS,
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      items: Array<{
+        cveId: string;
+        packageName: string;
+        cvssScore: number;
+        severity: string;
+        heatScore: number;
+        tier: string;
+        blastRadius: number;
+        adoptionPct: number;
+      }>;
+    };
+
+    // The seeded CVE-2025-1234 for sqlite3 (cvss=9.8, severity=critical) must appear
+    const sqliteEntry = body.items.find((e) => e.cveId === "CVE-2025-1234");
+    expect(sqliteEntry).toBeDefined();
+    expect(sqliteEntry!.cvssScore).toBe(9.8);
+    expect(sqliteEntry!.severity.toLowerCase()).toBe("critical");
+    // heatScore = min(100, 9.8*5 + 0*40 + 0) = 49 (no EPSS in local mode)
+    expect(sqliteEntry!.heatScore).toBeGreaterThan(0);
+    // blastRadius and adoptionPct must be non-negative
+    expect(sqliteEntry!.blastRadius).toBeGreaterThanOrEqual(0);
+    expect(sqliteEntry!.adoptionPct).toBeGreaterThanOrEqual(0);
+    expect(["red", "yellow", "green"]).toContain(sqliteEntry!.tier);
+  });
+
+  it("heat map respects limit param — limit=1 returns at most 1 item", async () => {
+    const app = createApp();
+
+    const res = await app.request("/orgs/org_demo/cve-heat-map?limit=1&ecosystem=npm", {
+      headers: AUTH_HEADERS,
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as { items: unknown[]; total: number };
+    expect(body.items.length).toBeLessThanOrEqual(1);
+    // total reflects full count before slicing
+    expect(body.total).toBeGreaterThanOrEqual(body.items.length);
+  });
+
+  it("heat map rejects invalid ecosystem with 400", async () => {
+    const app = createApp();
+
+    const res = await app.request("/orgs/org_demo/cve-heat-map?ecosystem=cargo", {
+      headers: AUTH_HEADERS,
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: string };
+    expect(body.error).toContain("ecosystem");
+  });
+
+  it("heat map requires auth — returns 401 without API key", async () => {
+    const app = createApp();
+
+    const res = await app.request("/orgs/org_demo/cve-heat-map");
+    expect(res.status).toBe(401);
+  });
+
+  it("buildHeatMapData pure function: sorts by heatScore desc and applies tier correctly", async () => {
+    const { buildHeatMapData, computeHeatScore, computeHeatTier } = await import("./lib/advisory-service");
+
+    const fakeAdvisories = [
+      {
+        id: "adv_low",
+        source: "nvd",
+        sourceId: "CVE-2024-0001",
+        title: "Low risk CVE",
+        severity: "low",
+        cvssScore: 2.0,
+        cweIds: [],
+        references: [],
+        affectedPackages: [{ ecosystem: "npm", packageName: "chalk", patchedVersion: "5.0.0" }],
+      },
+      {
+        id: "adv_crit",
+        source: "nvd",
+        sourceId: "CVE-2024-9999",
+        title: "Critical CVE actively exploited",
+        severity: "critical",
+        cvssScore: 9.8,
+        cweIds: [],
+        references: [],
+        affectedPackages: [{ ecosystem: "npm", packageName: "lodash" }],
+        // Simulate CISA KEV date on the object
+        cisaKevDate: "2024-01-15",
+      },
+    ] as Parameters<typeof buildHeatMapData>[0];
+
+    const epssMap = new Map([
+      ["CVE-2024-9999", { score: 0.97, percentile: 0.97 }],
+      ["CVE-2024-0001", { score: 0.01, percentile: 0.01 }],
+    ]);
+
+    const result = buildHeatMapData(fakeAdvisories, "npm", 100, epssMap);
+
+    expect(result.items.length).toBe(2);
+    // Critical+exploited must be first (higher heatScore)
+    expect(result.items[0]!.cveId).toBe("CVE-2024-9999");
+    expect(result.items[0]!.tier).toBe("red");
+    expect(result.items[1]!.cveId).toBe("CVE-2024-0001");
+
+    // Low CVE (cvss=2.0, epss=0.01, noKev): heatScore = min(100, 2*5 + 0.01*40) = 10 → green
+    expect(result.items[1]!.heatScore).toBe(computeHeatScore(2.0, 0.01, false));
+    expect(result.items[1]!.tier).toBe(computeHeatTier(result.items[1]!.heatScore, false, true));
+
+    // Patch for low CVE must be detected
+    expect(result.items[1]!.patchAvailable).toBe(true);
+    expect(result.items[1]!.patchedVersion).toBe("5.0.0");
+  });
+
+  it("computeHeatScore and computeHeatTier pure helpers produce expected values", async () => {
+    const { computeHeatScore, computeHeatTier } = await import("./lib/advisory-service");
+
+    // Critical + KEV: 9.8*5 + 0.97*40 + 30 = 49 + 38.8 + 30 = 117.8 → capped at 100
+    expect(computeHeatScore(9.8, 0.97, true)).toBe(100);
+    // Medium, no EPSS, no KEV: 5*5 = 25
+    expect(computeHeatScore(5.0, 0, false)).toBe(25);
+    // Low: 2*5 + 0.01*40 = 10 → floor(10.4) = 10
+    expect(computeHeatScore(2.0, 0.01, false)).toBe(10);
+
+    // Tier: activeExploit → red
+    expect(computeHeatTier(30, true, false)).toBe("red");
+    // Tier: heatScore ≥ 75 → red
+    expect(computeHeatTier(80, false, true)).toBe("red");
+    // Tier: patch available, score in [35,75) → yellow
+    expect(computeHeatTier(50, false, true)).toBe("yellow");
+    // Tier: score < 35, no exploit → green
+    expect(computeHeatTier(20, false, false)).toBe("green");
+  });
+
+  it("heat map ecosystem=all returns CVEs across ecosystems", async () => {
+    const app = createApp();
+
+    const res = await app.request("/orgs/org_demo/cve-heat-map?limit=200&ecosystem=all", {
+      headers: AUTH_HEADERS,
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as { items: Array<{ ecosystem: string }>; ecosystem: string };
+    expect(body.ecosystem).toBe("all");
+    expect(Array.isArray(body.items)).toBe(true);
   });
 });

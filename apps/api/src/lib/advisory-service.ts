@@ -1346,6 +1346,230 @@ export class AdvisoryService {
 }
 
 // ---------------------------------------------------------------------------
+// CVE Heat Map — cross-CVE risk ranking by exploitability × severity × adoption
+// ---------------------------------------------------------------------------
+
+/**
+ * A single entry in the CVE heat map.
+ * Columns are designed to drive a sortable data-grid in the dashboard.
+ */
+export interface HeatMapEntry {
+  /** CVE identifier */
+  cveId: string;
+  /** Human-readable advisory title */
+  title: string;
+  /** Affected package name (primary) */
+  packageName: string;
+  /** Ecosystem (npm | pypi | …) */
+  ecosystem: string;
+  /** CVSS base score (0–10) */
+  cvssScore: number;
+  /** EPSS percentile (0–1) — probability of exploitation in the next 30 days */
+  epssPercentile: number;
+  /** Advisory severity label (critical | high | medium | low) */
+  severity: string;
+  /** True when this CVE is in the CISA Known Exploited Vulnerabilities catalogue */
+  activeExploit: boolean;
+  /** ISO date when this CVE was added to the CISA KEV catalogue, if present */
+  cisaKevDate?: string;
+  /** True when a patched version has been published */
+  patchAvailable: boolean;
+  /** First patched version string, when known */
+  patchedVersion?: string;
+  /**
+   * Ecosystem adoption percentage (0–100).
+   * Derived from the package's weekly download rank within POPULAR_PACKAGES_CORPUS:
+   * rank 1 → 100 %, rank N → (1 – rank/N) × 100.
+   */
+  adoptionPct: number;
+  /**
+   * Blast radius score (0–100).
+   * Composite of adoptionPct × cvssScore / 10.
+   */
+  blastRadius: number;
+  /**
+   * Overall heat score used for default sort order (0–100).
+   * Formula: min(100, cvssScore×5 + epssPercentile×40 + activeExploit×30)
+   * Matches the finalScore calculation used in enrichCvesWithEpss.
+   */
+  heatScore: number;
+  /** Patching colour tier: "red" | "yellow" | "green" */
+  tier: "red" | "yellow" | "green";
+}
+
+export interface HeatMapData {
+  items: HeatMapEntry[];
+  total: number;
+  generatedAt: string;
+  ecosystem: string;
+}
+
+/**
+ * Approximate weekly-download rank derived from POPULAR_PACKAGES_CORPUS order.
+ * Packages earlier in the list are considered more widely adopted.
+ * Returns 0–100 where 100 = most downloaded.
+ */
+function adoptionPctForPackage(packageName: string, ecosystem: string): number {
+  const { POPULAR_PACKAGES_CORPUS } = require("@binshield/package-intelligence") as {
+    POPULAR_PACKAGES_CORPUS: Array<{ name: string; ecosystem: string; weeklyDownloads?: number }>;
+  };
+  const corpusForEco = POPULAR_PACKAGES_CORPUS.filter((p) => p.ecosystem === ecosystem);
+  const idx = corpusForEco.findIndex((p) => p.name.toLowerCase() === packageName.toLowerCase());
+  if (idx === -1) return 10; // unknown package → low adoption baseline
+  const rank = idx + 1; // 1-based
+  return Math.max(1, Math.round((1 - rank / corpusForEco.length) * 100));
+}
+
+/**
+ * Build a heat score for sorting: higher = more urgent to patch.
+ * Formula: min(100, floor(cvssScore×5 + epssPercentile×40 + (activeExploit ? 30 : 0)))
+ */
+export function computeHeatScore(cvssScore: number, epssPercentile: number, activeExploit: boolean): number {
+  return Math.min(100, Math.floor(cvssScore * 5 + epssPercentile * 40 + (activeExploit ? 30 : 0)));
+}
+
+/**
+ * Return the colour tier for a heat-map cell:
+ *   red    — critical+exploited (activeExploit OR heatScore ≥ 75)
+ *   yellow — patchable (patchAvailable AND heatScore < 75)
+ *   green  — low-risk (heatScore < 35 AND NOT activeExploit)
+ */
+export function computeHeatTier(
+  heatScore: number,
+  activeExploit: boolean,
+  patchAvailable: boolean
+): "red" | "yellow" | "green" {
+  if (activeExploit || heatScore >= 75) return "red";
+  if (patchAvailable && heatScore >= 35) return "yellow";
+  return "green";
+}
+
+/**
+ * Fetch the top `limit` CVEs affecting the registered dependency graph for an
+ * org, ranked by exploitability (EPSS) × severity (CVSS) × adoption rate.
+ *
+ * In Supabase mode this queries the advisories + epss_scores tables live.
+ * In local/dev mode it falls back to the in-memory seeded advisories.
+ *
+ * @param orgAdvisories  Pre-fetched list of Advisory rows to rank (caller supplies).
+ * @param ecosystem      Filter to a single ecosystem ("npm" | "pypi") or "all".
+ * @param limit          Max number of entries to return (default 100).
+ * @param epssMap        Optional pre-fetched EPSS percentile map (cveId → {score,percentile}).
+ */
+export function buildHeatMapData(
+  orgAdvisories: Advisory[],
+  ecosystem: string,
+  limit: number,
+  epssMap: Map<string, { score: number; percentile: number }>
+): HeatMapData {
+  const seen = new Set<string>();
+  const entries: HeatMapEntry[] = [];
+
+  for (const advisory of orgAdvisories) {
+    const cveId = advisory.sourceId.toUpperCase();
+    if (!cveId.startsWith("CVE-")) continue;
+    if (seen.has(cveId)) continue;
+    seen.add(cveId);
+
+    // Filter by ecosystem when requested
+    const primaryPkg = advisory.affectedPackages[0];
+    const pkgEco = primaryPkg?.ecosystem ?? "npm";
+    if (ecosystem !== "all" && pkgEco !== ecosystem) continue;
+
+    const pkgName = primaryPkg?.packageName ?? advisory.sourceId;
+    const cvssScore = advisory.cvssScore ?? 0;
+    const severityRaw = advisory.severity ?? "unknown";
+
+    const epss = epssMap.get(cveId);
+    const epssPercentile = epss?.percentile ?? 0;
+
+    const raw = advisory as unknown as Record<string, unknown>;
+    const cisaKevDate = (raw["cisaKevDate"] ?? raw["cisa_kev_date"]) as string | undefined;
+    const activeExploit = Boolean(cisaKevDate);
+
+    const patchedVersion = primaryPkg?.patchedVersion;
+    const patchAvailable = Boolean(patchedVersion);
+
+    const adoptionPct = adoptionPctForPackage(pkgName, pkgEco);
+    const blastRadius = Math.min(100, Math.round(adoptionPct * (cvssScore / 10)));
+    const heatScore = computeHeatScore(cvssScore, epssPercentile, activeExploit);
+    const tier = computeHeatTier(heatScore, activeExploit, patchAvailable);
+
+    entries.push({
+      cveId,
+      title: advisory.title,
+      packageName: pkgName,
+      ecosystem: pkgEco,
+      cvssScore,
+      epssPercentile,
+      severity: severityRaw,
+      activeExploit,
+      cisaKevDate,
+      patchAvailable,
+      patchedVersion,
+      adoptionPct,
+      blastRadius,
+      heatScore,
+      tier
+    });
+  }
+
+  // Sort: highest heatScore first, then blastRadius, then cveId
+  entries.sort((a, b) => {
+    if (b.heatScore !== a.heatScore) return b.heatScore - a.heatScore;
+    if (b.blastRadius !== a.blastRadius) return b.blastRadius - a.blastRadius;
+    return a.cveId.localeCompare(b.cveId);
+  });
+
+  const sliced = entries.slice(0, limit);
+
+  return {
+    items: sliced,
+    total: entries.length,
+    generatedAt: new Date().toISOString(),
+    ecosystem
+  };
+}
+
+/**
+ * Full pipeline: fetch advisories for an org's registered deps, enrich with
+ * live EPSS, and return the heat-map payload.
+ *
+ * Supabase mode: queries `registered_dependencies` → advisories → EPSS API.
+ * Local/dev mode: uses in-memory seeded advisories and mocked EPSS (zeroed).
+ */
+export async function getHeatMapData(
+  config: AdvisoryServiceConfig,
+  recentAdvisories: Advisory[],
+  ecosystem: string,
+  limit: number
+): Promise<HeatMapData> {
+  // Collect unique CVE IDs
+  const cveIds = [
+    ...new Set(
+      recentAdvisories
+        .map((a) => a.sourceId.toUpperCase())
+        .filter((id) => id.startsWith("CVE-"))
+    )
+  ];
+
+  // Attempt live EPSS fetch; fall back to empty map on error
+  let epssMap = new Map<string, { score: number; percentile: number }>();
+  if (cveIds.length > 0 && config.supabaseUrl && config.supabaseServiceRoleKey) {
+    try {
+      const svc = new AdvisoryService(config);
+      const { EpssCache } = await import("./epss-cache");
+      const cache = new EpssCache({ supabaseUrl: config.supabaseUrl, supabaseServiceRoleKey: config.supabaseServiceRoleKey });
+      epssMap = await svc.fetchEpssScores(ecosystem === "all" ? "npm" : ecosystem, cveIds, cache);
+    } catch (err) {
+      console.warn("[advisory-service] getHeatMapData: EPSS fetch failed (non-fatal):", err instanceof Error ? err.message : err);
+    }
+  }
+
+  return buildHeatMapData(recentAdvisories, ecosystem, limit, epssMap);
+}
+
+// ---------------------------------------------------------------------------
 // Pure helpers (module-level so they can be unit-tested independently)
 // ---------------------------------------------------------------------------
 
