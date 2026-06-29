@@ -188,6 +188,51 @@ export async function analyzeFromSources(
     }
   }
 
+  // For PyPI packages: attach build-system threat details forwarded from the
+  // sdist acquisition step (PyPiPackageSource runs analyzePypiBuildSystem).
+  if (ecosystem === "pypi" && input.pythonBuildThreatDetails) {
+    const { detectedHooks, cythonFiles, suspiciousPatterns } = input.pythonBuildThreatDetails;
+
+    // Emit a finding for detected setuptools / build hooks
+    if (detectedHooks.length > 0) {
+      record({
+        category: "setupToolsHookExecution",
+        severity: "medium",
+        title: "Build system hooks execute code at install time",
+        description: `The package registers ${detectedHooks.length} custom build hook${detectedHooks.length === 1 ? "" : "s"} that run arbitrary Python during \`pip install\`: ${detectedHooks.slice(0, 3).join("; ")}${detectedHooks.length > 3 ? "; …" : ""}.`,
+        filePath: "setup.py",
+        evidence: detectedHooks.slice(0, 5).join("; "),
+        recommendation: "Review all cmdclass overrides and custom install/build_ext classes for unexpected shell invocations or network access."
+      });
+    }
+
+    // Emit a finding for Cython extension sources
+    if (cythonFiles.length > 0) {
+      record({
+        category: "cythonBinaryExtension",
+        severity: "medium",
+        title: "Package contains Cython extension sources compiled at install time",
+        description: `${cythonFiles.length} Cython source file${cythonFiles.length === 1 ? "" : "s"} (.pyx/.pxd) will be compiled into native code during installation: ${cythonFiles.slice(0, 3).join(", ")}${cythonFiles.length > 3 ? ", …" : ""}. Cython extensions can access system calls and C APIs directly.`,
+        filePath: cythonFiles[0] ?? "setup.py",
+        evidence: cythonFiles.slice(0, 5).join(", "),
+        recommendation: "Review Cython sources for direct system call usage (libc.stdlib cimport, ctypes, cffi) and verify they originate from the published source repository."
+      });
+    }
+
+    // Emit a finding for each suspicious build-config pattern (deduplicated, high severity)
+    for (const pattern of suspiciousPatterns.slice(0, 10)) {
+      record({
+        category: "setupToolsHookExecution",
+        severity: "high",
+        title: "Suspicious pattern in build configuration",
+        description: pattern,
+        filePath: "setup.py",
+        evidence: pattern.slice(0, 200),
+        recommendation: "Inspect the flagged build configuration code carefully before installing this package."
+      });
+    }
+  }
+
   // Apply trusted-package demotion: for allowlisted packages, downgrade the
   // benign installHook baseline from "low" → "info". High/critical findings,
   // typosquat hits, and knownMalware are NEVER demoted — see trusted-packages.ts.
@@ -207,7 +252,9 @@ export async function analyzeFromSources(
     sourceMatchConfidence: ecosystem === "pypi" ? "low" : "medium",
     analyzedAt: new Date().toISOString(),
     hasPythonBinaryExtension: hasPythonBinaryExtension || undefined,
-    pythonExtensionFiles: pythonExtensionFiles.length > 0 ? pythonExtensionFiles : undefined
+    pythonExtensionFiles: pythonExtensionFiles.length > 0 ? pythonExtensionFiles : undefined,
+    buildSystemType: input.buildSystemType,
+    pythonBuildThreatDetails: input.pythonBuildThreatDetails
   };
 
   const scored = scoreManifest(base);

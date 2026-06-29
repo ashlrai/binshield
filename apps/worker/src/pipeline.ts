@@ -209,7 +209,9 @@ export class WorkerRuntime {
     const scriptInput: ScriptAnalysisInput = {
       packageRequest: request,
       packageRoot: acquired.packageRoot,
-      manifest: acquired.manifest
+      manifest: acquired.manifest,
+      buildSystemType: acquired.buildSystemType,
+      pythonBuildThreatDetails: acquired.pythonBuildThreatDetails
     };
     // Install-script analysis runs concurrently with binary discovery — it is
     // independent of the binaries and feeds the cache key below.

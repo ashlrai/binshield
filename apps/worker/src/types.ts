@@ -2,10 +2,12 @@ import type {
   AnalysisStatus,
   BehaviorSummary,
   BinaryFormat,
+  BuildSystemType,
   Ecosystem,
   Finding,
   ManifestAnalysis,
   PackageAnalysis,
+  PythonBuildThreatDetails,
   RiskLevel,
   ScanRequest
 } from "@binshield/analysis-types";
@@ -41,6 +43,16 @@ export interface AcquiredPackage {
   packageRoot: string;
   packageJsonPath: string;
   manifest: PackageManifest;
+  /**
+   * PyPI build-system type detected from pyproject.toml / setup.cfg / setup.py.
+   * Only populated for PyPI sdist acquisitions.
+   */
+  buildSystemType?: BuildSystemType;
+  /**
+   * PyPI build-system threat details (hooks, Cython files, suspicious patterns).
+   * Only populated for PyPI sdist acquisitions.
+   */
+  pythonBuildThreatDetails?: PythonBuildThreatDetails;
 }
 
 export interface FingerprintedArtifact {
@@ -151,6 +163,16 @@ export interface ScriptAnalysisInput {
   packageRequest: WorkerScanRequest;
   packageRoot: string;
   manifest: PackageManifest;
+  /**
+   * PyPI build-system type pre-computed by `PyPiPackageSource.acquire()`.
+   * Forwarded from `AcquiredPackage` into the script analyzer so the manifest
+   * analysis can carry this metadata without re-running detection.
+   */
+  buildSystemType?: BuildSystemType;
+  /**
+   * PyPI build-system threat details pre-computed by `PyPiPackageSource.acquire()`.
+   */
+  pythonBuildThreatDetails?: PythonBuildThreatDetails;
 }
 
 /**

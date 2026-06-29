@@ -53,7 +53,9 @@ export type ScriptThreatCategory =
   | "remoteCodeExecution"
   | "obfuscation"
   | "knownMalware"
-  | "pythonBinaryExtension";
+  | "pythonBinaryExtension"
+  | "setupToolsHookExecution"
+  | "cythonBinaryExtension";
 
 export interface ScriptFinding {
   category: ScriptThreatCategory;
@@ -86,6 +88,17 @@ export interface KnownMalwareMatch {
   url?: string;
 }
 
+export type BuildSystemType = "setuptools" | "poetry" | "pdm" | "flit" | "hatch" | "other";
+
+export interface PythonBuildThreatDetails {
+  /** Custom build commands / install hooks found in build config (e.g. cmdclass entries). */
+  detectedHooks: string[];
+  /** Cython source files (.pyx / .pxd) found in the package tree. */
+  cythonFiles: string[];
+  /** Suspicious patterns detected in build configuration files. */
+  suspiciousPatterns: string[];
+}
+
 export interface ManifestAnalysis {
   id: string;
   ecosystem: Ecosystem;
@@ -112,6 +125,17 @@ export interface ManifestAnalysis {
   hasPythonBinaryExtension?: boolean;
   /** Filenames of Python native extensions found inside the wheel. */
   pythonExtensionFiles?: string[];
+  /**
+   * Python build backend detected from pyproject.toml / setup.cfg / setup.py.
+   * Populated only for PyPI packages.
+   */
+  buildSystemType?: BuildSystemType;
+  /**
+   * Detailed PyPI build-system threat inventory: hooks, Cython files, and
+   * suspicious patterns discovered during deep sdist analysis.
+   * Populated only for PyPI packages that have a build config.
+   */
+  pythonBuildThreatDetails?: PythonBuildThreatDetails;
 }
 
 export interface BinaryFingerprint {
@@ -370,12 +394,14 @@ export const SCRIPT_THREAT_KEYS: Array<keyof ScriptThreatSummary> = [
   "remoteCodeExecution"
 ];
 
-/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, and pythonBinaryExtension. */
+/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, pythonBinaryExtension, and PyPI build-system categories. */
 export const SCRIPT_THREAT_CATEGORIES: ScriptThreatCategory[] = [
   ...SCRIPT_THREAT_KEYS,
   "obfuscation",
   "knownMalware",
-  "pythonBinaryExtension"
+  "pythonBinaryExtension",
+  "setupToolsHookExecution",
+  "cythonBinaryExtension"
 ];
 
 export function entitlementForPlan(plan: PlanName): EntitlementRecord {

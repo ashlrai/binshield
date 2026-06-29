@@ -1045,6 +1045,56 @@ export function createApp(services = createServices(readApiEnv())) {
     return c.json({ error: "Binary not found" }, 404);
   });
 
+  // -----------------------------------------------------------------------
+  // GET /packages/:ecosystem/:name/:version/pypi-build-analysis
+  // Returns PyPI build system type and hook inventory for a package version.
+  // Only meaningful for PyPI packages; returns 404 for non-PyPI packages that
+  // have no build analysis recorded, and a structured empty result for PyPI
+  // packages with no build config.
+  // -----------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/:name/:version/pypi-build-analysis", async (c) => {
+    const ecosystem = c.req.param("ecosystem") as Ecosystem;
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    const analysis = await getServices(c).repository.getPackage(ecosystem, name, version);
+
+    if (!analysis) {
+      return c.json({ error: "Analysis not found" }, 404);
+    }
+
+    const manifest = analysis.manifestAnalysis;
+
+    // For non-PyPI or packages with no manifest analysis, return a minimal
+    // structured response so callers don't have to special-case missing fields.
+    if (ecosystem !== "pypi" || !manifest) {
+      return c.json({
+        ecosystem,
+        packageName: name,
+        version,
+        buildSystemType: "other",
+        pythonBuildThreatDetails: {
+          detectedHooks: [],
+          cythonFiles: [],
+          suspiciousPatterns: []
+        }
+      });
+    }
+
+    return c.json({
+      ecosystem,
+      packageName: name,
+      version,
+      buildSystemType: manifest.buildSystemType ?? "other",
+      pythonBuildThreatDetails: manifest.pythonBuildThreatDetails ?? {
+        detectedHooks: [],
+        cythonFiles: [],
+        suspiciousPatterns: []
+      }
+    });
+  });
+
   app.get("/advisories/recent", async (c) => {
     const limit = Math.min(Number(c.req.query("limit") ?? 50), 200);
     const advisories = await getServices(c).repository.getRecentAdvisories(limit);

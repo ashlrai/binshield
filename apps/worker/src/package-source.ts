@@ -5,8 +5,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import { isPythonNativeExtension, hasPyPiAbiTag } from "./native-indicators";
+import { analyzePypiBuildSystem } from "./pypi-sdist-analyzer";
 
 import type { AcquiredPackage, PackageManifest, PackageAcquisitionService, WorkerScanRequest } from "./types";
+import type { BuildSystemType, PythonBuildThreatDetails } from "@binshield/analysis-types";
 
 const execFileAsync = promisify(execFile);
 
@@ -295,11 +297,25 @@ export class PyPiPackageSource implements PackageAcquisitionService {
         optionalDependencies: {}
       };
 
+      // Perform deep build-system analysis on the extracted sdist.
+      // Failures are non-fatal — we still return the acquired package.
+      let buildSystemType: BuildSystemType | undefined;
+      let pythonBuildThreatDetails: PythonBuildThreatDetails | undefined;
+      try {
+        const buildAnalysis = await analyzePypiBuildSystem(nestedRoot);
+        buildSystemType = buildAnalysis.buildSystemType;
+        pythonBuildThreatDetails = buildAnalysis.threatDetails;
+      } catch {
+        // Deep analysis failure is non-fatal
+      }
+
       return {
         sourceKind: "tarball",
         packageRoot: nestedRoot,
         packageJsonPath: path.join(nestedRoot, "package.json"),
-        manifest
+        manifest,
+        buildSystemType,
+        pythonBuildThreatDetails
       };
     } catch (error) {
       await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
