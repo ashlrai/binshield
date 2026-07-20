@@ -1,5 +1,6 @@
 import type { Advisory, AdvisorySyncResult, EpssScore, RiskCorrelation } from "./types";
 import type { VulnerabilityEnrichment, EnrichedFinding, ExploitMaturity } from "@binshield/analysis-types";
+import { POPULAR_PACKAGES_CORPUS } from "@binshield/package-intelligence";
 import { EpssCache } from "./epss-cache";
 import type { VendorPatchContext, LockfileResolutionContext } from "@binshield/risk-engine";
 
@@ -1630,9 +1631,6 @@ export interface HeatMapData {
  * Returns 0–100 where 100 = most downloaded.
  */
 function adoptionPctForPackage(packageName: string, ecosystem: string): number {
-  const { POPULAR_PACKAGES_CORPUS } = require("@binshield/package-intelligence") as {
-    POPULAR_PACKAGES_CORPUS: Array<{ name: string; ecosystem: string; weeklyDownloads?: number }>;
-  };
   const corpusForEco = POPULAR_PACKAGES_CORPUS.filter((p) => p.ecosystem === ecosystem);
   const idx = corpusForEco.findIndex((p) => p.name.toLowerCase() === packageName.toLowerCase());
   if (idx === -1) return 10; // unknown package → low adoption baseline
