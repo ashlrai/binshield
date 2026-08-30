@@ -68,4 +68,4 @@ outputs:
 
 runs:
   using: "node20"
-  main: "dist/apps/github-action/src/index.js"
+  main: "dist/index.cjs"
