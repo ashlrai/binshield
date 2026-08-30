@@ -1,7 +1,7 @@
 # BinShield Ghidra Decompiler Image
 # Multi-stage build for a lean production image with Ghidra headless analysis.
 
-FROM ubuntu:22.04 AS base
+FROM ubuntu:26.04 AS base
 
 ARG GHIDRA_VERSION=11.3
 ARG GHIDRA_DATE=20250205
@@ -29,7 +29,7 @@ RUN wget -q "https://github.com/NationalSecurityAgency/ghidra/releases/download/
 # -------------------------------------------------------------------
 # Production stage -- drop wget/unzip, keep only the runtime
 # -------------------------------------------------------------------
-FROM ubuntu:22.04
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
