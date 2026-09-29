@@ -6,7 +6,14 @@ Zero-dependency CLI for [BinShield](https://binshield.dev) — audit your depend
 
 ## Install
 
+> **Coming soon.** `@binshield/cli` is not published to npm yet, so the `npx` and
+> `npm install -g` commands below don't work today. Until it ships, use the
+> [GitHub Action](../../apps/github-action/README.md) or [binshield.dev/scan](https://binshield.dev/scan),
+> or build from source: `pnpm install && pnpm --filter @binshield/cli build`, then
+> `node packages/cli/dist/index.js audit`.
+
 ```bash
+# Coming soon: not on npm yet
 # One-off (no install required)
 npx @binshield/cli audit
 
@@ -133,6 +140,8 @@ CLI flag  >  BINSHIELD_API_KEY / BINSHIELD_API_URL env  >  ~/.binshield/config.j
 | `2` | Risk at or above `--fail-on` threshold |
 
 ## CI integration
+
+> **Coming soon** (needs the npm publish). For CI today, use the [GitHub Action](../../apps/github-action/README.md).
 
 ```yaml
 # .github/workflows/binshield.yml  (or: binshield init)

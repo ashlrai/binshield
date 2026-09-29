@@ -2,7 +2,7 @@
 
 **Catch malicious install scripts and native binaries in your dependencies — before they reach production.**
 
-[![CI](https://github.com/ashlrai/binshield/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/binshield/actions/workflows/ci.yml)
+[![CI](https://github.com/ashlrai/binshield/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/ashlrai/binshield/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)
 
@@ -68,6 +68,46 @@ flowchart LR
 
 ## Quickstart
 
+### 1. Scan your repo in CI (GitHub Action)
+
+Add the Action to block risky dependencies on every PR. No account is needed;
+an API key from [binshield.dev](https://binshield.dev) adds higher rate limits
+and proactive alerting.
+
+```yaml
+# .github/workflows/binshield.yml
+name: BinShield
+on: [pull_request]
+jobs:
+  binshield:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ashlrai/binshield/apps/github-action@v1
+        with:
+          fail-on: high
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # api-key: ${{ secrets.BINSHIELD_API_KEY }}   # optional
+```
+
+See [`apps/github-action/README.md`](apps/github-action/README.md) for inputs,
+scan modes, SARIF and SBOM export.
+
+### 2. Check a single package on the web
+
+[binshield.dev/scan](https://binshield.dev/scan) takes any npm package name and
+version and returns a risk verdict with the top findings.
+[binshield.dev/search](https://binshield.dev/search) searches packages that have
+already been analyzed.
+
+### 3. CLI (coming soon)
+
+`@binshield/cli` lives in [`packages/cli`](packages/cli/README.md) but is **not
+published to npm yet**, so `npx @binshield/cli` won't work today. You can build
+it from source (see below).
+
+## Develop locally
+
 ```bash
 corepack enable          # provides pnpm 10
 pnpm install
@@ -81,22 +121,9 @@ so you can explore the product before wiring up Supabase / xAI / Stripe.
 ```bash
 pnpm --filter @binshield/api dev                     # API server
 BINSHIELD_WORKER_MODE=daemon pnpm --filter @binshield/worker dev   # worker
+pnpm --filter @binshield/cli build && node packages/cli/dist/index.js audit   # CLI from source
 pnpm typecheck && pnpm test && pnpm build            # the validation gate
 ```
-
-## Scan your repo in CI
-
-Add the GitHub Action to block malicious dependencies on every PR:
-
-```yaml
-- uses: ashlrai/binshield/apps/github-action@v1
-  with:
-    api-key: ${{ secrets.BINSHIELD_API_KEY }}
-    fail-on: high
-```
-
-See [`apps/github-action/README.md`](apps/github-action/README.md) for inputs,
-scan modes, and SBOM export.
 
 ## Monorepo layout
 

@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           fail-on: high
           github-token: \${{ secrets.GITHUB_TOKEN }}`;

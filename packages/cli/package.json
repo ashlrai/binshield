@@ -14,7 +14,7 @@
   "homepage": "https://binshield.dev",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ashlar-ai/binshield",
+    "url": "https://github.com/ashlrai/binshield",
     "directory": "packages/cli"
   },
   "license": "MIT",
