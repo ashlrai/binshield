@@ -15,7 +15,7 @@ jobs:
 
       - name: Scan native dependencies
         id: binshield
-        uses: ./
+        uses: ./apps/github-action
         with:
           api-base-url: https://api.binshield.dev
           github-token: ${{ github.token }}
