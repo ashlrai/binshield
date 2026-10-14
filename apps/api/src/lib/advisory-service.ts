@@ -1,5 +1,6 @@
 import type { Advisory, AdvisorySyncResult, EpssScore, RiskCorrelation } from "./types";
 import type { VulnerabilityEnrichment, EnrichedFinding, ExploitMaturity } from "@binshield/analysis-types";
+import { POPULAR_PACKAGES_CORPUS } from "@binshield/package-intelligence";
 import { EpssCache } from "./epss-cache";
 import type { VendorPatchContext, LockfileResolutionContext } from "@binshield/risk-engine";
 import { POPULAR_PACKAGES_CORPUS } from "@binshield/package-intelligence";

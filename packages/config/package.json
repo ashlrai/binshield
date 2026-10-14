@@ -9,5 +9,8 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run src",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
   }
 }
