@@ -78,6 +78,14 @@ export function isValidWebhookUrl(url: string): boolean {
   if (host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.")) {
     return false;
   }
+  // Block the entire 0.0.0.0/8 "this host" range (e.g. 0.1.2.3 routes to localhost on Linux).
+  if (host.startsWith("0.")) {
+    return false;
+  }
+  // Block CGNAT shared address space 100.64.0.0/10 (100.64.0.0 – 100.127.255.255).
+  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host)) {
+    return false;
+  }
   if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) {
     return false;
   }

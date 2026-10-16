@@ -138,7 +138,9 @@ export async function fingerprintFile(filePath: string, relativePath?: string): 
 
 export function isCandidateBinary(fileName: string): boolean {
   const ext = path.extname(fileName).toLowerCase();
-  return [".node", ".so", ".dll", ".dylib", ".wasm"].includes(ext);
+  // .pyd is the Windows Python extension DLL equivalent; also catch CPython
+  // ABI-tagged .so files like `_ssl.cpython-311-x86_64-linux-gnu.so`.
+  return [".node", ".so", ".dll", ".dylib", ".wasm", ".pyd"].includes(ext);
 }
 
 export function summarizeBinaryText(bytes: Uint8Array, limit = 12): string {

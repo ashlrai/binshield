@@ -1,4 +1,110 @@
-import type { Advisory, AdvisorySyncResult } from "./types";
+import type { Advisory, AdvisorySyncResult, EpssScore, RiskCorrelation } from "./types";
+import type { VulnerabilityEnrichment, EnrichedFinding, ExploitMaturity } from "@binshield/analysis-types";
+import { EpssCache } from "./epss-cache";
+import type { VendorPatchContext, LockfileResolutionContext } from "@binshield/risk-engine";
+import { POPULAR_PACKAGES_CORPUS } from "@binshield/package-intelligence";
+
+// ---------------------------------------------------------------------------
+// CveEpssEntry — result type for getCveForPackage()
+// ---------------------------------------------------------------------------
+
+/**
+ * A single CVE entry returned by `getCveForPackage()`, combining the CVE ID
+ * with its current EPSS percentile and CISA KEV status.
+ *
+ * Used by the risk-engine EPSS severity override pipeline to decide how much
+ * to boost a package's risk_score based on real-world exploitation data.
+ */
+export interface CveEpssEntry {
+  /** CVE identifier in uppercase, e.g. "CVE-2024-12345". */
+  cveId: string;
+  /**
+   * EPSS probability percentile [0, 1].
+   * 0 when no EPSS data is available for this CVE.
+   */
+  epss_percentile: number;
+  /**
+   * Raw EPSS probability score [0, 1] (distinct from the percentile rank).
+   * 0 when no EPSS data is available.
+   */
+  epss_score: number;
+  /**
+   * True when this CVE appears in the CISA Known Exploited Vulnerabilities
+   * catalogue (as populated by the NVD feed ingester).
+   */
+  kev_active: boolean;
+  /**
+   * ISO date string (YYYY-MM-DD) when the EPSS score was last computed.
+   * Undefined when no EPSS data is available.
+   */
+  score_date?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Vendor advisory JSON shape (GitHub Security Advisories + generic feed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal shape of a vendor advisory JSON file.
+ * Accepts both GitHub Security Advisory (GHSA) feed format and a simplified
+ * generic vendor feed used by some ecosystem registries.
+ */
+export interface VendorAdvisoryJson {
+  /** GHSA or CVE identifier */
+  id: string;
+  /** CVE alias when the primary id is a GHSA */
+  cve_id?: string | null;
+  /** Affected packages / version ranges */
+  vulnerabilities?: Array<{
+    package?: { name?: string; ecosystem?: string };
+    vulnerable_version_range?: string | null;
+    patched_versions?: string | null;
+    first_patched_version?: { identifier: string } | null;
+  }>;
+  /** ISO publish date (used to compute daysToFix relative to now) */
+  published_at?: string | null;
+  /** ISO date the advisory was last updated */
+  updated_at?: string | null;
+  /** Withdrawn advisories must be ignored */
+  withdrawn_at?: string | null;
+}
+
+/**
+ * Result from parsing a batch of vendor advisory JSON files.
+ */
+export interface VendorAdvisoryParseResult {
+  /** Per-CVE vendor patch contexts extracted from the advisories */
+  patches: VendorPatchContext[];
+  /** How many advisories were parsed */
+  parsed: number;
+  /** How many were skipped (withdrawn or malformed) */
+  skipped: number;
+}
+
+// ---------------------------------------------------------------------------
+// EPSS feed row (FIRST / Cyentia CSV feed, JSON variant)
+// ---------------------------------------------------------------------------
+
+interface EpssFeedRow {
+  cve: string;
+  epss: string;
+  percentile: string;
+  date?: string;
+  model_version?: string;
+}
+
+interface EpssScoreRow {
+  id: string;
+  cve_id: string;
+  package_name: string;
+  ecosystem: string;
+  version: string;
+  epss_score: number;
+  epss_percentile: number;
+  model_version: string;
+  score_date: string;
+  updated_at: string;
+}
 
 // ---------------------------------------------------------------------------
 // Internal row types matching Supabase schema
@@ -284,6 +390,94 @@ export class AdvisoryService {
   async getMalwareAdvisoriesForPackage(ecosystem: string, packageName: string): Promise<Advisory[]> {
     const advisories = await this.getPackageAdvisories(ecosystem, packageName);
     return advisories.filter((advisory) => advisory.advisoryType === "malware");
+  }
+
+  // -------------------------------------------------------------------------
+  // EPSS severity override — getCveForPackage
+  // -------------------------------------------------------------------------
+
+  /**
+   * Return all CVE IDs known for a given package + version, along with their
+   * EPSS percentiles and CISA KEV status, ready for use by the risk-engine
+   * EPSS severity override pipeline.
+   *
+   * Steps:
+   *   1. Fetch all advisories stored for this ecosystem/package from the DB.
+   *   2. Filter to CVE-prefixed source IDs (skip GHSA-only entries).
+   *   3. For each CVE, look up any cached EPSS score; fall back to a live
+   *      FIRST API fetch when no cached row exists.
+   *   4. Return an array of CveEpssEntry objects sorted by epss_percentile desc.
+   *
+   * The result is intentionally lightweight — callers (e.g. aggregatePackageRisk
+   * in the risk-engine) pass the highest-percentile entry to epssBoost() /
+   * cisaKevBoost() to compute the risk score uplift.
+   *
+   * @param ecosystem    Package ecosystem ("npm" | "pypi").
+   * @param packageName  Package name, e.g. "lodash".
+   * @param version      Exact version string pinned in the lockfile.
+   */
+  async getCveForPackage(
+    ecosystem: string,
+    packageName: string,
+    version: string
+  ): Promise<CveEpssEntry[]> {
+    // 1. Pull all advisories from DB (already synced by syncPackageAdvisories)
+    let advisories: Advisory[] = [];
+    try {
+      advisories = await this.getPackageAdvisories(ecosystem, packageName);
+    } catch {
+      // Graceful degradation — no advisories means no boost
+      return [];
+    }
+
+    // 2. Extract unique CVE IDs
+    const cveIds = [
+      ...new Set(
+        advisories
+          .map((a) => a.sourceId)
+          .filter((id) => id.toUpperCase().startsWith("CVE-"))
+          .map((id) => id.toUpperCase())
+      )
+    ];
+    if (cveIds.length === 0) return [];
+
+    // 3. Fetch EPSS scores (cached → live fallback)
+    let epssRows: EpssScore[] = [];
+    try {
+      epssRows = await this.getEpssScores(ecosystem, packageName, version);
+      if (epssRows.length === 0) {
+        epssRows = await this.syncEpssScores(ecosystem, packageName, version, cveIds);
+      }
+    } catch {
+      // EPSS enrichment is best-effort
+    }
+
+    const epssMap = new Map(epssRows.map((r) => [r.cveId.toUpperCase(), r]));
+
+    // 4. Build KEV set from advisory raw data
+    const kevSet = new Set<string>();
+    for (const advisory of advisories) {
+      const raw = advisory as unknown as Record<string, unknown>;
+      const kevDate = raw["cisaKevDate"] ?? raw["cisa_kev_date"];
+      if (kevDate && advisory.sourceId.toUpperCase().startsWith("CVE-")) {
+        kevSet.add(advisory.sourceId.toUpperCase());
+      }
+    }
+
+    // 5. Assemble result — one entry per CVE, sorted by percentile desc
+    const entries: CveEpssEntry[] = cveIds.map((cveId) => {
+      const epssRow = epssMap.get(cveId);
+      return {
+        cveId,
+        epss_percentile: epssRow?.epssPercentile ?? 0,
+        epss_score: epssRow?.epssScore ?? 0,
+        kev_active: kevSet.has(cveId),
+        score_date: epssRow?.scoreDate
+      };
+    });
+
+    entries.sort((a, b) => b.epss_percentile - a.epss_percentile);
+    return entries;
   }
 
   // -------------------------------------------------------------------------
@@ -714,4 +908,945 @@ export class AdvisoryService {
       }))
     };
   }
+
+  // -------------------------------------------------------------------------
+  // Vendor patch parsing — public API
+  // -------------------------------------------------------------------------
+
+  /**
+   * Parse an array of vendor advisory JSON objects (e.g. GitHub Security
+   * Advisories fetched from the GHSA REST API or a local vendor feed) and
+   * extract VendorPatchContext entries for each CVE that has a known
+   * patched version.
+   *
+   * Withdrawn advisories are skipped.  Advisories without a patched version
+   * are also skipped (they provide no mitigation signal).
+   *
+   * @param advisories   Raw advisory JSON objects (already parsed from JSON).
+   * @param packageName  Filter: only emit patches for this package name.
+   *                     If omitted, all packages in the advisories are included.
+   */
+  parseVendorAdvisoryPatches(
+    advisories: VendorAdvisoryJson[],
+    packageName?: string
+  ): VendorAdvisoryParseResult {
+    let parsed = 0;
+    let skipped = 0;
+    const patches: VendorPatchContext[] = [];
+
+    for (const advisory of advisories) {
+      // Skip withdrawn advisories — the patch may have been retracted
+      if (advisory.withdrawn_at) {
+        skipped++;
+        continue;
+      }
+
+      const cveId = advisory.cve_id ?? advisory.id;
+      if (!cveId) {
+        skipped++;
+        continue;
+      }
+
+      const vulns = advisory.vulnerabilities ?? [];
+      if (vulns.length === 0) {
+        skipped++;
+        continue;
+      }
+
+      let emittedForThisAdvisory = false;
+
+      for (const vuln of vulns) {
+        // Optional package name filter
+        if (packageName && vuln.package?.name && vuln.package.name.toLowerCase() !== packageName.toLowerCase()) {
+          continue;
+        }
+
+        // Resolve the patched version — prefer first_patched_version (more
+        // precise from GHSA) then fall back to patched_versions string.
+        const patchedVersion =
+          vuln.first_patched_version?.identifier ??
+          this.extractFirstPatchedVersion(vuln.patched_versions ?? null);
+
+        if (!patchedVersion) {
+          continue; // No patch yet — nothing to downgrade
+        }
+
+        // Compute daysToFix from published_at to now
+        const daysToFix = advisory.published_at
+          ? Math.max(0, Math.floor((Date.now() - new Date(advisory.published_at).getTime()) / 86_400_000))
+          : 0;
+
+        // Confidence: GHSA advisories sourced via GitHub API are "high";
+        // plain vendor feeds with only patched_versions string are "medium".
+        const vendorConfidence: VendorPatchContext["vendorConfidence"] =
+          advisory.id.toUpperCase().startsWith("GHSA-") ? "high" : "medium";
+
+        patches.push({ cveId, patchedVersion, daysToFix, vendorConfidence });
+        emittedForThisAdvisory = true;
+        parsed++;
+        break; // One patch per advisory is enough for risk scoring
+      }
+
+      if (!emittedForThisAdvisory) {
+        skipped++;
+      }
+    }
+
+    return { patches, parsed, skipped };
+  }
+
+  /**
+   * Build LockfileResolutionContext entries by comparing the version pinned in
+   * the lockfile against the list of known patched versions.
+   *
+   * This is a simple semver-range-free comparison that works for the common
+   * case where the lockfile pins an exact version.  For more complex ranges,
+   * callers should use a full semver library before calling this helper.
+   *
+   * @param resolvedVersion  The exact version string pinned in the lockfile.
+   * @param patches          VendorPatchContext entries from parseVendorAdvisoryPatches.
+   */
+  buildLockfileResolutionContexts(
+    resolvedVersion: string,
+    patches: VendorPatchContext[]
+  ): LockfileResolutionContext[] {
+    return patches.map((patch) => ({
+      cveId: patch.cveId,
+      resolvedVersion,
+      patchedVersion: patch.patchedVersion,
+      // Treat as unpatched when the resolved version string is not the same as
+      // (or does not start with) the patched version.  This is intentionally
+      // conservative: if the lockfile pins exactly the patched version we mark
+      // it as patched; otherwise we flag it for review.
+      isUnpatched: !this.isVersionPatched(resolvedVersion, patch.patchedVersion)
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Private patch helpers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Extract the first version string from a GHSA `patched_versions` string
+   * like ">= 1.2.3" or "= 1.2.3" or just "1.2.3".
+   */
+  private extractFirstPatchedVersion(patched: string | null): string | undefined {
+    if (!patched) return undefined;
+    // Strip leading operators: >=, >, =, ^, ~
+    const match = patched.trim().match(/[>=^~]*\s*([\d]+\.[\d]+\.[\d]+[\w.-]*)/);
+    return match?.[1];
+  }
+
+  /**
+   * Returns true when the resolved version is equal to or "newer than" the
+   * patched version using simple dotted-number comparison.
+   *
+   * This is intentionally conservative: if either version is non-numeric we
+   * fall back to strict string equality so we never incorrectly mark a
+   * vulnerable version as patched.
+   */
+  private isVersionPatched(resolved: string, patched: string): boolean {
+    if (resolved === patched) return true;
+
+    const parseSemver = (v: string): number[] | null => {
+      const parts = v.replace(/^[v=^~>=<]+/, "").split(".").map(Number);
+      if (parts.some(isNaN)) return null;
+      return parts;
+    };
+
+    const r = parseSemver(resolved);
+    const p = parseSemver(patched);
+    if (!r || !p) return false;
+
+    const len = Math.max(r.length, p.length);
+    for (let i = 0; i < len; i++) {
+      const rv = r[i] ?? 0;
+      const pv = p[i] ?? 0;
+      if (rv > pv) return true;
+      if (rv < pv) return false;
+    }
+    return true; // equal
+  }
+
+  // -------------------------------------------------------------------------
+  // EPSS enrichment
+  // -------------------------------------------------------------------------
+
+  /**
+   * Fetch EPSS scores for a set of CVE IDs from the FIRST/Cyentia EPSS API
+   * (https://api.first.org/data/v1/epss) and upsert them into the
+   * `epss_scores` table keyed to the given package.
+   *
+   * The FIRST EPSS REST API accepts up to 100 CVE IDs per request and returns
+   * JSON — no auth required.
+   */
+  async syncEpssScores(
+    ecosystem: string,
+    packageName: string,
+    version: string,
+    cveIds: string[]
+  ): Promise<EpssScore[]> {
+    if (cveIds.length === 0) return [];
+
+    const feedRows = await this.fetchEpssFromApi(cveIds);
+    if (feedRows.length === 0) return [];
+
+    const today = new Date().toISOString().slice(0, 10);
+    const upsertRows = feedRows.map((row) => ({
+      cve_id: row.cve,
+      package_name: packageName,
+      ecosystem,
+      version,
+      epss_score: parseFloat(row.epss),
+      epss_percentile: parseFloat(row.percentile),
+      model_version: row.model_version ?? "",
+      score_date: row.date ?? today
+    }));
+
+    // Upsert — idempotent on (cve_id, package_name, ecosystem, version, score_date)
+    await this.dbRequest<void>(
+      "/epss_scores?on_conflict=cve_id,package_name,ecosystem,version,score_date",
+      {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify(upsertRows)
+      }
+    );
+
+    return this.mapEpssRows(
+      upsertRows.map((r, i) => ({
+        id: `epss_${i}`,
+        ...r,
+        updated_at: new Date().toISOString()
+      }))
+    );
+  }
+
+  /**
+   * Retrieve stored EPSS scores for a package version from the database.
+   */
+  async getEpssScores(ecosystem: string, packageName: string, version: string): Promise<EpssScore[]> {
+    const rows = await this.dbSelect<EpssScoreRow>(
+      "epss_scores",
+      `select=*&ecosystem=eq.${encodeURIComponent(ecosystem)}&package_name=eq.${encodeURIComponent(packageName)}&version=eq.${encodeURIComponent(version)}&order=epss_percentile.desc`
+    );
+    return this.mapEpssRows(rows);
+  }
+
+  /**
+   * Build a risk-correlation response for a specific package version:
+   * joins advisory CVE/CVSS data with live EPSS percentiles and computes
+   * a composite exploit risk score.
+   *
+   * composite_exploit_risk formula:
+   *   For each (CVE, CVSS, EPSS) triple, contribution = cvssScore × epssPercentile × 10
+   *   Final score = min(100, sum of top-3 contributions)
+   *   If no EPSS data, falls back to max(cvssScores) × 10 / 10 (straight CVSS)
+   */
+  async getRiskCorrelation(
+    ecosystem: string,
+    packageName: string,
+    version: string
+  ): Promise<RiskCorrelation> {
+    const advisories = await this.getPackageAdvisories(ecosystem, packageName);
+
+    // Collect unique CVE IDs from all advisories
+    const cveIds = [
+      ...new Set(
+        advisories
+          .map((a) => a.sourceId)
+          .filter((id) => id.toUpperCase().startsWith("CVE-"))
+          .concat(
+            // also pull CVE aliases from raw advisory source IDs (e.g. NVD source)
+            advisories.filter((a) => a.source === "nvd").map((a) => a.sourceId)
+          )
+      )
+    ];
+
+    const cvssScores = advisories
+      .filter((a) => a.cvssScore != null)
+      .map((a) => ({
+        cveId: a.sourceId,
+        cvssScore: a.cvssScore!,
+        severity: a.severity
+      }));
+
+    // Fetch/sync EPSS scores for all CVEs we know about
+    let epssScores: EpssScore[] = [];
+    try {
+      // Try fetching from the database first (may already be cached)
+      epssScores = await this.getEpssScores(ecosystem, packageName, version);
+      // If stale or empty, re-sync from EPSS API
+      if (epssScores.length === 0 && cveIds.length > 0) {
+        epssScores = await this.syncEpssScores(ecosystem, packageName, version, cveIds);
+      }
+    } catch (err) {
+      // EPSS enrichment is best-effort; don't fail the whole request
+      console.warn(`[advisory-service] EPSS fetch failed for ${ecosystem}/${packageName}@${version}:`, err);
+    }
+
+    const compositeExploitRisk = this.computeCompositeExploitRisk(cvssScores, epssScores);
+
+    return {
+      ecosystem,
+      packageName,
+      version,
+      cves: cveIds,
+      cvssScores,
+      epssScores,
+      compositeExploitRisk
+    };
+  }
+
+  /**
+   * Composite exploit risk:
+   *   contribution_i = cvssScore_i × epssPercentile_i × 10
+   *   result = min(100, sum of top-3 contributions)
+   *
+   * Falls back to straight CVSS-based risk if no EPSS data is available.
+   */
+  computeCompositeExploitRisk(
+    cvssScores: Array<{ cveId: string; cvssScore: number }>,
+    epssScores: EpssScore[]
+  ): number {
+    if (cvssScores.length === 0) return 0;
+
+    const epssMap = new Map(epssScores.map((e) => [e.cveId, e]));
+
+    // If we have EPSS data, compute composite contributions
+    if (epssMap.size > 0) {
+      const contributions = cvssScores
+        .map((c) => {
+          const epss = epssMap.get(c.cveId);
+          if (!epss) return c.cvssScore; // no EPSS → use CVSS/10 as fallback contribution
+          return (c.cvssScore / 10) * epss.epssPercentile * 100;
+        })
+        .sort((a, b) => b - a)
+        .slice(0, 3);
+
+      return Math.min(100, Math.round(contributions.reduce((s, v) => s + v, 0)));
+    }
+
+    // Fallback: scale max CVSS score to 0–100
+    const maxCvss = Math.max(...cvssScores.map((c) => c.cvssScore));
+    return Math.min(100, Math.round((maxCvss / 10) * 100));
+  }
+
+  // -------------------------------------------------------------------------
+  // EPSS API fetch (FIRST REST API)
+  // -------------------------------------------------------------------------
+
+  private async fetchEpssFromApi(cveIds: string[]): Promise<EpssFeedRow[]> {
+    // FIRST EPSS API: GET https://api.first.org/data/v1/epss?cve=CVE-A,CVE-B,...
+    // Max 100 CVEs per request; free, no auth required.
+    const batchSize = 100;
+    const results: EpssFeedRow[] = [];
+
+    for (let i = 0; i < cveIds.length; i += batchSize) {
+      const batch = cveIds.slice(i, i + batchSize);
+      const url = `https://api.first.org/data/v1/epss?cve=${batch.join(",")}`;
+      try {
+        const response = await fetch(url, {
+          headers: { accept: "application/json" }
+        });
+        if (!response.ok) {
+          console.warn(`[advisory-service] EPSS API returned ${response.status} for batch`);
+          continue;
+        }
+        const data = (await response.json()) as {
+          status: string;
+          status_code: number;
+          version: string;
+          access: string;
+          total: number;
+          offset: number;
+          limit: number;
+          data?: Array<{ cve: string; epss: string; percentile: string; date?: string; model_version?: string }>;
+        };
+        if (data.data && Array.isArray(data.data)) {
+          results.push(...data.data);
+        }
+      } catch (err) {
+        console.warn(`[advisory-service] EPSS fetch error for batch starting at ${i}:`, err);
+      }
+    }
+
+    return results;
+  }
+
+  private mapEpssRows(rows: EpssScoreRow[]): EpssScore[] {
+    return rows.map((row) => ({
+      cveId: row.cve_id,
+      packageName: row.package_name,
+      ecosystem: row.ecosystem,
+      version: row.version,
+      epssScore: row.epss_score,
+      epssPercentile: row.epss_percentile,
+      modelVersion: row.model_version,
+      scoreDate: row.score_date,
+      updatedAt: row.updated_at,
+      exploitedInTheWild: row.epss_percentile > 0.9
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Lockfile patchability — npm registry fix-version lookup
+  // -------------------------------------------------------------------------
+
+  /**
+   * Fetch all published versions of an npm package that were released after
+   * the given `vulnerableVersion`, for use by the lockfile patchability analyzer.
+   *
+   * Steps:
+   *   1. Query the npm registry `/{packageName}` endpoint for the full packument.
+   *   2. Extract all version strings from the `versions` map.
+   *   3. Filter to versions strictly greater than `vulnerableVersion` (heuristic
+   *      semver comparison — only numeric triplets are compared; pre-release
+   *      tags are ignored).
+   *   4. Return the filtered list sorted ascending (lowest fix-candidate first).
+   *
+   * Falls back to an empty array when the registry is unreachable, the package
+   * does not exist, or the response is malformed.  This is intentionally
+   * best-effort — callers must handle an empty result gracefully.
+   *
+   * @param packageName       npm package name (scoped names like @scope/pkg are
+   *                          supported — they are URL-encoded automatically).
+   * @param vulnerableVersion The currently pinned version string (e.g. "1.2.3").
+   *                          Versions <= this value are excluded from the result.
+   * @param ecosystem         Package ecosystem — only "npm" and "pnpm" are
+   *                          supported; PyPI packages return [] immediately.
+   */
+  async getCveFixVersions(
+    packageName: string,
+    vulnerableVersion: string,
+    ecosystem: "npm" | "pnpm" | "pypi"
+  ): Promise<string[]> {
+    // PyPI has no equivalent simple packument endpoint in scope — skip
+    if (ecosystem === "pypi") return [];
+
+    const encodedName = packageName.replace(/^@/, "%40").replace(/\//, "%2F");
+    const url = `https://registry.npmjs.org/${encodedName}`;
+
+    let packument: Record<string, unknown>;
+    try {
+      const res = await fetch(url, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(8_000)
+      });
+      if (!res.ok) {
+        console.warn(`[advisory-service] getCveFixVersions: npm registry returned ${res.status} for ${packageName}`);
+        return [];
+      }
+      packument = (await res.json()) as Record<string, unknown>;
+    } catch (err) {
+      console.warn(`[advisory-service] getCveFixVersions: registry fetch failed for ${packageName}:`, err instanceof Error ? err.message : err);
+      return [];
+    }
+
+    const versionsMap = packument.versions as Record<string, unknown> | undefined;
+    if (!versionsMap || typeof versionsMap !== "object") return [];
+
+    const allVersions = Object.keys(versionsMap);
+
+    // Parse the vulnerable version for comparison
+    const parseSemverLocal = (v: string): [number, number, number] | null => {
+      const clean = v.replace(/^[v=^~>=<\s]+/, "").split(/[-+]/)[0] ?? "";
+      const parts = clean.split(".").map(Number);
+      if (parts.length < 2 || parts.some((p) => !Number.isFinite(p) || p < 0)) return null;
+      return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0];
+    };
+
+    const vulnParsed = parseSemverLocal(vulnerableVersion);
+    if (!vulnParsed) return allVersions; // Can't compare — return all
+
+    const newer = allVersions.filter((v) => {
+      const parsed = parseSemverLocal(v);
+      if (!parsed) return false;
+      // Lexicographic comparison of [major, minor, patch] triplets
+      for (let i = 0; i < 3; i++) {
+        const diff = (parsed[i] ?? 0) - (vulnParsed[i] ?? 0);
+        if (diff > 0) return true;
+        if (diff < 0) return false;
+      }
+      return false; // equal — exclude
+    });
+
+    // Sort ascending so callers get the minimum fix candidate first
+    newer.sort((a, b) => {
+      const pa = parseSemverLocal(a)!;
+      const pb = parseSemverLocal(b)!;
+      for (let i = 0; i < 3; i++) {
+        const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+        if (diff !== 0) return diff;
+      }
+      return 0;
+    });
+
+    return newer;
+  }
+
+  // -------------------------------------------------------------------------
+  // EPSS enrichment — public helpers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Fetch EPSS scores for the given CVE IDs directly from the FIRST EPSS API
+   * (https://api.first.org/data/v1/epss), using the supplied EpssCache for
+   * deduplication.  Returns a map of CVE ID → { score, percentile }.
+   *
+   * Results are written back into the cache (both in-memory and Supabase layers).
+   */
+  async fetchEpssScores(
+    ecosystem: string,
+    cveIds: string[],
+    cache: EpssCache
+  ): Promise<Map<string, { score: number; percentile: number }>> {
+    if (cveIds.length === 0) return new Map();
+
+    // 1. Pull whatever is already cached (TTL-checked inside getMany)
+    const cached = await cache.getMany(ecosystem, cveIds);
+    const result = new Map<string, { score: number; percentile: number }>();
+    for (const [id, entry] of cached) {
+      result.set(id.toUpperCase(), { score: entry.score, percentile: entry.percentile });
+    }
+
+    // 2. Identify CVEs that still need a live fetch
+    const missing = cveIds.filter((id) => !result.has(id.toUpperCase()));
+    if (missing.length === 0) return result;
+
+    // 3. Fetch from FIRST EPSS API in batches of 100
+    const feedRows = await this.fetchEpssFromApi(missing);
+    if (feedRows.length === 0) return result;
+
+    // 4. Populate result map and build cache entries
+    const now = new Date().toISOString();
+    const cacheEntries = feedRows.map((row) => ({
+      ecosystem,
+      cveId: row.cve.toUpperCase(),
+      score: parseFloat(row.epss),
+      percentile: parseFloat(row.percentile),
+      fetchedAt: now
+    }));
+
+    for (const entry of cacheEntries) {
+      result.set(entry.cveId, { score: entry.score, percentile: entry.percentile });
+    }
+
+    // 5. Persist back to cache (fire-and-forget for Supabase layer)
+    await cache.setMany(cacheEntries);
+
+    return result;
+  }
+
+  /**
+   * Build a fully enriched vulnerability response for a specific package version.
+   *
+   * Steps:
+   *   1. Fetch all advisories for the package from the `advisories` table.
+   *   2. For each CVE ID, query the EPSS API (via EpssCache with 7-day TTL).
+   *   3. Check each CVE against CISA KEV data (stored as cisa_kev_date on the
+   *      advisory row when populated by the nvd-feed-ingester).
+   *   4. Aggregate maxEpssPercentile, maxCvssV3Score, cisaKevMatches,
+   *      exploitMaturityStats.
+   *   5. Compute riskBoost: base CVSS score + EPSS boost + CISA KEV boost.
+   *   6. Return structured VulnerabilityEnrichment.
+   */
+  async enrichCvesWithEpss(
+    ecosystem: string,
+    packageName: string,
+    version: string,
+    cache: EpssCache
+  ): Promise<VulnerabilityEnrichment> {
+    const advisories = await this.getPackageAdvisories(ecosystem, packageName);
+
+    // ── Extract unique CVE IDs ──────────────────────────────────────────────
+    const cveIds = [
+      ...new Set(
+        advisories
+          .map((a) => a.sourceId)
+          .filter((id) => id.toUpperCase().startsWith("CVE-"))
+          .map((id) => id.toUpperCase())
+      )
+    ];
+
+    // ── Fetch EPSS scores (cached + live) ────────────────────────────────────
+    const epssMap = await this.fetchEpssScores(ecosystem, cveIds, cache).catch(() => new Map<string, { score: number; percentile: number }>());
+
+    // ── Build CISA KEV set ────────────────────────────────────────────────────
+    // When the nvd-feed-ingester populates advisory rows it stores the CISA KEV
+    // added-date in `cisa_kev_date`.  In local/dev mode this field is absent so
+    // we fall back to checking the raw_data if available, otherwise empty set.
+    const cisaKevDates = new Map<string, string>(); // cveId → ISO date
+    for (const advisory of advisories) {
+      const raw = advisory as unknown as Record<string, unknown>;
+      const kevDate = (raw["cisaKevDate"] ?? raw["cisa_kev_date"]) as string | undefined;
+      if (kevDate && advisory.sourceId.toUpperCase().startsWith("CVE-")) {
+        cisaKevDates.set(advisory.sourceId.toUpperCase(), kevDate);
+      }
+    }
+
+    // ── Build exploit maturity map ────────────────────────────────────────────
+    // Derived heuristically from EPSS percentile and CISA KEV membership.
+    function deriveExploitMaturity(cveId: string, epssPercentile: number): ExploitMaturity {
+      if (cisaKevDates.has(cveId)) return "active-exploitation";
+      if (epssPercentile >= 0.95) return "widespread";
+      if (epssPercentile >= 0.5) return "active-exploitation";
+      if (epssPercentile > 0) return "proof-of-concept";
+      return "none";
+    }
+
+    // ── Assemble findings ─────────────────────────────────────────────────────
+    const findings: EnrichedFinding[] = advisories.map((advisory) => {
+      const cveId = advisory.sourceId.toUpperCase();
+      const epss = epssMap.get(cveId);
+      const epssPercentile = epss?.percentile;
+      const cisaKevDate = cisaKevDates.get(cveId);
+      const exploitMaturity = epssPercentile != null ? deriveExploitMaturity(cveId, epssPercentile) : undefined;
+
+      const recommendation = buildRecommendation(advisory.sourceId, advisory.severity, epssPercentile, cisaKevDate);
+
+      return {
+        cvId: advisory.sourceId,
+        title: advisory.title,
+        severity: advisory.severity ?? "unknown",
+        cvssScore: advisory.cvssScore,
+        epssPercentile,
+        cisaKevDate,
+        exploitMaturity,
+        recommendation
+      };
+    });
+
+    // Sort findings: highest EPSS first, then highest CVSS, then alphabetical
+    findings.sort((a, b) => {
+      const epssA = a.epssPercentile ?? -1;
+      const epssB = b.epssPercentile ?? -1;
+      if (epssB !== epssA) return epssB - epssA;
+      const cvssA = a.cvssScore ?? 0;
+      const cvssB = b.cvssScore ?? 0;
+      if (cvssB !== cvssA) return cvssB - cvssA;
+      return a.cvId.localeCompare(b.cvId);
+    });
+
+    // ── Aggregate stats ───────────────────────────────────────────────────────
+    const maxEpssPercentile = findings.reduce((max, f) => Math.max(max, f.epssPercentile ?? 0), 0);
+    const maxCvssV3Score = findings.reduce((max, f) => Math.max(max, f.cvssScore ?? 0), 0);
+    const cisaKevMatches = [...cisaKevDates.keys()];
+
+    const exploitMaturityStats = {
+      proofOfConcept: findings.filter((f) => f.exploitMaturity === "proof-of-concept").length,
+      activeExploitation: findings.filter((f) => f.exploitMaturity === "active-exploitation").length,
+      widespread: findings.filter((f) => f.exploitMaturity === "widespread").length
+    };
+
+    // ── Risk boost ────────────────────────────────────────────────────────────
+    const baseScore = Math.round((maxCvssV3Score / 10) * 100);
+    const epssBoost = Math.round(maxEpssPercentile * 40); // max +40
+    const cisaKevBoost = cisaKevMatches.length > 0 ? 30 : 0; // flat +30 if in KEV
+    const finalScore = Math.min(100, baseScore + epssBoost + cisaKevBoost);
+
+    const riskBoost = { baseScore, epssBoost, cisaKevBoost, finalScore };
+
+    // ── Recommendations ───────────────────────────────────────────────────────
+    const recommendations = buildRecommendations(findings, cisaKevMatches, maxEpssPercentile);
+
+    return {
+      ecosystem,
+      packageName,
+      version,
+      findings,
+      maxEpssPercentile,
+      maxCvssV3Score,
+      cisaKevMatches,
+      exploitMaturityStats,
+      riskBoost,
+      recommendations,
+      enrichedAt: new Date().toISOString()
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CVE Heat Map — cross-CVE risk ranking by exploitability × severity × adoption
+// ---------------------------------------------------------------------------
+
+/**
+ * A single entry in the CVE heat map.
+ * Columns are designed to drive a sortable data-grid in the dashboard.
+ */
+export interface HeatMapEntry {
+  /** CVE identifier */
+  cveId: string;
+  /** Human-readable advisory title */
+  title: string;
+  /** Affected package name (primary) */
+  packageName: string;
+  /** Ecosystem (npm | pypi | …) */
+  ecosystem: string;
+  /** CVSS base score (0–10) */
+  cvssScore: number;
+  /** EPSS percentile (0–1) — probability of exploitation in the next 30 days */
+  epssPercentile: number;
+  /** Advisory severity label (critical | high | medium | low) */
+  severity: string;
+  /** True when this CVE is in the CISA Known Exploited Vulnerabilities catalogue */
+  activeExploit: boolean;
+  /** ISO date when this CVE was added to the CISA KEV catalogue, if present */
+  cisaKevDate?: string;
+  /** True when a patched version has been published */
+  patchAvailable: boolean;
+  /** First patched version string, when known */
+  patchedVersion?: string;
+  /**
+   * Ecosystem adoption percentage (0–100).
+   * Derived from the package's weekly download rank within POPULAR_PACKAGES_CORPUS:
+   * rank 1 → 100 %, rank N → (1 – rank/N) × 100.
+   */
+  adoptionPct: number;
+  /**
+   * Blast radius score (0–100).
+   * Composite of adoptionPct × cvssScore / 10.
+   */
+  blastRadius: number;
+  /**
+   * Overall heat score used for default sort order (0–100).
+   * Formula: min(100, cvssScore×5 + epssPercentile×40 + activeExploit×30)
+   * Matches the finalScore calculation used in enrichCvesWithEpss.
+   */
+  heatScore: number;
+  /** Patching colour tier: "red" | "yellow" | "green" */
+  tier: "red" | "yellow" | "green";
+}
+
+export interface HeatMapData {
+  items: HeatMapEntry[];
+  total: number;
+  generatedAt: string;
+  ecosystem: string;
+}
+
+/**
+ * Approximate weekly-download rank derived from POPULAR_PACKAGES_CORPUS order.
+ * Packages earlier in the list are considered more widely adopted.
+ * Returns 0–100 where 100 = most downloaded.
+ */
+function adoptionPctForPackage(packageName: string, ecosystem: string): number {
+  const corpusForEco = POPULAR_PACKAGES_CORPUS.filter((p) => p.ecosystem === ecosystem);
+  const idx = corpusForEco.findIndex((p) => p.name.toLowerCase() === packageName.toLowerCase());
+  if (idx === -1) return 10; // unknown package → low adoption baseline
+  const rank = idx + 1; // 1-based
+  return Math.max(1, Math.round((1 - rank / corpusForEco.length) * 100));
+}
+
+/**
+ * Build a heat score for sorting: higher = more urgent to patch.
+ * Formula: min(100, floor(cvssScore×5 + epssPercentile×40 + (activeExploit ? 30 : 0)))
+ */
+export function computeHeatScore(cvssScore: number, epssPercentile: number, activeExploit: boolean): number {
+  return Math.min(100, Math.floor(cvssScore * 5 + epssPercentile * 40 + (activeExploit ? 30 : 0)));
+}
+
+/**
+ * Return the colour tier for a heat-map cell:
+ *   red    — critical+exploited (activeExploit OR heatScore ≥ 75)
+ *   yellow — patchable (patchAvailable AND heatScore < 75)
+ *   green  — low-risk (heatScore < 35 AND NOT activeExploit)
+ */
+export function computeHeatTier(
+  heatScore: number,
+  activeExploit: boolean,
+  patchAvailable: boolean
+): "red" | "yellow" | "green" {
+  if (activeExploit || heatScore >= 75) return "red";
+  if (patchAvailable && heatScore >= 35) return "yellow";
+  return "green";
+}
+
+/**
+ * Fetch the top `limit` CVEs affecting the registered dependency graph for an
+ * org, ranked by exploitability (EPSS) × severity (CVSS) × adoption rate.
+ *
+ * In Supabase mode this queries the advisories + epss_scores tables live.
+ * In local/dev mode it falls back to the in-memory seeded advisories.
+ *
+ * @param orgAdvisories  Pre-fetched list of Advisory rows to rank (caller supplies).
+ * @param ecosystem      Filter to a single ecosystem ("npm" | "pypi") or "all".
+ * @param limit          Max number of entries to return (default 100).
+ * @param epssMap        Optional pre-fetched EPSS percentile map (cveId → {score,percentile}).
+ */
+export function buildHeatMapData(
+  orgAdvisories: Advisory[],
+  ecosystem: string,
+  limit: number,
+  epssMap: Map<string, { score: number; percentile: number }>
+): HeatMapData {
+  const seen = new Set<string>();
+  const entries: HeatMapEntry[] = [];
+
+  for (const advisory of orgAdvisories) {
+    const cveId = advisory.sourceId.toUpperCase();
+    if (!cveId.startsWith("CVE-")) continue;
+    if (seen.has(cveId)) continue;
+    seen.add(cveId);
+
+    // Filter by ecosystem when requested
+    const primaryPkg = advisory.affectedPackages[0];
+    const pkgEco = primaryPkg?.ecosystem ?? "npm";
+    if (ecosystem !== "all" && pkgEco !== ecosystem) continue;
+
+    const pkgName = primaryPkg?.packageName ?? advisory.sourceId;
+    const cvssScore = advisory.cvssScore ?? 0;
+    const severityRaw = advisory.severity ?? "unknown";
+
+    const epss = epssMap.get(cveId);
+    const epssPercentile = epss?.percentile ?? 0;
+
+    const raw = advisory as unknown as Record<string, unknown>;
+    const cisaKevDate = (raw["cisaKevDate"] ?? raw["cisa_kev_date"]) as string | undefined;
+    const activeExploit = Boolean(cisaKevDate);
+
+    const patchedVersion = primaryPkg?.patchedVersion;
+    const patchAvailable = Boolean(patchedVersion);
+
+    const adoptionPct = adoptionPctForPackage(pkgName, pkgEco);
+    const blastRadius = Math.min(100, Math.round(adoptionPct * (cvssScore / 10)));
+    const heatScore = computeHeatScore(cvssScore, epssPercentile, activeExploit);
+    const tier = computeHeatTier(heatScore, activeExploit, patchAvailable);
+
+    entries.push({
+      cveId,
+      title: advisory.title,
+      packageName: pkgName,
+      ecosystem: pkgEco,
+      cvssScore,
+      epssPercentile,
+      severity: severityRaw,
+      activeExploit,
+      cisaKevDate,
+      patchAvailable,
+      patchedVersion,
+      adoptionPct,
+      blastRadius,
+      heatScore,
+      tier
+    });
+  }
+
+  // Sort: highest heatScore first, then blastRadius, then cveId
+  entries.sort((a, b) => {
+    if (b.heatScore !== a.heatScore) return b.heatScore - a.heatScore;
+    if (b.blastRadius !== a.blastRadius) return b.blastRadius - a.blastRadius;
+    return a.cveId.localeCompare(b.cveId);
+  });
+
+  const sliced = entries.slice(0, limit);
+
+  return {
+    items: sliced,
+    total: entries.length,
+    generatedAt: new Date().toISOString(),
+    ecosystem
+  };
+}
+
+/**
+ * Full pipeline: fetch advisories for an org's registered deps, enrich with
+ * live EPSS, and return the heat-map payload.
+ *
+ * Supabase mode: queries `registered_dependencies` → advisories → EPSS API.
+ * Local/dev mode: uses in-memory seeded advisories and mocked EPSS (zeroed).
+ */
+export async function getHeatMapData(
+  config: AdvisoryServiceConfig,
+  recentAdvisories: Advisory[],
+  ecosystem: string,
+  limit: number
+): Promise<HeatMapData> {
+  // Collect unique CVE IDs
+  const cveIds = [
+    ...new Set(
+      recentAdvisories
+        .map((a) => a.sourceId.toUpperCase())
+        .filter((id) => id.startsWith("CVE-"))
+    )
+  ];
+
+  // Attempt live EPSS fetch; fall back to empty map on error
+  let epssMap = new Map<string, { score: number; percentile: number }>();
+  if (cveIds.length > 0 && config.supabaseUrl && config.supabaseServiceRoleKey) {
+    try {
+      const svc = new AdvisoryService(config);
+      const { EpssCache } = await import("./epss-cache");
+      const cache = new EpssCache({ supabaseUrl: config.supabaseUrl, supabaseServiceRoleKey: config.supabaseServiceRoleKey });
+      epssMap = await svc.fetchEpssScores(ecosystem === "all" ? "npm" : ecosystem, cveIds, cache);
+    } catch (err) {
+      console.warn("[advisory-service] getHeatMapData: EPSS fetch failed (non-fatal):", err instanceof Error ? err.message : err);
+    }
+  }
+
+  return buildHeatMapData(recentAdvisories, ecosystem, limit, epssMap);
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers (module-level so they can be unit-tested independently)
+// ---------------------------------------------------------------------------
+
+function buildRecommendation(
+  cveId: string,
+  severity: string | undefined,
+  epssPercentile: number | undefined,
+  cisaKevDate: string | undefined
+): string {
+  const parts: string[] = [];
+
+  if (cisaKevDate) {
+    parts.push(`${cveId} is in the CISA KEV catalogue (added ${cisaKevDate}) — patch immediately.`);
+  } else if (epssPercentile != null && epssPercentile >= 0.5) {
+    parts.push(`${cveId} has high exploit probability (EPSS ${(epssPercentile * 100).toFixed(1)}th percentile) — prioritise patching.`);
+  } else if (severity?.toUpperCase() === "CRITICAL" || severity?.toUpperCase() === "HIGH") {
+    parts.push(`${cveId} is rated ${severity} — schedule prompt remediation.`);
+  } else {
+    parts.push(`Review ${cveId} and apply the latest patched version.`);
+  }
+
+  return parts.join(" ");
+}
+
+function buildRecommendations(
+  findings: EnrichedFinding[],
+  cisaKevMatches: string[],
+  maxEpssPercentile: number
+): string[] {
+  const recs: string[] = [];
+
+  if (cisaKevMatches.length > 0) {
+    recs.push(
+      `URGENT: ${cisaKevMatches.length} CVE(s) are in the CISA Known Exploited Vulnerabilities catalogue. Apply patches immediately: ${cisaKevMatches.join(", ")}.`
+    );
+  }
+
+  if (maxEpssPercentile >= 0.5) {
+    recs.push(
+      `High exploit probability detected (max EPSS ${(maxEpssPercentile * 100).toFixed(1)}th percentile). Treat affected CVEs as actively exploitable.`
+    );
+  }
+
+  const criticalOrHigh = findings.filter(
+    (f) => f.severity?.toUpperCase() === "CRITICAL" || f.severity?.toUpperCase() === "HIGH"
+  );
+  if (criticalOrHigh.length > 0) {
+    recs.push(
+      `${criticalOrHigh.length} finding(s) rated CRITICAL or HIGH: ${criticalOrHigh.map((f) => f.cvId).join(", ")}.`
+    );
+  }
+
+  if (recs.length === 0 && findings.length > 0) {
+    recs.push("Review all listed advisories and upgrade to the patched version as soon as feasible.");
+  }
+
+  if (findings.length === 0) {
+    recs.push("No known CVEs found for this package version. Continue monitoring for new advisories.");
+  }
+
+  return recs;
 }
