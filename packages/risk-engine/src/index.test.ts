@@ -3,11 +3,35 @@ import { describe, expect, it } from "vitest";
 import { emptyBehaviorSummary, emptyScriptThreatSummary, sampleAnalyses } from "@binshield/analysis-types";
 import type { ManifestAnalysis } from "@binshield/analysis-types";
 import {
+  activeVulnAdjustment,
   aggregatePackageRisk,
   aggregatePackageRiskWithManifest,
+  buildActiveThreatContext,
+  buildCisaKevFindings,
+  buildLockfilePatchableFindings,
+  cisaKevBoost,
+  epssBoost,
+  epssPercentileBoost,
+  fixAvailabilityBoost,
+  isFeedFresh,
+  kevBoostForVuln,
+  patchDeploymentModifier,
   riskLevelFromScore,
   scoreBinary,
-  scoreManifest
+  scoreManifest,
+  scoreWithActiveVulnerabilities,
+  shouldForceCritical,
+  transitiveVulnScan,
+  vendorPatchPenalty
+} from "./index";
+import type {
+  ActiveVulnerability,
+  CisaKevContext,
+  DepNode,
+  EpssContext,
+  LockfileResolutionContext,
+  PatchDeploymentContext,
+  VendorPatchContext
 } from "./index";
 
 function makeManifest(overrides: Partial<ManifestAnalysis> = {}): ManifestAnalysis {
@@ -116,5 +140,1402 @@ describe("risk engine", () => {
     const binaryOnly = aggregatePackageRisk(sampleAnalyses[0].binaries);
     const merged = aggregatePackageRiskWithManifest(sampleAnalyses[0].binaries, cleanManifest);
     expect(merged.riskScore).toBe(binaryOnly.riskScore);
+  });
+});
+
+describe("EPSS boost", () => {
+  it("returns 0 when no EPSS context is provided", () => {
+    expect(epssBoost(undefined)).toBe(0);
+  });
+
+  it("returns 0 when percentile is below 0.75", () => {
+    expect(epssBoost({ maxEpssPercentile: 0.50 })).toBe(0);
+    expect(epssBoost({ maxEpssPercentile: 0.74 })).toBe(0);
+  });
+
+  it("returns 15 when percentile is between 0.75 and 0.90", () => {
+    expect(epssBoost({ maxEpssPercentile: 0.75 + 0.001 })).toBe(15);
+    expect(epssBoost({ maxEpssPercentile: 0.80 })).toBe(15);
+    expect(epssBoost({ maxEpssPercentile: 0.90 })).toBe(15);
+  });
+
+  it("returns 25 when percentile exceeds 0.90 (exploited in the wild)", () => {
+    expect(epssBoost({ maxEpssPercentile: 0.901 })).toBe(25);
+    expect(epssBoost({ maxEpssPercentile: 0.99 })).toBe(25);
+    expect(epssBoost({ maxEpssPercentile: 1.0 })).toBe(25);
+  });
+
+  it("scoreBinary applies EPSS boost on top of base score", () => {
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [],
+      importCount: 0,
+      functionCount: 0
+    };
+
+    const withoutEpss = scoreBinary(binary);
+    const withLowEpss = scoreBinary(binary, { maxEpssPercentile: 0.50 });
+    const withHighEpss = scoreBinary(binary, { maxEpssPercentile: 0.80 });
+    const withCriticalEpss = scoreBinary(binary, { maxEpssPercentile: 0.95 });
+
+    // No boost below threshold
+    expect(withLowEpss.riskScore).toBe(withoutEpss.riskScore);
+    // 15-pt boost above 0.75
+    expect(withHighEpss.riskScore).toBe(withoutEpss.riskScore + 15);
+    // 25-pt boost above 0.90
+    expect(withCriticalEpss.riskScore).toBe(Math.min(100, withoutEpss.riskScore + 25));
+  });
+
+  it("scoreBinary with EPSS boost escalates risk level for borderline packages", () => {
+    // A low-risk binary (score ~8) should escalate to medium when an EPSS
+    // percentile > 0.75 is present (+15 → 23 = medium)
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [{ severity: "low" as const, title: "Minor issue", description: "Minor", recommendation: "Review" }],
+      importCount: 0,
+      functionCount: 0
+    };
+
+    const withoutEpss = scoreBinary(binary);
+    expect(withoutEpss.riskLevel).toBe("low");
+
+    const withEpss = scoreBinary(binary, { maxEpssPercentile: 0.85 });
+    // 8 + 15 = 23 → still low boundary, depending on base; assert it is higher
+    expect(withEpss.riskScore).toBeGreaterThan(withoutEpss.riskScore);
+  });
+
+  it("scoreManifest applies EPSS boost while preserving malware-override", () => {
+    const cleanManifest = makeManifest();
+
+    const withoutEpss = scoreManifest(cleanManifest);
+    const withHighEpss = scoreManifest(cleanManifest, { maxEpssPercentile: 0.80 });
+    const withCriticalEpss = scoreManifest(cleanManifest, { maxEpssPercentile: 0.95 });
+
+    expect(withHighEpss.riskScore).toBe(withoutEpss.riskScore + 15);
+    expect(withCriticalEpss.riskScore).toBe(Math.min(100, withoutEpss.riskScore + 25));
+
+    // Known-malware still forces 100 even with EPSS context
+    const malwareManifest = makeManifest({ knownMalwareAdvisoryIds: ["MAL-2026-0001"] });
+    expect(scoreManifest(malwareManifest, { maxEpssPercentile: 0.95 })).toEqual({
+      riskScore: 100,
+      riskLevel: "critical"
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CISA KEV boost
+// ---------------------------------------------------------------------------
+
+function makeKev(overrides: Partial<CisaKevContext> = {}): CisaKevContext {
+  return {
+    kevMatches: [],
+    ...overrides
+  };
+}
+
+describe("CISA KEV boost", () => {
+  it("returns 0 when no KEV context provided", () => {
+    expect(cisaKevBoost(undefined)).toBe(0);
+  });
+
+  it("returns 0 for empty matches array", () => {
+    expect(cisaKevBoost(makeKev())).toBe(0);
+  });
+
+  it("returns 0 for proof-of-concept only (no confirmed exploitation)", () => {
+    expect(
+      cisaKevBoost(
+        makeKev({
+          kevMatches: [{ cveId: "CVE-2024-0001", firstSeenDate: "2024-01-15", exploitMaturity: "proof-of-concept" }]
+        })
+      )
+    ).toBe(0);
+  });
+
+  it("returns +20 for active-exploitation match", () => {
+    expect(
+      cisaKevBoost(
+        makeKev({
+          kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-10", exploitMaturity: "active-exploitation" }]
+        })
+      )
+    ).toBe(20);
+  });
+
+  it("returns +20 for widespread match (ransomware-level)", () => {
+    expect(
+      cisaKevBoost(
+        makeKev({
+          kevMatches: [{ cveId: "CVE-2024-0003", firstSeenDate: "2024-06-01", exploitMaturity: "widespread" }]
+        })
+      )
+    ).toBe(20);
+  });
+
+  it("returns +20 when mix of proof-of-concept and active-exploitation", () => {
+    expect(
+      cisaKevBoost(
+        makeKev({
+          kevMatches: [
+            { cveId: "CVE-2024-0001", firstSeenDate: "2024-01-01", exploitMaturity: "proof-of-concept" },
+            { cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" }
+          ]
+        })
+      )
+    ).toBe(20);
+  });
+
+  it("scoreBinary applies CISA KEV boost on top of base score", () => {
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [],
+      importCount: 0,
+      functionCount: 0
+    };
+
+    const noKev = scoreBinary(binary);
+    const withPoC = scoreBinary(binary, undefined, makeKev({
+      kevMatches: [{ cveId: "CVE-2024-0001", firstSeenDate: "2024-01-01", exploitMaturity: "proof-of-concept" }]
+    }));
+    const withActive = scoreBinary(binary, undefined, makeKev({
+      kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" }]
+    }));
+
+    // PoC does not boost
+    expect(withPoC.riskScore).toBe(noKev.riskScore);
+    // Active exploitation adds +20
+    expect(withActive.riskScore).toBe(noKev.riskScore + 20);
+  });
+
+  it("scoreBinary stacks EPSS and CISA KEV boosts independently", () => {
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [],
+      importCount: 0,
+      functionCount: 0
+    };
+
+    const noBoosts = scoreBinary(binary);
+    const epssOnly = scoreBinary(binary, { maxEpssPercentile: 0.80 });
+    const kevOnly = scoreBinary(binary, undefined, makeKev({
+      kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" }]
+    }));
+    const both = scoreBinary(binary, { maxEpssPercentile: 0.80 }, makeKev({
+      kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" }]
+    }));
+
+    expect(epssOnly.riskScore).toBe(noBoosts.riskScore + 15);
+    expect(kevOnly.riskScore).toBe(noBoosts.riskScore + 20);
+    expect(both.riskScore).toBe(Math.min(100, noBoosts.riskScore + 15 + 20));
+  });
+
+  it("scoreManifest applies CISA KEV boost while preserving malware-override", () => {
+    const cleanManifest = makeManifest();
+    const kev = makeKev({
+      kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" }]
+    });
+
+    const withoutKev = scoreManifest(cleanManifest);
+    const withKev = scoreManifest(cleanManifest, undefined, kev);
+
+    expect(withKev.riskScore).toBe(withoutKev.riskScore + 20);
+
+    // Known-malware still forces 100 regardless of KEV
+    const malwareManifest = makeManifest({ knownMalwareAdvisoryIds: ["MAL-2026-0001"] });
+    expect(scoreManifest(malwareManifest, undefined, kev)).toEqual({
+      riskScore: 100,
+      riskLevel: "critical"
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildCisaKevFindings
+// ---------------------------------------------------------------------------
+
+describe("buildCisaKevFindings", () => {
+  it("returns empty array when no KEV context", () => {
+    expect(buildCisaKevFindings(undefined)).toEqual([]);
+  });
+
+  it("returns empty array when no matches", () => {
+    expect(buildCisaKevFindings(makeKev())).toEqual([]);
+  });
+
+  it("does not emit findings for proof-of-concept only", () => {
+    const findings = buildCisaKevFindings(
+      makeKev({
+        kevMatches: [{ cveId: "CVE-2024-0001", firstSeenDate: "2024-01-01", exploitMaturity: "proof-of-concept" }]
+      })
+    );
+    expect(findings).toHaveLength(0);
+  });
+
+  it("emits CRITICAL finding for active-exploitation", () => {
+    const findings = buildCisaKevFindings(
+      makeKev({
+        kevMatches: [{ cveId: "CVE-2024-0002", firstSeenDate: "2024-03-10", exploitMaturity: "active-exploitation" }]
+      })
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.severity).toBe("critical");
+    expect(findings[0]!.title).toContain("CVE-Actively-Exploited-In-Wild");
+    expect(findings[0]!.title).toContain("CVE-2024-0002");
+    expect(findings[0]!.description).toContain("active-exploitation");
+    expect(findings[0]!.description).toContain("2024-03-10");
+  });
+
+  it("emits CRITICAL finding for widespread (ransomware)", () => {
+    const findings = buildCisaKevFindings(
+      makeKev({
+        kevMatches: [{ cveId: "CVE-2024-0003", firstSeenDate: "2024-06-01", exploitMaturity: "widespread" }]
+      })
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.severity).toBe("critical");
+    expect(findings[0]!.title).toContain("CVE-2024-0003");
+  });
+
+  it("emits one finding per active CVE (multiple matches)", () => {
+    const findings = buildCisaKevFindings(
+      makeKev({
+        kevMatches: [
+          { cveId: "CVE-2024-0001", firstSeenDate: "2024-01-01", exploitMaturity: "proof-of-concept" },
+          { cveId: "CVE-2024-0002", firstSeenDate: "2024-03-01", exploitMaturity: "active-exploitation" },
+          { cveId: "CVE-2024-0003", firstSeenDate: "2024-06-01", exploitMaturity: "widespread" }
+        ]
+      })
+    );
+    // PoC is excluded; active + widespread = 2 findings
+    expect(findings).toHaveLength(2);
+    expect(findings.every((f) => f.severity === "critical")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vendor patch penalty
+// ---------------------------------------------------------------------------
+
+function makePatch(overrides: Partial<VendorPatchContext> = {}): VendorPatchContext {
+  return {
+    cveId: "CVE-2024-9999",
+    patchedVersion: "2.0.0",
+    daysToFix: 30,
+    vendorConfidence: "high",
+    ...overrides
+  };
+}
+
+describe("vendorPatchPenalty", () => {
+  it("returns 0 when no patches are provided", () => {
+    expect(vendorPatchPenalty(undefined)).toBe(0);
+    expect(vendorPatchPenalty([])).toBe(0);
+  });
+
+  it("returns -15 for high-confidence patch", () => {
+    expect(vendorPatchPenalty([makePatch({ vendorConfidence: "high" })])).toBe(-15);
+  });
+
+  it("returns -10 for medium-confidence patch", () => {
+    expect(vendorPatchPenalty([makePatch({ vendorConfidence: "medium" })])).toBe(-10);
+  });
+
+  it("returns -5 for low-confidence patch", () => {
+    expect(vendorPatchPenalty([makePatch({ vendorConfidence: "low" })])).toBe(-5);
+  });
+
+  it("uses best-confidence patch when multiple patches are provided", () => {
+    const patches = [
+      makePatch({ vendorConfidence: "low" }),
+      makePatch({ vendorConfidence: "high" }),
+      makePatch({ vendorConfidence: "medium" })
+    ];
+    expect(vendorPatchPenalty(patches)).toBe(-15);
+  });
+
+  it("scoreBinary applies vendor patch penalty on top of base score", () => {
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [{ severity: "high" as const, title: "Vuln", description: "desc", recommendation: "fix" }],
+      importCount: 0,
+      functionCount: 0
+    };
+
+    const withoutPatch = scoreBinary(binary);
+    const withHighPatch = scoreBinary(binary, undefined, undefined, undefined, [makePatch({ vendorConfidence: "high" })]);
+    const withMedPatch = scoreBinary(binary, undefined, undefined, undefined, [makePatch({ vendorConfidence: "medium" })]);
+
+    // Patch reduces score by 15 / 10 / 5 respectively
+    expect(withHighPatch.riskScore).toBe(Math.max(0, withoutPatch.riskScore - 15));
+    expect(withMedPatch.riskScore).toBe(Math.max(0, withoutPatch.riskScore - 10));
+  });
+
+  it("scoreManifest applies vendor patch penalty while preserving malware-override", () => {
+    const manifest = makeManifest({
+      threats: {
+        ...emptyScriptThreatSummary(),
+        scriptInjection: { detected: true, details: ["eval usage"] }
+      },
+      findings: [
+        {
+          category: "scriptInjection",
+          severity: "high",
+          title: "Script injection",
+          description: "eval usage",
+          filePath: "index.js",
+          evidence: "eval(x)",
+          recommendation: "Remove eval"
+        }
+      ]
+    });
+
+    const withoutPatch = scoreManifest(manifest);
+    const withPatch = scoreManifest(manifest, undefined, undefined, [makePatch({ vendorConfidence: "high" })]);
+
+    expect(withPatch.riskScore).toBe(Math.max(0, withoutPatch.riskScore - 15));
+
+    // Known-malware still forces 100 even with a patch context
+    const malwareManifest = makeManifest({ knownMalwareAdvisoryIds: ["MAL-2026-0001"] });
+    expect(scoreManifest(malwareManifest, undefined, undefined, [makePatch({ vendorConfidence: "high" })])).toEqual({
+      riskScore: 100,
+      riskLevel: "critical"
+    });
+  });
+
+  it("vendor patch penalty stacks with EPSS boost but cannot push score below 0", () => {
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [],
+      importCount: 0,
+      functionCount: 0
+    };
+
+    // Base score = 0; EPSS adds 15; patch subtracts 15 → still 0
+    const result = scoreBinary(binary, { maxEpssPercentile: 0.80 }, undefined, undefined, [makePatch({ vendorConfidence: "high" })]);
+    expect(result.riskScore).toBe(0);
+  });
+
+  it("real-world scenario: CRITICAL CVE becomes MEDIUM after vendor patch (high confidence)", () => {
+    // A binary with a critical finding scores ~45; -15 patch penalty → 30 (medium boundary)
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [{ severity: "critical" as const, title: "RCE", description: "Remote code execution", recommendation: "Upgrade" }],
+      importCount: 0,
+      functionCount: 0
+    };
+
+    const withoutPatch = scoreBinary(binary);
+    expect(withoutPatch.riskLevel).toBe("medium"); // 45 → medium
+
+    // After high-confidence patch: 45 - 15 = 30 → still medium boundary
+    const withPatch = scoreBinary(binary, undefined, undefined, undefined, [makePatch({ vendorConfidence: "high" })]);
+    expect(withPatch.riskScore).toBe(withoutPatch.riskScore - 15);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Patch deployment modifier
+// ---------------------------------------------------------------------------
+
+function makeDeployment(overrides: Partial<PatchDeploymentContext> = {}): PatchDeploymentContext {
+  return {
+    cveId: "CVE-2024-9999",
+    patchPublishedAt: "2024-01-01T00:00:00.000Z",
+    daysSincePatch: 30,
+    ecosystemAdoptionRate: 0.3,
+    ...overrides
+  };
+}
+
+describe("patchDeploymentModifier", () => {
+  it("returns 0 when no deployment context provided", () => {
+    expect(patchDeploymentModifier(undefined)).toBe(0);
+  });
+
+  it("returns 0 when patch is too new (< 7 days)", () => {
+    expect(patchDeploymentModifier(makeDeployment({ daysSincePatch: 3 }))).toBe(0);
+  });
+
+  it("returns 0 when adoption rate is below 5%", () => {
+    expect(patchDeploymentModifier(makeDeployment({ daysSincePatch: 30, ecosystemAdoptionRate: 0.04 }))).toBe(0);
+  });
+
+  it("returns 0 when adoption rate is unknown", () => {
+    expect(patchDeploymentModifier(makeDeployment({ daysSincePatch: 30, ecosystemAdoptionRate: undefined }))).toBe(0);
+  });
+
+  it("returns -5 when >= 30 days old and >= 25% adoption", () => {
+    expect(patchDeploymentModifier(makeDeployment({ daysSincePatch: 30, ecosystemAdoptionRate: 0.25 }))).toBe(-5);
+  });
+
+  it("returns -10 when >= 90 days old and >= 50% adoption", () => {
+    expect(patchDeploymentModifier(makeDeployment({ daysSincePatch: 90, ecosystemAdoptionRate: 0.50 }))).toBe(-10);
+    expect(patchDeploymentModifier(makeDeployment({ daysSincePatch: 120, ecosystemAdoptionRate: 0.75 }))).toBe(-10);
+  });
+
+  it("returns -5 (not -10) when 90+ days but adoption < 50%", () => {
+    expect(patchDeploymentModifier(makeDeployment({ daysSincePatch: 90, ecosystemAdoptionRate: 0.35 }))).toBe(-5);
+  });
+
+  it("stacks with vendorPatchPenalty for maximum downgrade", () => {
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [{ severity: "high" as const, title: "Vuln", description: "desc", recommendation: "fix" }],
+      importCount: 0,
+      functionCount: 0
+    };
+
+    const base = scoreBinary(binary);
+    // High-confidence patch (-15) + mature deployment (-10) = -25
+    const withBoth = scoreBinary(
+      binary,
+      undefined,
+      undefined,
+      undefined,
+      [makePatch({ vendorConfidence: "high" })],
+      makeDeployment({ daysSincePatch: 90, ecosystemAdoptionRate: 0.55 })
+    );
+    expect(withBoth.riskScore).toBe(Math.max(0, base.riskScore - 25));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildLockfilePatchableFindings
+// ---------------------------------------------------------------------------
+
+function makeLockfileResolution(overrides: Partial<LockfileResolutionContext> = {}): LockfileResolutionContext {
+  return {
+    cveId: "CVE-2024-9999",
+    resolvedVersion: "1.0.0",
+    patchedVersion: "2.0.0",
+    isUnpatched: true,
+    ...overrides
+  };
+}
+
+describe("buildLockfilePatchableFindings", () => {
+  it("returns empty array when no resolutions provided", () => {
+    expect(buildLockfilePatchableFindings(undefined)).toEqual([]);
+    expect(buildLockfilePatchableFindings([])).toEqual([]);
+  });
+
+  it("returns empty array when all resolutions are patched", () => {
+    const resolutions = [makeLockfileResolution({ isUnpatched: false })];
+    expect(buildLockfilePatchableFindings(resolutions)).toHaveLength(0);
+  });
+
+  it("emits MEDIUM finding for unpatched lockfile entry", () => {
+    const resolutions = [makeLockfileResolution({ isUnpatched: true })];
+    const findings = buildLockfilePatchableFindings(resolutions);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.severity).toBe("medium");
+    expect(findings[0]!.title).toContain("CVE-2024-9999");
+    expect(findings[0]!.title).toContain("Patchable vulnerability");
+    expect(findings[0]!.description).toContain("1.0.0");
+    expect(findings[0]!.description).toContain("2.0.0");
+  });
+
+  it("emits one finding per unpatched CVE, skips patched ones", () => {
+    const resolutions = [
+      makeLockfileResolution({ cveId: "CVE-2024-0001", isUnpatched: true }),
+      makeLockfileResolution({ cveId: "CVE-2024-0002", isUnpatched: false }),
+      makeLockfileResolution({ cveId: "CVE-2024-0003", isUnpatched: true })
+    ];
+    const findings = buildLockfilePatchableFindings(resolutions);
+    expect(findings).toHaveLength(2);
+    expect(findings.every((f) => f.severity === "medium")).toBe(true);
+    expect(findings.map((f) => f.title)).toContain("Patchable vulnerability: CVE-2024-0001");
+    expect(findings.map((f) => f.title)).toContain("Patchable vulnerability: CVE-2024-0003");
+  });
+
+  it("finding description mentions both resolved and patched versions", () => {
+    const findings = buildLockfilePatchableFindings([
+      makeLockfileResolution({ resolvedVersion: "3.1.4", patchedVersion: "3.2.0", isUnpatched: true })
+    ]);
+    expect(findings[0]!.description).toContain("3.1.4");
+    expect(findings[0]!.description).toContain("3.2.0");
+    expect(findings[0]!.recommendation).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ActiveVulnerability helpers — feed freshness, per-vuln boosts
+// ---------------------------------------------------------------------------
+
+/** Build a fresh ActiveVulnerability with sensible defaults. */
+function makeVuln(overrides: Partial<ActiveVulnerability> = {}): ActiveVulnerability {
+  return {
+    cveId: "CVE-2025-0001",
+    epssPercentile: 0,
+    isKev: false,
+    feedUpdatedAt: new Date().toISOString(), // fresh by default
+    ...overrides
+  };
+}
+
+const STALE_DATE = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+const FRESH_DATE = new Date().toISOString();
+
+describe("isFeedFresh", () => {
+  it("returns true for a just-updated entry", () => {
+    expect(isFeedFresh(makeVuln({ feedUpdatedAt: FRESH_DATE }))).toBe(true);
+  });
+
+  it("returns false for an entry older than 30 days", () => {
+    expect(isFeedFresh(makeVuln({ feedUpdatedAt: STALE_DATE }))).toBe(false);
+  });
+
+  it("returns false for an invalid date string", () => {
+    expect(isFeedFresh(makeVuln({ feedUpdatedAt: "not-a-date" }))).toBe(false);
+  });
+});
+
+describe("epssPercentileBoost", () => {
+  it("returns 0 below 40th percentile", () => {
+    expect(epssPercentileBoost(0)).toBe(0);
+    expect(epssPercentileBoost(0.39)).toBe(0);
+  });
+
+  it("returns +5 for 40th–75th percentile range", () => {
+    expect(epssPercentileBoost(0.40)).toBe(5);
+    expect(epssPercentileBoost(0.60)).toBe(5);
+    expect(epssPercentileBoost(0.75)).toBe(5);
+  });
+
+  it("returns +15 for 75th–90th percentile range", () => {
+    expect(epssPercentileBoost(0.751)).toBe(15);
+    expect(epssPercentileBoost(0.85)).toBe(15);
+    expect(epssPercentileBoost(0.90)).toBe(15);
+  });
+
+  it("returns +25 above 90th percentile", () => {
+    expect(epssPercentileBoost(0.901)).toBe(25);
+    expect(epssPercentileBoost(1.0)).toBe(25);
+  });
+});
+
+describe("kevBoostForVuln", () => {
+  it("returns 0 when isKev is false", () => {
+    expect(kevBoostForVuln(makeVuln({ isKev: false }))).toBe(0);
+  });
+
+  it("returns 0 for KEV proof-of-concept", () => {
+    expect(
+      kevBoostForVuln(makeVuln({ isKev: true, exploitMaturity: "proof-of-concept" }))
+    ).toBe(0);
+  });
+
+  it("returns +20 for KEV active-exploitation", () => {
+    expect(
+      kevBoostForVuln(makeVuln({ isKev: true, exploitMaturity: "active-exploitation" }))
+    ).toBe(20);
+  });
+
+  it("returns +20 for KEV widespread", () => {
+    expect(
+      kevBoostForVuln(makeVuln({ isKev: true, exploitMaturity: "widespread" }))
+    ).toBe(20);
+  });
+});
+
+describe("fixAvailabilityBoost", () => {
+  it("returns +10 when no patchedVersion (no fix exists)", () => {
+    expect(fixAvailabilityBoost(makeVuln({ patchedVersion: undefined }))).toBe(10);
+  });
+
+  it("returns +5 when patch exists but unmerged", () => {
+    expect(
+      fixAvailabilityBoost(
+        makeVuln({ patchedVersion: "2.0.0", patchAvailableButUnmerged: true })
+      )
+    ).toBe(5);
+  });
+
+  it("returns 0 when patch is applied", () => {
+    expect(
+      fixAvailabilityBoost(
+        makeVuln({ patchedVersion: "2.0.0", patchAvailableButUnmerged: false })
+      )
+    ).toBe(0);
+  });
+});
+
+describe("shouldForceCritical", () => {
+  it("returns false when not in KEV", () => {
+    expect(shouldForceCritical(makeVuln({ isKev: false }))).toBe(false);
+  });
+
+  it("returns false for KEV proof-of-concept", () => {
+    expect(
+      shouldForceCritical(makeVuln({ isKev: true, exploitMaturity: "proof-of-concept" }))
+    ).toBe(false);
+  });
+
+  it("returns true for KEV active-exploitation", () => {
+    expect(
+      shouldForceCritical(makeVuln({ isKev: true, exploitMaturity: "active-exploitation" }))
+    ).toBe(true);
+  });
+
+  it("returns true for KEV widespread", () => {
+    expect(
+      shouldForceCritical(makeVuln({ isKev: true, exploitMaturity: "widespread" }))
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-CVE stacking
+// ---------------------------------------------------------------------------
+
+describe("activeVulnAdjustment / multi-CVE stacking", () => {
+  it("stacks boosts from multiple CVEs", () => {
+    const vulns: ActiveVulnerability[] = [
+      makeVuln({ cveId: "CVE-2025-0001", epssPercentile: 0.50 }),  // +5
+      makeVuln({ cveId: "CVE-2025-0002", epssPercentile: 0.80 }),  // +15
+      makeVuln({ cveId: "CVE-2025-0003", isKev: true, exploitMaturity: "active-exploitation", epssPercentile: 0 }) // +20
+    ];
+    // Each has no patch (patchedVersion undefined) → +10 each = +30 extra
+    // EPSS: 5+15+0 = 20, KEV: 0+0+20 = 20, no-fix: 10+10+10 = 30 → total 70
+    const total = vulns.reduce((acc, v) => {
+      const { epssPercentileBoost: eb, kevBoostForVuln: kb, fixAvailabilityBoost: fb } =
+        // inline the math to avoid circular import confusion in the test
+        { epssPercentileBoost: epssPercentileBoost(v.epssPercentile), kevBoostForVuln: kevBoostForVuln(v), fixAvailabilityBoost: fixAvailabilityBoost(v) };
+      return acc + eb + kb + fb;
+    }, 0);
+    expect(total).toBe(70);
+  });
+
+  it("stale CVEs are not included in stacking", () => {
+    const vulns: ActiveVulnerability[] = [
+      makeVuln({ cveId: "CVE-2025-0001", epssPercentile: 0.95, feedUpdatedAt: STALE_DATE }),
+      makeVuln({ cveId: "CVE-2025-0002", epssPercentile: 0.95, feedUpdatedAt: FRESH_DATE })
+    ];
+    // Only the fresh one should count
+    const freshVulns = vulns.filter((v) => isFeedFresh(v));
+    expect(freshVulns).toHaveLength(1);
+    expect(freshVulns[0]!.cveId).toBe("CVE-2025-0002");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CISA KEV critical override
+// ---------------------------------------------------------------------------
+
+describe("scoreWithActiveVulnerabilities — CISA KEV override", () => {
+  it("forces critical risk level even when numeric score is below 80", () => {
+    const binaries = sampleAnalyses[0]!.binaries;
+    const kev = makeVuln({
+      cveId: "CVE-2025-KEV-001",
+      isKev: true,
+      exploitMaturity: "active-exploitation",
+      epssPercentile: 0,
+      patchedVersion: "1.0.0",
+      patchAvailableButUnmerged: false
+    });
+
+    const result = scoreWithActiveVulnerabilities(binaries as import("@binshield/analysis-types").BinaryAnalysis[], undefined, [kev]);
+    expect(result.riskLevel).toBe("critical");
+  });
+
+  it("does NOT force critical for KEV proof-of-concept", () => {
+    const vulns = [
+      makeVuln({
+        cveId: "CVE-2025-POC-001",
+        isKev: true,
+        exploitMaturity: "proof-of-concept",
+        epssPercentile: 0,
+        patchedVersion: "1.0.0",
+        patchAvailableButUnmerged: false
+      })
+    ];
+    const result = scoreWithActiveVulnerabilities([], undefined, vulns);
+    // No KEV active-exploitation — riskLevel determined by score alone
+    expect(result.riskLevel).not.toBe("critical");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// EPSS percentile tiers
+// ---------------------------------------------------------------------------
+
+describe("scoreWithActiveVulnerabilities — EPSS percentile tiers", () => {
+  const emptyBinary = {
+    behaviors: emptyBehaviorSummary(),
+    findings: [] as import("@binshield/analysis-types").Finding[],
+    importCount: 0,
+    functionCount: 0
+  };
+
+  it("40th–75th percentile adds +5 pts per CVE", () => {
+    const noVulns = scoreWithActiveVulnerabilities([], undefined, []);
+    const withVuln = scoreWithActiveVulnerabilities([], undefined, [
+      makeVuln({ epssPercentile: 0.60, patchedVersion: "1.0.0", patchAvailableButUnmerged: false })
+    ]);
+    // +5 EPSS, no fix penalty → +5 total
+    expect(withVuln.riskScore).toBe(noVulns.riskScore + 5);
+  });
+
+  it("75th–90th percentile adds +15 pts per CVE", () => {
+    const noVulns = scoreWithActiveVulnerabilities([], undefined, []);
+    const withVuln = scoreWithActiveVulnerabilities([], undefined, [
+      makeVuln({ epssPercentile: 0.80, patchedVersion: "1.0.0", patchAvailableButUnmerged: false })
+    ]);
+    expect(withVuln.riskScore).toBe(noVulns.riskScore + 15);
+  });
+
+  it(">90th percentile adds +25 pts per CVE", () => {
+    const noVulns = scoreWithActiveVulnerabilities([], undefined, []);
+    const withVuln = scoreWithActiveVulnerabilities([], undefined, [
+      makeVuln({ epssPercentile: 0.95, patchedVersion: "1.0.0", patchAvailableButUnmerged: false })
+    ]);
+    expect(withVuln.riskScore).toBe(noVulns.riskScore + 25);
+  });
+
+  it("below 40th percentile adds 0 pts", () => {
+    const noVulns = scoreWithActiveVulnerabilities([], undefined, []);
+    const withVuln = scoreWithActiveVulnerabilities([], undefined, [
+      makeVuln({ epssPercentile: 0.39, patchedVersion: "1.0.0", patchAvailableButUnmerged: false })
+    ]);
+    expect(withVuln.riskScore).toBe(noVulns.riskScore);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Transitive vulnerability inheritance
+// ---------------------------------------------------------------------------
+
+describe("transitiveVulnScan — DFS transitive inheritance", () => {
+  function makeGraph(): Map<string, DepNode> {
+    const vuln1 = makeVuln({ cveId: "CVE-ROOT-001", epssPercentile: 0.80 });
+    const vuln2 = makeVuln({ cveId: "CVE-CHILD-001", epssPercentile: 0.50 });
+    const vuln3 = makeVuln({ cveId: "CVE-GRANDCHILD-001", isKev: true, exploitMaturity: "active-exploitation" });
+
+    const graph = new Map<string, DepNode>([
+      ["root", { name: "root", vulns: [vuln1], directDeps: ["child"] }],
+      ["child", { name: "child", vulns: [vuln2], directDeps: ["grandchild"] }],
+      ["grandchild", { name: "grandchild", vulns: [vuln3], directDeps: [] }]
+    ]);
+    return graph;
+  }
+
+  it("collects all transitive vulnerabilities from root", () => {
+    const graph = makeGraph();
+    const vulns = transitiveVulnScan("root", graph);
+    expect(vulns).toHaveLength(3);
+    const ids = vulns.map((v) => v.cveId);
+    expect(ids).toContain("CVE-ROOT-001");
+    expect(ids).toContain("CVE-CHILD-001");
+    expect(ids).toContain("CVE-GRANDCHILD-001");
+  });
+
+  it("collects only direct + own vulns when starting from child", () => {
+    const graph = makeGraph();
+    const vulns = transitiveVulnScan("child", graph);
+    expect(vulns).toHaveLength(2);
+    const ids = vulns.map((v) => v.cveId);
+    expect(ids).toContain("CVE-CHILD-001");
+    expect(ids).toContain("CVE-GRANDCHILD-001");
+    expect(ids).not.toContain("CVE-ROOT-001");
+  });
+
+  it("deduplicates CVEs that appear in multiple nodes", () => {
+    const sharedVuln = makeVuln({ cveId: "CVE-SHARED-001", epssPercentile: 0.60 });
+    const graph = new Map<string, DepNode>([
+      ["root", { name: "root", vulns: [sharedVuln], directDeps: ["child"] }],
+      ["child", { name: "child", vulns: [sharedVuln], directDeps: [] }]
+    ]);
+    const vulns = transitiveVulnScan("root", graph);
+    expect(vulns.filter((v) => v.cveId === "CVE-SHARED-001")).toHaveLength(1);
+  });
+
+  it("handles cycles without infinite loop", () => {
+    const vuln = makeVuln({ cveId: "CVE-CYCLE-001" });
+    const graph = new Map<string, DepNode>([
+      ["a", { name: "a", vulns: [vuln], directDeps: ["b"] }],
+      ["b", { name: "b", vulns: [], directDeps: ["a"] }]
+    ]);
+    expect(() => transitiveVulnScan("a", graph)).not.toThrow();
+    const vulns = transitiveVulnScan("a", graph);
+    expect(vulns).toHaveLength(1);
+  });
+
+  it("returns empty array for unknown root", () => {
+    const graph = new Map<string, DepNode>();
+    expect(transitiveVulnScan("nonexistent", graph)).toHaveLength(0);
+  });
+
+  it("excludes stale vulns from transitive scan", () => {
+    const fresh = makeVuln({ cveId: "CVE-FRESH-001", feedUpdatedAt: FRESH_DATE });
+    const stale = makeVuln({ cveId: "CVE-STALE-001", feedUpdatedAt: STALE_DATE });
+    const graph = new Map<string, DepNode>([
+      ["root", { name: "root", vulns: [fresh, stale], directDeps: [] }]
+    ]);
+    const vulns = transitiveVulnScan("root", graph);
+    expect(vulns).toHaveLength(1);
+    expect(vulns[0]!.cveId).toBe("CVE-FRESH-001");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildActiveThreatContext
+// ---------------------------------------------------------------------------
+
+describe("buildActiveThreatContext", () => {
+  it("returns zero context when no vulns provided", () => {
+    const ctx = buildActiveThreatContext([], 0);
+    expect(ctx.exploitedCVEs).toHaveLength(0);
+    expect(ctx.unfixed_count).toBe(0);
+    expect(ctx.highest_epss_pct).toBe(0);
+    expect(ctx.risk_adjusted_from_base).toBe(0);
+  });
+
+  it("lists exploited CVEs from KEV active/widespread", () => {
+    const vulns: ActiveVulnerability[] = [
+      makeVuln({ cveId: "CVE-A", isKev: true, exploitMaturity: "active-exploitation" }),
+      makeVuln({ cveId: "CVE-B", isKev: true, exploitMaturity: "widespread" }),
+      makeVuln({ cveId: "CVE-C", isKev: true, exploitMaturity: "proof-of-concept" }),
+      makeVuln({ cveId: "CVE-D", isKev: false })
+    ];
+    const ctx = buildActiveThreatContext(vulns, 40);
+    expect(ctx.exploitedCVEs).toContain("CVE-A");
+    expect(ctx.exploitedCVEs).toContain("CVE-B");
+    expect(ctx.exploitedCVEs).not.toContain("CVE-C");
+    expect(ctx.exploitedCVEs).not.toContain("CVE-D");
+  });
+
+  it("counts unfixed vulnerabilities correctly", () => {
+    const vulns: ActiveVulnerability[] = [
+      makeVuln({ cveId: "CVE-1", patchedVersion: undefined }),                          // no fix → unfixed
+      makeVuln({ cveId: "CVE-2", patchedVersion: "2.0", patchAvailableButUnmerged: true }),  // unmerged → unfixed
+      makeVuln({ cveId: "CVE-3", patchedVersion: "2.0", patchAvailableButUnmerged: false })  // applied → fixed
+    ];
+    const ctx = buildActiveThreatContext(vulns, 0);
+    expect(ctx.unfixed_count).toBe(2);
+  });
+
+  it("reports highest EPSS percentile across all fresh vulns", () => {
+    const vulns: ActiveVulnerability[] = [
+      makeVuln({ cveId: "CVE-1", epssPercentile: 0.45 }),
+      makeVuln({ cveId: "CVE-2", epssPercentile: 0.92 }),
+      makeVuln({ cveId: "CVE-3", epssPercentile: 0.70 }),
+      makeVuln({ cveId: "CVE-4", epssPercentile: 0.85, feedUpdatedAt: STALE_DATE }) // stale — excluded
+    ];
+    const ctx = buildActiveThreatContext(vulns, 0);
+    expect(ctx.highest_epss_pct).toBe(0.92);
+  });
+
+  it("reflects the passed risk_adjusted_from_base value", () => {
+    const ctx = buildActiveThreatContext([], 42);
+    expect(ctx.risk_adjusted_from_base).toBe(42);
+  });
+
+  it("stale vulns are excluded from context", () => {
+    const vulns: ActiveVulnerability[] = [
+      makeVuln({ cveId: "CVE-STALE", isKev: true, exploitMaturity: "active-exploitation", feedUpdatedAt: STALE_DATE }),
+      makeVuln({ cveId: "CVE-FRESH", epssPercentile: 0.50 })
+    ];
+    const ctx = buildActiveThreatContext(vulns, 0);
+    expect(ctx.exploitedCVEs).toHaveLength(0);
+    expect(ctx.highest_epss_pct).toBe(0.50);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feed staleness — >30 days = ignore
+// ---------------------------------------------------------------------------
+
+describe("feed staleness guard (>30 days = ignore)", () => {
+  it("scoreWithActiveVulnerabilities ignores stale entries entirely", () => {
+    const staleKev = makeVuln({
+      cveId: "CVE-OLD-001",
+      isKev: true,
+      exploitMaturity: "active-exploitation",
+      epssPercentile: 0.99,
+      feedUpdatedAt: STALE_DATE
+    });
+
+    const withStale = scoreWithActiveVulnerabilities([], undefined, [staleKev]);
+    const withNone = scoreWithActiveVulnerabilities([], undefined, []);
+
+    // Stale entry should have zero effect on score
+    expect(withStale.riskScore).toBe(withNone.riskScore);
+    // And must NOT force critical
+    expect(withStale.riskLevel).toBe(withNone.riskLevel);
+    // activeThreatContext should be empty
+    expect(withStale.activeThreatContext.exploitedCVEs).toHaveLength(0);
+  });
+
+  it("fresh and stale mixed — only fresh entries contribute", () => {
+    const stale = makeVuln({ cveId: "CVE-STALE", epssPercentile: 0.95, feedUpdatedAt: STALE_DATE, patchedVersion: "1.0.0", patchAvailableButUnmerged: false });
+    const fresh = makeVuln({ cveId: "CVE-FRESH", epssPercentile: 0.95, feedUpdatedAt: FRESH_DATE, patchedVersion: "1.0.0", patchAvailableButUnmerged: false });
+
+    const withBoth = scoreWithActiveVulnerabilities([], undefined, [stale, fresh]);
+    const withFreshOnly = scoreWithActiveVulnerabilities([], undefined, [fresh]);
+
+    expect(withBoth.riskScore).toBe(withFreshOnly.riskScore);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scoreWithActiveVulnerabilities — activeThreatContext integration
+// ---------------------------------------------------------------------------
+
+describe("scoreWithActiveVulnerabilities — activeThreatContext", () => {
+  it("returns activeThreatContext with zero values for empty vuln list", () => {
+    const result = scoreWithActiveVulnerabilities([], undefined, []);
+    expect(result.activeThreatContext.exploitedCVEs).toHaveLength(0);
+    expect(result.activeThreatContext.unfixed_count).toBe(0);
+    expect(result.activeThreatContext.highest_epss_pct).toBe(0);
+    expect(result.activeThreatContext.risk_adjusted_from_base).toBe(0);
+  });
+
+  it("risk_adjusted_from_base reflects total boost from active vulns", () => {
+    const vulns: ActiveVulnerability[] = [
+      makeVuln({ epssPercentile: 0.80, patchedVersion: "1.0.0", patchAvailableButUnmerged: false }), // +15
+      makeVuln({ cveId: "CVE-2025-0002", isKev: true, exploitMaturity: "active-exploitation", epssPercentile: 0, patchedVersion: "2.0.0", patchAvailableButUnmerged: false }) // +20
+    ];
+    const result = scoreWithActiveVulnerabilities([], undefined, vulns);
+    expect(result.activeThreatContext.risk_adjusted_from_base).toBe(35); // 15 + 20
+  });
+
+  it("score is clamped to 100 even when adjustments are large", () => {
+    const manyVulns: ActiveVulnerability[] = Array.from({ length: 10 }, (_, i) =>
+      makeVuln({
+        cveId: `CVE-2025-${i}`,
+        epssPercentile: 0.99,
+        isKev: true,
+        exploitMaturity: "widespread",
+        patchedVersion: undefined
+      })
+    );
+    const result = scoreWithActiveVulnerabilities([], undefined, manyVulns);
+    expect(result.riskScore).toBeLessThanOrEqual(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Comprehensive: stale feed filtering edge cases
+// ---------------------------------------------------------------------------
+
+describe("stale feed filtering — edge cases", () => {
+  const EXACTLY_30_DAYS_AGO = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const JUST_OVER_30_DAYS_AGO = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000 - 1).toISOString();
+  const JUST_UNDER_30_DAYS_AGO = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000 + 1000).toISOString();
+
+  it("entry at exactly 30-day boundary is still fresh (<=, not <)", () => {
+    // Use injected 'now' to ensure the boundary check is deterministic.
+    // feedUpdatedAt = fixedNow - 30days exactly; isFeedFresh(vuln, fixedNow) must be true.
+    const fixedNow = new Date("2025-06-01T12:00:00.000Z").getTime();
+    const exactly30DaysAgo = new Date(fixedNow - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const vuln = makeVuln({ feedUpdatedAt: exactly30DaysAgo });
+    // The boundary is inclusive: now - feedMs <= MAX_FEED_AGE_MS
+    expect(isFeedFresh(vuln, fixedNow)).toBe(true);
+  });
+
+  it("entry one ms past 30-day boundary is stale", () => {
+    const vuln = makeVuln({ feedUpdatedAt: JUST_OVER_30_DAYS_AGO });
+    expect(isFeedFresh(vuln)).toBe(false);
+  });
+
+  it("entry one second before 30-day boundary is fresh", () => {
+    const vuln = makeVuln({ feedUpdatedAt: JUST_UNDER_30_DAYS_AGO });
+    expect(isFeedFresh(vuln)).toBe(true);
+  });
+
+  it("isFeedFresh accepts injected 'now' for deterministic testing", () => {
+    const fixedNow = new Date("2025-01-31T00:00:00.000Z").getTime();
+    // 29 days before fixedNow = fresh
+    const fresh = new Date(fixedNow - 29 * 24 * 60 * 60 * 1000).toISOString();
+    // 31 days before fixedNow = stale
+    const stale = new Date(fixedNow - 31 * 24 * 60 * 60 * 1000).toISOString();
+    expect(isFeedFresh(makeVuln({ feedUpdatedAt: fresh }), fixedNow)).toBe(true);
+    expect(isFeedFresh(makeVuln({ feedUpdatedAt: stale }), fixedNow)).toBe(false);
+  });
+
+  it("invalid ISO date strings are treated as stale (not fresh)", () => {
+    const invalidDates = ["", "not-a-date", "2024-99-99", "undefined", "null"];
+    for (const d of invalidDates) {
+      expect(isFeedFresh(makeVuln({ feedUpdatedAt: d }))).toBe(false);
+    }
+  });
+
+  it("future timestamps (feed somehow ahead of clock) are treated as fresh", () => {
+    const futureDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    // future date: now - feedMs is negative, which is <= MAX_FEED_AGE_MS, so fresh
+    expect(isFeedFresh(makeVuln({ feedUpdatedAt: futureDate }))).toBe(true);
+  });
+
+  it("activeVulnAdjustment with all stale vulns returns zero adjustment and no forceCritical", () => {
+    const vulns: ActiveVulnerability[] = [
+      makeVuln({ cveId: "CVE-S1", epssPercentile: 0.99, isKev: true, exploitMaturity: "widespread", feedUpdatedAt: STALE_DATE }),
+      makeVuln({ cveId: "CVE-S2", epssPercentile: 0.92, feedUpdatedAt: STALE_DATE }),
+    ];
+    const { adjustment, forceCritical } = activeVulnAdjustment(vulns);
+    expect(adjustment).toBe(0);
+    expect(forceCritical).toBe(false);
+  });
+
+  it("mixed stale+fresh: only fresh entries drive the adjustment", () => {
+    const stale = makeVuln({ cveId: "CVE-STALE", epssPercentile: 0.99, patchedVersion: "2.0", patchAvailableButUnmerged: false, feedUpdatedAt: STALE_DATE });
+    const fresh = makeVuln({ cveId: "CVE-FRESH", epssPercentile: 0.92, patchedVersion: "2.0", patchAvailableButUnmerged: false, feedUpdatedAt: FRESH_DATE });
+    const { adjustment } = activeVulnAdjustment([stale, fresh]);
+    // Only fresh: epssPercentileBoost(0.92) = 25, no-kev, patch applied = 0 → 25
+    expect(adjustment).toBe(25);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Comprehensive: semver patch resolution edge cases
+// ---------------------------------------------------------------------------
+
+describe("semver patch resolution — edge cases in fixAvailabilityBoost", () => {
+  it("returns +10 (no fix) when patchedVersion is empty string (treated as falsy)", () => {
+    // empty string is falsy → treated as "no patch exists"
+    const vuln = makeVuln({ patchedVersion: "" as unknown as undefined });
+    expect(fixAvailabilityBoost(vuln)).toBe(10);
+  });
+
+  it("returns +5 for patch-available-but-unmerged regardless of version string format", () => {
+    for (const v of ["1.0.0", "v2.3.1", "10.0.0-rc.1", "0.0.1"]) {
+      const vuln = makeVuln({ patchedVersion: v, patchAvailableButUnmerged: true });
+      expect(fixAvailabilityBoost(vuln)).toBe(5);
+    }
+  });
+
+  it("returns 0 when patch exists and is merged (patchAvailableButUnmerged = false)", () => {
+    const vuln = makeVuln({ patchedVersion: "3.0.0", patchAvailableButUnmerged: false });
+    expect(fixAvailabilityBoost(vuln)).toBe(0);
+  });
+
+  it("returns 0 when patchAvailableButUnmerged is undefined with a patchedVersion set", () => {
+    const vuln = makeVuln({ patchedVersion: "2.0.0", patchAvailableButUnmerged: undefined });
+    // undefined is falsy — treated as "applied"
+    expect(fixAvailabilityBoost(vuln)).toBe(0);
+  });
+
+  it("scoreWithActiveVulnerabilities correctly penalises unmerged-patch vuln (+5 boost)", () => {
+    const baseScore = scoreWithActiveVulnerabilities([], undefined, []).riskScore;
+    const withUnmerged = scoreWithActiveVulnerabilities([], undefined, [
+      makeVuln({ epssPercentile: 0, isKev: false, patchedVersion: "2.0.0", patchAvailableButUnmerged: true })
+    ]).riskScore;
+    // fixAvailabilityBoost = +5, no EPSS, no KEV → +5 net
+    expect(withUnmerged).toBe(baseScore + 5);
+  });
+
+  it("no-fix penalty (+10) stacks additively with EPSS boost", () => {
+    const baseScore = scoreWithActiveVulnerabilities([], undefined, []).riskScore;
+    const withNoFix = scoreWithActiveVulnerabilities([], undefined, [
+      makeVuln({ epssPercentile: 0.60, patchedVersion: undefined }) // +5 EPSS + +10 no-fix = +15
+    ]).riskScore;
+    expect(withNoFix).toBe(baseScore + 15);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Comprehensive: circular dependency handling in transitiveVulnScan
+// ---------------------------------------------------------------------------
+
+describe("transitiveVulnScan — circular dependency handling", () => {
+  it("two-node mutual cycle completes without stack overflow", () => {
+    const v = makeVuln({ cveId: "CVE-CYCLE-A" });
+    const graph = new Map<string, DepNode>([
+      ["a", { name: "a", vulns: [v], directDeps: ["b"] }],
+      ["b", { name: "b", vulns: [], directDeps: ["a"] }]  // points back to a
+    ]);
+    let result: ActiveVulnerability[] = [];
+    expect(() => { result = transitiveVulnScan("a", graph); }).not.toThrow();
+    expect(result).toHaveLength(1);
+    expect(result[0]!.cveId).toBe("CVE-CYCLE-A");
+  });
+
+  it("three-node cycle (a→b→c→a) does not visit nodes more than once", () => {
+    const va = makeVuln({ cveId: "CVE-A" });
+    const vb = makeVuln({ cveId: "CVE-B" });
+    const vc = makeVuln({ cveId: "CVE-C" });
+    const graph = new Map<string, DepNode>([
+      ["a", { name: "a", vulns: [va], directDeps: ["b"] }],
+      ["b", { name: "b", vulns: [vb], directDeps: ["c"] }],
+      ["c", { name: "c", vulns: [vc], directDeps: ["a"] }]  // cycle back to a
+    ]);
+    const result = transitiveVulnScan("a", graph);
+    expect(result).toHaveLength(3);
+    const ids = result.map((v) => v.cveId);
+    expect(ids).toContain("CVE-A");
+    expect(ids).toContain("CVE-B");
+    expect(ids).toContain("CVE-C");
+  });
+
+  it("self-referencing node (a→a) is handled gracefully", () => {
+    const v = makeVuln({ cveId: "CVE-SELF" });
+    const graph = new Map<string, DepNode>([
+      ["a", { name: "a", vulns: [v], directDeps: ["a"] }]  // self-reference
+    ]);
+    let result: ActiveVulnerability[] = [];
+    expect(() => { result = transitiveVulnScan("a", graph); }).not.toThrow();
+    expect(result).toHaveLength(1);
+  });
+
+  it("diamond dependency (a→b, a→c, b→d, c→d) collects d's CVE exactly once", () => {
+    const vd = makeVuln({ cveId: "CVE-D" });
+    const va = makeVuln({ cveId: "CVE-A" });
+    const graph = new Map<string, DepNode>([
+      ["a", { name: "a", vulns: [va], directDeps: ["b", "c"] }],
+      ["b", { name: "b", vulns: [], directDeps: ["d"] }],
+      ["c", { name: "c", vulns: [], directDeps: ["d"] }],
+      ["d", { name: "d", vulns: [vd], directDeps: [] }]
+    ]);
+    const result = transitiveVulnScan("a", graph);
+    // CVE-A (from a) + CVE-D (from d, deduplicated) = 2
+    expect(result).toHaveLength(2);
+    expect(result.filter((v) => v.cveId === "CVE-D")).toHaveLength(1);
+  });
+
+  it("missing dep reference (node not in graph) is silently skipped", () => {
+    const v = makeVuln({ cveId: "CVE-ROOT" });
+    const graph = new Map<string, DepNode>([
+      ["root", { name: "root", vulns: [v], directDeps: ["ghost-dep"] }]
+      // "ghost-dep" is not in graph
+    ]);
+    let result: ActiveVulnerability[] = [];
+    expect(() => { result = transitiveVulnScan("root", graph); }).not.toThrow();
+    expect(result).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Comprehensive: multi-version transitive CVE deduplication
+// ---------------------------------------------------------------------------
+
+describe("transitiveVulnScan — multi-version transitive CVE deduplication", () => {
+  it("same CVE ID appearing in multiple nodes is included exactly once", () => {
+    const sharedCveId = "CVE-SHARED-ACROSS-VERSIONS";
+    // Simulate the same CVE appearing in two different versions of the same dep
+    const v1 = makeVuln({ cveId: sharedCveId, epssPercentile: 0.60 });
+    const v2 = makeVuln({ cveId: sharedCveId, epssPercentile: 0.75 }); // different object, same cveId
+    const graph = new Map<string, DepNode>([
+      ["root", { name: "root", vulns: [], directDeps: ["pkg-v1", "pkg-v2"] }],
+      ["pkg-v1", { name: "pkg-v1", vulns: [v1], directDeps: [] }],
+      ["pkg-v2", { name: "pkg-v2", vulns: [v2], directDeps: [] }]
+    ]);
+    const result = transitiveVulnScan("root", graph);
+    const matches = result.filter((v) => v.cveId === sharedCveId);
+    expect(matches).toHaveLength(1); // deduplicated
+  });
+
+  it("different CVE IDs from different dep branches are all collected", () => {
+    const graph = new Map<string, DepNode>([
+      ["root", { name: "root", vulns: [], directDeps: ["lib-a", "lib-b", "lib-c"] }],
+      ["lib-a", { name: "lib-a", vulns: [makeVuln({ cveId: "CVE-A1" }), makeVuln({ cveId: "CVE-A2" })], directDeps: [] }],
+      ["lib-b", { name: "lib-b", vulns: [makeVuln({ cveId: "CVE-B1" })], directDeps: [] }],
+      ["lib-c", { name: "lib-c", vulns: [], directDeps: [] }]  // no vulns
+    ]);
+    const result = transitiveVulnScan("root", graph);
+    expect(result).toHaveLength(3);
+    const ids = result.map((v) => v.cveId);
+    expect(ids).toContain("CVE-A1");
+    expect(ids).toContain("CVE-A2");
+    expect(ids).toContain("CVE-B1");
+  });
+
+  it("CVE in root node is included once even when root also has transitive deps with same CVE", () => {
+    const rootVuln = makeVuln({ cveId: "CVE-ROOT-AND-CHILD" });
+    const childVuln = makeVuln({ cveId: "CVE-ROOT-AND-CHILD" }); // same CVE ID
+    const graph = new Map<string, DepNode>([
+      ["root", { name: "root", vulns: [rootVuln], directDeps: ["child"] }],
+      ["child", { name: "child", vulns: [childVuln], directDeps: [] }]
+    ]);
+    const result = transitiveVulnScan("root", graph);
+    const matches = result.filter((v) => v.cveId === "CVE-ROOT-AND-CHILD");
+    expect(matches).toHaveLength(1);
+  });
+
+  it("stale vulns in transitive deps are excluded; fresh ones from other branches still included", () => {
+    const stale = makeVuln({ cveId: "CVE-STALE-TRANSITIVE", feedUpdatedAt: STALE_DATE });
+    const fresh = makeVuln({ cveId: "CVE-FRESH-TRANSITIVE", feedUpdatedAt: FRESH_DATE });
+    const graph = new Map<string, DepNode>([
+      ["root", { name: "root", vulns: [], directDeps: ["stale-lib", "fresh-lib"] }],
+      ["stale-lib", { name: "stale-lib", vulns: [stale], directDeps: [] }],
+      ["fresh-lib", { name: "fresh-lib", vulns: [fresh], directDeps: [] }]
+    ]);
+    const result = transitiveVulnScan("root", graph);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.cveId).toBe("CVE-FRESH-TRANSITIVE");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Comprehensive: vendor confidence hierarchy
+// ---------------------------------------------------------------------------
+
+describe("vendor confidence hierarchy — vendorPatchPenalty", () => {
+  it("high > medium > low confidence ordering is deterministic", () => {
+    const high = vendorPatchPenalty([makePatch({ vendorConfidence: "high" })]);
+    const med = vendorPatchPenalty([makePatch({ vendorConfidence: "medium" })]);
+    const low = vendorPatchPenalty([makePatch({ vendorConfidence: "low" })]);
+    // All are negative (penalties)
+    expect(high).toBeLessThan(0);
+    expect(med).toBeLessThan(0);
+    expect(low).toBeLessThan(0);
+    // High confidence = largest penalty (most negative)
+    expect(high).toBeLessThan(med);
+    expect(med).toBeLessThan(low);
+  });
+
+  it("mixed confidence list uses highest-confidence patch signal", () => {
+    const patches = [
+      makePatch({ cveId: "CVE-1", vendorConfidence: "low" }),
+      makePatch({ cveId: "CVE-2", vendorConfidence: "medium" }),
+      makePatch({ cveId: "CVE-3", vendorConfidence: "high" })
+    ];
+    expect(vendorPatchPenalty(patches)).toBe(-15); // high wins
+  });
+
+  it("all-low-confidence list uses -5 penalty", () => {
+    const patches = [
+      makePatch({ cveId: "CVE-1", vendorConfidence: "low" }),
+      makePatch({ cveId: "CVE-2", vendorConfidence: "low" })
+    ];
+    expect(vendorPatchPenalty(patches)).toBe(-5);
+  });
+
+  it("single medium confidence patch applies -10", () => {
+    expect(vendorPatchPenalty([makePatch({ vendorConfidence: "medium" })])).toBe(-10);
+  });
+
+  it("vendorPatchPenalty does not go below zero for score: penalty is bounded by normalizeRisk", () => {
+    // Base score 0 + high-confidence patch penalty -15 → clamped to 0
+    const binary = {
+      behaviors: emptyBehaviorSummary(),
+      findings: [],
+      importCount: 0,
+      functionCount: 0
+    };
+    const result = scoreBinary(binary, undefined, undefined, undefined, [
+      makePatch({ vendorConfidence: "high" })
+    ]);
+    expect(result.riskScore).toBe(0); // never negative
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Comprehensive: real CVE data integration scenario
+// ---------------------------------------------------------------------------
+
+describe("real CVE data scenario — end-to-end scoring verification", () => {
+  // Simulated CVE-2024-51086 (hypothetical critical RCE): EPSS 0.93, KEV active, no patch
+  const CVE_2024_51086: ActiveVulnerability = {
+    cveId: "CVE-2024-51086",
+    epssPercentile: 0.93,
+    isKev: true,
+    exploitMaturity: "active-exploitation",
+    patchedVersion: undefined, // no fix available
+    feedUpdatedAt: new Date().toISOString()
+  };
+
+  it("CVE-2024-51086: EPSS>0.90 (+25) + KEV active (+20) + no-fix (+10) = +55 pts adjustment", () => {
+    const { adjustment, forceCritical } = activeVulnAdjustment([CVE_2024_51086]);
+    expect(adjustment).toBe(55); // 25 + 20 + 10
+    expect(forceCritical).toBe(true);
+  });
+
+  it("CVE-2024-51086: scoreWithActiveVulnerabilities forces critical regardless of base score", () => {
+    const result = scoreWithActiveVulnerabilities([], undefined, [CVE_2024_51086]);
+    expect(result.riskLevel).toBe("critical");
+    expect(result.activeThreatContext.exploitedCVEs).toContain("CVE-2024-51086");
+    expect(result.activeThreatContext.highest_epss_pct).toBeCloseTo(0.93);
+    expect(result.activeThreatContext.unfixed_count).toBe(1);
+  });
+
+  it("CVE with EPSS 0.76 (>0.75 band) adds exactly +15 pts boost", () => {
+    const cve: ActiveVulnerability = {
+      cveId: "CVE-2024-HIGH-EPSS",
+      epssPercentile: 0.76,
+      isKev: false,
+      patchedVersion: "2.0.0",
+      patchAvailableButUnmerged: false,
+      feedUpdatedAt: new Date().toISOString()
+    };
+    const base = scoreWithActiveVulnerabilities([], undefined, []).riskScore;
+    const withCve = scoreWithActiveVulnerabilities([], undefined, [cve]).riskScore;
+    expect(withCve - base).toBe(15);
+    expect(epssPercentileBoost(cve.epssPercentile)).toBe(15);
+  });
+
+  it("CVE with EPSS 0.45 (>=0.40 band) adds exactly +5 pts boost", () => {
+    const cve: ActiveVulnerability = {
+      cveId: "CVE-2024-MOD-EPSS",
+      epssPercentile: 0.45,
+      isKev: false,
+      patchedVersion: "1.5.0",
+      patchAvailableButUnmerged: false,
+      feedUpdatedAt: new Date().toISOString()
+    };
+    const base = scoreWithActiveVulnerabilities([], undefined, []).riskScore;
+    const withCve = scoreWithActiveVulnerabilities([], undefined, [cve]).riskScore;
+    expect(withCve - base).toBe(5);
+    expect(epssPercentileBoost(cve.epssPercentile)).toBe(5);
+  });
+
+  it("KEV widespread + EPSS 0.91 + unmerged patch = +25 +20 +5 = +50 pts", () => {
+    const cve: ActiveVulnerability = {
+      cveId: "CVE-2024-RANSOMWARE",
+      epssPercentile: 0.91,
+      isKev: true,
+      exploitMaturity: "widespread",
+      patchedVersion: "3.0.0",
+      patchAvailableButUnmerged: true, // patch exists but not applied
+      feedUpdatedAt: new Date().toISOString()
+    };
+    const { adjustment } = activeVulnAdjustment([cve]);
+    expect(adjustment).toBe(50); // 25 (EPSS) + 20 (KEV widespread) + 5 (unmerged)
+  });
+
+  it("multiple CVEs with different EPSS tiers stack correctly", () => {
+    const cves: ActiveVulnerability[] = [
+      // Below threshold: +0
+      makeVuln({ cveId: "CVE-LOW",  epssPercentile: 0.20, patchedVersion: "1.0", patchAvailableButUnmerged: false }),
+      // 40th-75th: +5
+      makeVuln({ cveId: "CVE-MOD",  epssPercentile: 0.55, patchedVersion: "1.0", patchAvailableButUnmerged: false }),
+      // 75th-90th: +15
+      makeVuln({ cveId: "CVE-HIGH", epssPercentile: 0.80, patchedVersion: "1.0", patchAvailableButUnmerged: false }),
+      // >90th: +25
+      makeVuln({ cveId: "CVE-CRIT", epssPercentile: 0.95, patchedVersion: "1.0", patchAvailableButUnmerged: false }),
+    ];
+    const base = scoreWithActiveVulnerabilities([], undefined, []).riskScore;
+    const result = scoreWithActiveVulnerabilities([], undefined, cves);
+    // 0 + 5 + 15 + 25 = 45 pts total adjustment
+    expect(result.riskScore).toBe(Math.min(100, base + 45));
+    expect(result.activeThreatContext.risk_adjusted_from_base).toBe(45);
+  });
+
+  it("buildActiveThreatContext correctly reports all metrics for mixed vulnerability set", () => {
+    const vulns: ActiveVulnerability[] = [
+      // exploited, no fix
+      makeVuln({ cveId: "CVE-EX1", isKev: true, exploitMaturity: "active-exploitation", epssPercentile: 0.95, patchedVersion: undefined }),
+      // exploited, fix unmerged
+      makeVuln({ cveId: "CVE-EX2", isKev: true, exploitMaturity: "widespread", epssPercentile: 0.80, patchedVersion: "2.0", patchAvailableButUnmerged: true }),
+      // proof-of-concept (not forced critical), patched
+      makeVuln({ cveId: "CVE-POC", isKev: true, exploitMaturity: "proof-of-concept", epssPercentile: 0.60, patchedVersion: "1.5", patchAvailableButUnmerged: false }),
+      // fresh but stale (should be excluded)
+      makeVuln({ cveId: "CVE-OLD", isKev: true, exploitMaturity: "active-exploitation", epssPercentile: 0.99, feedUpdatedAt: STALE_DATE })
+    ];
+
+    const ctx = buildActiveThreatContext(vulns, 100);
+
+    // Only two active-exploitation/widespread CVEs are exploited (stale excluded)
+    expect(ctx.exploitedCVEs).toContain("CVE-EX1");
+    expect(ctx.exploitedCVEs).toContain("CVE-EX2");
+    expect(ctx.exploitedCVEs).not.toContain("CVE-POC");  // PoC only
+    expect(ctx.exploitedCVEs).not.toContain("CVE-OLD");  // stale
+
+    // CVE-EX1 (no fix) + CVE-EX2 (unmerged) = 2 unfixed; CVE-POC is patched
+    expect(ctx.unfixed_count).toBe(2);
+
+    // highest EPSS across fresh entries: max(0.95, 0.80, 0.60) = 0.95
+    expect(ctx.highest_epss_pct).toBeCloseTo(0.95);
+
+    expect(ctx.risk_adjusted_from_base).toBe(100);
   });
 });

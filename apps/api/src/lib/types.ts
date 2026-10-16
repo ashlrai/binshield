@@ -65,6 +65,10 @@ export interface WatchlistSummary {
   destination: string;
   createdAt: string;
   packageCount: number;
+  /** Regex pattern matching this org's internal/private package names (e.g. `@myorg/.*`). */
+  internalPackagePattern?: string;
+  /** Trusted npm scopes or registry hostnames from which internal packages are allowed (e.g. `["@myorg", "npm.myorg.internal"]`). */
+  trustedDomains?: string[];
 }
 
 export interface WatchlistPackageSummary {
@@ -133,6 +137,31 @@ export interface AdvisorySyncResult {
   sources: Record<string, number>;
 }
 
+export interface EpssScore {
+  cveId: string;
+  packageName: string;
+  ecosystem: string;
+  version: string;
+  epssScore: number;
+  epssPercentile: number;
+  modelVersion: string;
+  scoreDate: string;
+  updatedAt: string;
+  /** Badge shown when epssPercentile > 0.9 */
+  exploitedInTheWild?: boolean;
+}
+
+export interface RiskCorrelation {
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  cves: string[];
+  cvssScores: Array<{ cveId: string; cvssScore: number; severity?: string }>;
+  epssScores: EpssScore[];
+  /** Weighted composite risk 0–100: CVSS severity × EPSS exploit probability */
+  compositeExploitRisk: number;
+}
+
 export interface NotificationChannelSummary {
   id: string;
   orgId: string;
@@ -159,4 +188,19 @@ export interface AlertSummary {
   status: string;
   createdAt: string;
   deliveredAt?: string;
+}
+
+export interface SuppressionSummary {
+  id: string;
+  orgId: string;
+  ecosystem: string;
+  packageName: string;
+  /** Null = all versions */
+  version?: string;
+  /** Null = any category */
+  findingCategory?: string;
+  /** Null = any title */
+  findingTitle?: string;
+  reason: string;
+  createdAt: string;
 }

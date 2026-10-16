@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           fail-on: high
           github-token: \${{ secrets.GITHUB_TOKEN }}`}</code>
@@ -67,7 +67,7 @@ jobs:
               Store your BinShield API key as a repository secret named <code>BINSHIELD_API_KEY</code>:
             </p>
             <pre style={codeStyle}>
-              <code>{`      - uses: ashlrai/binshield-action@v1
+              <code>{`      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           api-key: \${{ secrets.BINSHIELD_API_KEY }}
           fail-on: high
@@ -220,7 +220,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           api-key: \${{ secrets.BINSHIELD_API_KEY }}
           fail-on: high
@@ -231,41 +231,12 @@ jobs:
           </div>
 
           <div style={{ display: "grid", gap: "16px" }}>
-            <h3 style={{ margin: 0 }}>GitLab CI</h3>
-            <pre style={codeStyle}>
-              <code>{`binshield:
-  stage: test
-  image: node:20
-  script:
-    - npx @binshield/cli scan --fail-on high --format json > binshield-report.json
-  artifacts:
-    reports:
-      security: binshield-report.json
-  rules:
-    - if: $CI_MERGE_REQUEST_ID`}</code>
-            </pre>
-          </div>
-
-          <div style={{ display: "grid", gap: "16px" }}>
-            <h3 style={{ margin: 0 }}>CircleCI</h3>
-            <pre style={codeStyle}>
-              <code>{`version: 2.1
-
-jobs:
-  binshield:
-    docker:
-      - image: cimg/node:20.0
-    steps:
-      - checkout
-      - run:
-          name: BinShield scan
-          command: npx @binshield/cli scan --fail-on high
-
-workflows:
-  security:
-    jobs:
-      - binshield`}</code>
-            </pre>
+            <h3 style={{ margin: 0 }}>GitLab CI, CircleCI and other CI systems (coming soon)</h3>
+            <p style={{ margin: 0, color: "var(--muted)" }}>
+              Non-GitHub CI needs the <code>@binshield/cli</code> npm package, which is not published
+              yet. Until it is, use the GitHub Action above, the web scanner at binshield.dev/scan,
+              or the API.
+            </p>
           </div>
         </div>
 

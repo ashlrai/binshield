@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@binshield/analysis-types": "workspace:*",
+    "@binshield/analytics-collector": "workspace:*",
     "@binshield/config": "workspace:*",
     "@supabase/ssr": "^0.6.1",
     "@supabase/supabase-js": "^2.49.4",
