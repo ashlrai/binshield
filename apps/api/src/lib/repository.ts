@@ -3,6 +3,11 @@ import crypto from "node:crypto";
 import { getSampleAnalysis, sampleAnalyses, sampleDiff } from "@binshield/analysis-types";
 
 import { hashApiKey } from "./auth";
+import {
+  buildActiveThreatContext,
+  scoreWithActiveVulnerabilities
+} from "@binshield/risk-engine";
+import type { ActiveThreatContext, ActiveVulnerability } from "@binshield/risk-engine";
 import type {
   Advisory,
   AlertSummary,
@@ -23,9 +28,11 @@ import type {
   ScanRequest,
   SearchResult,
   SubscriptionSummary,
+  SuppressionSummary,
   WatchlistPackageSummary,
   WatchlistSummary
 } from "./types";
+import type { BinaryFingerprint } from "@binshield/analysis-types";
 import type { ApiEnv } from "./env";
 
 interface OrganizationRow {
@@ -116,6 +123,8 @@ interface WatchlistRow {
   name: string;
   channel: "email" | "slack" | "webhook";
   destination: string;
+  internal_package_pattern?: string | null;
+  trusted_domains?: string[] | null;
   created_at: string;
 }
 
@@ -191,6 +200,18 @@ interface AlertRow {
   delivered_at: string | null;
 }
 
+interface SuppressionRow {
+  id: string;
+  org_id: string;
+  ecosystem: string;
+  package_name: string;
+  version: string | null;
+  finding_category: string | null;
+  finding_title: string | null;
+  reason: string;
+  created_at: string;
+}
+
 function toNotificationChannelSummary(row: NotificationChannelRow): NotificationChannelSummary {
   return {
     id: row.id,
@@ -221,6 +242,116 @@ function toAlertSummary(row: AlertRow): AlertSummary {
   };
 }
 
+function toSuppressionSummary(row: SuppressionRow): SuppressionSummary {
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    ecosystem: row.ecosystem,
+    packageName: row.package_name,
+    version: row.version ?? undefined,
+    findingCategory: row.finding_category ?? undefined,
+    findingTitle: row.finding_title ?? undefined,
+    reason: row.reason,
+    createdAt: row.created_at
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Binary fingerprint types for cross-package similarity clustering
+// ---------------------------------------------------------------------------
+
+/**
+ * Stored record for a single native binary fingerprint, linking a
+ * (ecosystem, packageName, version, binaryPath) coordinate to all
+ * computed similarity signals.
+ */
+export interface StoredBinaryFingerprint {
+  id: string;
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  binaryPath: string;
+  sha256: string;
+  importSig: string;
+  syscallSig: string;
+  ssdeepFuzzyHash: string;
+  computedAt: string;
+  createdAt: string;
+}
+
+/**
+ * Input shape for `storeBinaryFingerprint()`.
+ * Mirrors WheelBinaryFingerprintData from the worker but lives in the API
+ * layer to avoid a cross-package dependency cycle.
+ */
+export interface BinaryFingerprintInput {
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  binaryPath: string;
+  fingerprint: BinaryFingerprint;
+  computedAt: string;
+}
+
+/**
+ * A similar-binary match returned by `queryByFingerprints()`.
+ * Each entry represents a different (packageName, version) that shares one
+ * or more fingerprint signals with the queried binary.
+ */
+export interface SimilarBinaryMatch {
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  binaryPath: string;
+  sha256: string;
+  /** Number of fingerprint dimensions that matched (importSig, syscallSig, ssdeepFuzzyHash). */
+  matchScore: number;
+  /** Which signals matched ("importSig" | "syscallSig" | "ssdeepFuzzyHash"). */
+  matchedSignals: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Failed scan queue types
+// ---------------------------------------------------------------------------
+
+export type FailedScanStatus = "pending" | "retrying" | "abandoned" | "resolved";
+
+export interface FailedScanEntry {
+  id: string;
+  scanId: string;
+  jobId: string;
+  orgId: string | null;
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  errorReason: string;
+  failureCount: number;
+  lastAttemptAt: string;
+  nextRetryAt: string;
+  status: FailedScanStatus;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface ScanAuditLogEntry {
+  id: string;
+  scanId: string;
+  orgId: string | null;
+  eventType:
+    | "scan_queued"
+    | "scan_timeout"
+    | "scan_failed"
+    | "retry_scheduled"
+    | "retry_attempted"
+    | "retry_succeeded"
+    | "scan_abandoned"
+    | "alert_sent";
+  retryAttempt: number;
+  details: Record<string, unknown>;
+  createdAt: string;
+}
+
 interface BaseRepository {
   searchPackages(query?: string): Promise<ApiListResponse<SearchResult>>;
   listPackageVersions(ecosystem: Ecosystem, name: string): Promise<PackageAnalysis[]>;
@@ -228,10 +359,19 @@ interface BaseRepository {
   getPackageDiff(ecosystem: Ecosystem, name: string, from: string, to: string): Promise<PackageDiff | null>;
   submitScan(request: ScanRequest, principal: AuthPrincipal): Promise<ScanJob>;
   getScanJob(id: string, orgId?: string): Promise<ScanJob | null>;
+
+  // FailedScanQueue methods
+  upsertFailedScan(entry: Omit<FailedScanEntry, "id" | "createdAt" | "expiresAt">): Promise<FailedScanEntry>;
+  getFailedScan(scanId: string): Promise<FailedScanEntry | null>;
+  listPendingRetries(limit?: number): Promise<FailedScanEntry[]>;
+  markFailedScanAbandoned(scanId: string): Promise<void>;
+  resolveFailedScan(scanId: string): Promise<void>;
+  appendScanAuditLog(entry: Omit<ScanAuditLogEntry, "id" | "createdAt">): Promise<void>;
+  listScanAuditLog(scanId: string): Promise<ScanAuditLogEntry[]>;
   listRepos(orgId: string): Promise<RepoRecord[]>;
   createRepo(orgId: string, githubRepo: string): Promise<RepoRecord>;
   listWatchlists(orgId: string): Promise<WatchlistSummary[]>;
-  createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string }): Promise<WatchlistSummary>;
+  createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string; internalPackagePattern?: string; trustedDomains?: string[] }): Promise<WatchlistSummary>;
   addWatchlistPackage(
     orgId: string,
     watchlistId: string,
@@ -274,6 +414,63 @@ interface BaseRepository {
   createInvitation(orgId: string, email: string, role: string, invitedBy?: string): Promise<{ id: string; token: string; email: string; expiresAt: string }>;
   listInvitations(orgId: string): Promise<Array<{ id: string; email: string; role: string; createdAt: string; expiresAt: string; accepted: boolean }>>;
   acceptInvitation(token: string, userId: string): Promise<{ orgId: string; role: string } | null>;
+
+  // Finding suppressions
+  listSuppressions(orgId: string): Promise<SuppressionSummary[]>;
+  createSuppression(
+    orgId: string,
+    input: {
+      ecosystem: string;
+      packageName: string;
+      version?: string;
+      findingCategory?: string;
+      findingTitle?: string;
+      reason: string;
+    }
+  ): Promise<SuppressionSummary>;
+  deleteSuppression(orgId: string, suppressionId: string): Promise<boolean>;
+
+  /**
+   * Return the base package analysis enriched with a live `activeThreatContext`
+   * built from the latest CVE/EPSS/KEV feed entries for the given package.
+   *
+   * The returned object extends `PackageAnalysis` with an additional
+   * `activeThreatContext` field.  When no active vulnerabilities are found the
+   * context contains zero values (no stale-feed penalty, no exploited CVEs).
+   *
+   * @param packageId  Internal package row ID.
+   * @param versionId  Analysis row ID for the specific version.
+   * @param activeVulnerabilities  Optional pre-fetched feed entries; when
+   *   omitted the implementation may fetch from its own store.
+   */
+  getRiskWithActiveVulns(
+    packageId: string,
+    versionId: string,
+    activeVulnerabilities?: ActiveVulnerability[]
+  ): Promise<(PackageAnalysis & { activeThreatContext: ActiveThreatContext }) | null>;
+
+  // Binary fingerprint similarity clustering
+  /**
+   * Persist a computed binary fingerprint for cross-package similarity lookup.
+   * Idempotent: re-inserting a fingerprint for the same (ecosystem, packageName,
+   * version, binaryPath) replaces the previous record.
+   */
+  storeBinaryFingerprint(fingerprintData: BinaryFingerprintInput): Promise<StoredBinaryFingerprint>;
+  /**
+   * Query the fingerprint store for binaries across the entire scanned corpus
+   * that share one or more similarity signals with the provided hash signatures.
+   *
+   * @param ecosystem  Ecosystem to search within (e.g. "pypi").
+   * @param hashSigs   Object containing one or more of: importSig, syscallSig,
+   *                   ssdeepFuzzyHash.  A binary is a match if it shares at
+   *                   least one non-empty signal value.
+   * @param limit      Maximum cluster size to return (default 50).
+   */
+  queryByFingerprints(
+    ecosystem: string,
+    hashSigs: { importSig?: string; syscallSig?: string; ssdeepFuzzyHash?: string },
+    limit?: number
+  ): Promise<SimilarBinaryMatch[]>;
 }
 
 function now() {
@@ -349,6 +546,7 @@ class LocalRepository implements BaseRepository {
   private notificationChannels = new Map<string, NotificationChannelRow>();
   private alerts = new Map<string, AlertRow>();
   private registeredDependencies = new Map<string, Array<{ ecosystem: string; packageName: string; version: string }>>();
+  private suppressions = new Map<string, SuppressionRow>();
 
   constructor(private readonly env: ApiEnv) {
     const seededOrgId = "org_demo";
@@ -740,17 +938,21 @@ class LocalRepository implements BaseRepository {
         channel: watchlist.channel,
         destination: watchlist.destination,
         createdAt: watchlist.created_at,
-        packageCount: this.watchlistPackages.get(watchlist.id)?.length ?? 0
+        packageCount: this.watchlistPackages.get(watchlist.id)?.length ?? 0,
+        internalPackagePattern: watchlist.internal_package_pattern ?? undefined,
+        trustedDomains: watchlist.trusted_domains ?? undefined
       }));
   }
 
-  async createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string }) {
+  async createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string; internalPackagePattern?: string; trustedDomains?: string[] }) {
     const row: WatchlistRow = {
       id: randomId("watchlist"),
       org_id: orgId,
       name: input.name,
       channel: input.channel,
       destination: input.destination,
+      internal_package_pattern: input.internalPackagePattern ?? null,
+      trusted_domains: input.trustedDomains ?? null,
       created_at: now()
     };
     this.watchlists.set(row.id, row);
@@ -763,7 +965,9 @@ class LocalRepository implements BaseRepository {
       channel: row.channel,
       destination: row.destination,
       createdAt: row.created_at,
-      packageCount: 0
+      packageCount: 0,
+      internalPackagePattern: row.internal_package_pattern ?? undefined,
+      trustedDomains: row.trusted_domains ?? undefined
     };
   }
 
@@ -1165,6 +1369,215 @@ class LocalRepository implements BaseRepository {
     inv.accepted_at = now();
     return { orgId: inv.org_id, role: inv.role };
   }
+
+  async listSuppressions(orgId: string): Promise<SuppressionSummary[]> {
+    return Array.from(this.suppressions.values())
+      .filter((row) => row.org_id === orgId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .map(toSuppressionSummary);
+  }
+
+  async createSuppression(
+    orgId: string,
+    input: {
+      ecosystem: string;
+      packageName: string;
+      version?: string;
+      findingCategory?: string;
+      findingTitle?: string;
+      reason: string;
+    }
+  ): Promise<SuppressionSummary> {
+    const row: SuppressionRow = {
+      id: randomId("sup"),
+      org_id: orgId,
+      ecosystem: input.ecosystem,
+      package_name: input.packageName,
+      version: input.version ?? null,
+      finding_category: input.findingCategory ?? null,
+      finding_title: input.findingTitle ?? null,
+      reason: input.reason,
+      created_at: now()
+    };
+    this.suppressions.set(row.id, row);
+    return toSuppressionSummary(row);
+  }
+
+  async deleteSuppression(orgId: string, suppressionId: string): Promise<boolean> {
+    const row = this.suppressions.get(suppressionId);
+    if (!row || row.org_id !== orgId) return false;
+    this.suppressions.delete(suppressionId);
+    return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // getRiskWithActiveVulns — in-memory implementation
+  // ---------------------------------------------------------------------------
+
+  async getRiskWithActiveVulns(
+    packageId: string,
+    versionId: string,
+    activeVulnerabilities: ActiveVulnerability[] = []
+  ): Promise<(PackageAnalysis & { activeThreatContext: ActiveThreatContext }) | null> {
+    // Resolve package row by ID
+    const packageRow = Array.from(this.packages.values()).find((p) => p.id === packageId);
+    if (!packageRow) return null;
+
+    // Resolve analysis row by ID (versionId is the analysis row id)
+    const analysisRow = Array.from(this.analyses.values()).find(
+      (a) => a.id === versionId && a.package_id === packageId
+    );
+    if (!analysisRow) return null;
+
+    const analysis = this.toPackageAnalysis(packageRow, analysisRow);
+    const { riskScore, riskLevel, activeThreatContext } = scoreWithActiveVulnerabilities(
+      analysis.binaries as import("@binshield/analysis-types").BinaryAnalysis[],
+      analysis.manifestAnalysis,
+      activeVulnerabilities
+    );
+
+    return {
+      ...analysis,
+      riskScore,
+      riskLevel,
+      activeThreatContext
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Binary fingerprint similarity clustering — in-memory implementation
+  // ---------------------------------------------------------------------------
+
+  private binaryFingerprints: StoredBinaryFingerprint[] = [];
+
+  async storeBinaryFingerprint(fingerprintData: BinaryFingerprintInput): Promise<StoredBinaryFingerprint> {
+    const key = `${fingerprintData.ecosystem}:${fingerprintData.packageName}@${fingerprintData.version}:${fingerprintData.binaryPath}`;
+    // Remove existing entry for this coordinate (upsert behaviour)
+    this.binaryFingerprints = this.binaryFingerprints.filter(
+      (fp) =>
+        !(fp.ecosystem === fingerprintData.ecosystem &&
+          fp.packageName === fingerprintData.packageName &&
+          fp.version === fingerprintData.version &&
+          fp.binaryPath === fingerprintData.binaryPath)
+    );
+    const row: StoredBinaryFingerprint = {
+      id: randomId("bfp"),
+      ecosystem: fingerprintData.ecosystem,
+      packageName: fingerprintData.packageName,
+      version: fingerprintData.version,
+      binaryPath: fingerprintData.binaryPath,
+      sha256: fingerprintData.fingerprint.sha256,
+      importSig: fingerprintData.fingerprint.importSig ?? "",
+      syscallSig: fingerprintData.fingerprint.syscallSig ?? "",
+      ssdeepFuzzyHash: fingerprintData.fingerprint.ssdeepFuzzyHash ?? "",
+      computedAt: fingerprintData.computedAt,
+      createdAt: now()
+    };
+    // Suppress unused-variable warning for key (used as documentation only)
+    void key;
+    this.binaryFingerprints.push(row);
+    return row;
+  }
+
+  async queryByFingerprints(
+    ecosystem: string,
+    hashSigs: { importSig?: string; syscallSig?: string; ssdeepFuzzyHash?: string },
+    limit = 50
+  ): Promise<SimilarBinaryMatch[]> {
+    const { importSig, syscallSig, ssdeepFuzzyHash } = hashSigs;
+
+    const matches: SimilarBinaryMatch[] = [];
+
+    for (const fp of this.binaryFingerprints) {
+      if (fp.ecosystem !== ecosystem) continue;
+
+      const matchedSignals: string[] = [];
+      if (importSig && importSig.length > 0 && fp.importSig === importSig) {
+        matchedSignals.push("importSig");
+      }
+      if (syscallSig && syscallSig.length > 0 && fp.syscallSig === syscallSig) {
+        matchedSignals.push("syscallSig");
+      }
+      if (ssdeepFuzzyHash && ssdeepFuzzyHash.length > 0 && fp.ssdeepFuzzyHash === ssdeepFuzzyHash) {
+        matchedSignals.push("ssdeepFuzzyHash");
+      }
+
+      if (matchedSignals.length > 0) {
+        matches.push({
+          ecosystem: fp.ecosystem,
+          packageName: fp.packageName,
+          version: fp.version,
+          binaryPath: fp.binaryPath,
+          sha256: fp.sha256,
+          matchScore: matchedSignals.length,
+          matchedSignals
+        });
+      }
+    }
+
+    // Sort by descending matchScore so highest-confidence matches come first,
+    // then deduplicate by (packageName, version, binaryPath) and enforce limit.
+    matches.sort((a, b) => b.matchScore - a.matchScore);
+    const seen = new Set<string>();
+    const deduped: SimilarBinaryMatch[] = [];
+    for (const m of matches) {
+      const dedupeKey = `${m.packageName}@${m.version}:${m.binaryPath}`;
+      if (!seen.has(dedupeKey)) {
+        seen.add(dedupeKey);
+        deduped.push(m);
+        if (deduped.length >= limit) break;
+      }
+    }
+    return deduped;
+  }
+
+  // ---------------------------------------------------------------------------
+  // FailedScanQueue — in-memory implementation
+  // ---------------------------------------------------------------------------
+
+  private failedScans = new Map<string, FailedScanEntry>();
+  private auditLog: ScanAuditLogEntry[] = [];
+
+  async upsertFailedScan(entry: Omit<FailedScanEntry, "id" | "createdAt" | "expiresAt">): Promise<FailedScanEntry> {
+    const existing = this.failedScans.get(entry.scanId);
+    const row: FailedScanEntry = {
+      id: existing?.id ?? randomId("fsq"),
+      ...entry,
+      createdAt: existing?.createdAt ?? now(),
+      expiresAt: existing?.expiresAt ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+    };
+    this.failedScans.set(entry.scanId, row);
+    return row;
+  }
+
+  async getFailedScan(scanId: string): Promise<FailedScanEntry | null> {
+    return this.failedScans.get(scanId) ?? null;
+  }
+
+  async listPendingRetries(limit = 50): Promise<FailedScanEntry[]> {
+    const due = Date.now();
+    return Array.from(this.failedScans.values())
+      .filter((e) => (e.status === "pending" || e.status === "retrying") && new Date(e.nextRetryAt).getTime() <= due)
+      .slice(0, limit);
+  }
+
+  async markFailedScanAbandoned(scanId: string): Promise<void> {
+    const row = this.failedScans.get(scanId);
+    if (row) this.failedScans.set(scanId, { ...row, status: "abandoned" });
+  }
+
+  async resolveFailedScan(scanId: string): Promise<void> {
+    const row = this.failedScans.get(scanId);
+    if (row) this.failedScans.set(scanId, { ...row, status: "resolved" });
+  }
+
+  async appendScanAuditLog(entry: Omit<ScanAuditLogEntry, "id" | "createdAt">): Promise<void> {
+    this.auditLog.push({ id: randomId("sal"), ...entry, createdAt: now() });
+  }
+
+  async listScanAuditLog(scanId: string): Promise<ScanAuditLogEntry[]> {
+    return this.auditLog.filter((e) => e.scanId === scanId);
+  }
 }
 
 interface AdvisoryRow {
@@ -1466,16 +1879,20 @@ class SupabaseRepository implements BaseRepository {
       channel: watchlist.channel,
       destination: watchlist.destination,
       createdAt: watchlist.created_at,
-      packageCount: 0
+      packageCount: 0,
+      internalPackagePattern: watchlist.internal_package_pattern ?? undefined,
+      trustedDomains: watchlist.trusted_domains ?? undefined
     }));
   }
 
-  async createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string }) {
+  async createWatchlist(orgId: string, input: { name: string; channel: WatchlistSummary["channel"]; destination: string; internalPackagePattern?: string; trustedDomains?: string[] }) {
     const [row] = await this.insert<WatchlistRow>("watchlists", {
       org_id: orgId,
       name: input.name,
       channel: input.channel,
-      destination: input.destination
+      destination: input.destination,
+      internal_package_pattern: input.internalPackagePattern ?? null,
+      trusted_domains: input.trustedDomains ?? null
     });
     return {
       id: row.id,
@@ -1484,7 +1901,9 @@ class SupabaseRepository implements BaseRepository {
       channel: row.channel,
       destination: row.destination,
       createdAt: row.created_at,
-      packageCount: 0
+      packageCount: 0,
+      internalPackagePattern: row.internal_package_pattern ?? undefined,
+      trustedDomains: row.trusted_domains ?? undefined
     };
   }
 
@@ -1957,6 +2376,313 @@ class SupabaseRepository implements BaseRepository {
     );
 
     return { orgId: inv.org_id, role: inv.role };
+  }
+
+  async listSuppressions(orgId: string): Promise<SuppressionSummary[]> {
+    const rows = await this.select<SuppressionRow>(
+      "finding_suppressions",
+      `select=*&org_id=eq.${orgId}&order=created_at.desc`
+    );
+    return rows.map(toSuppressionSummary);
+  }
+
+  async createSuppression(
+    orgId: string,
+    input: {
+      ecosystem: string;
+      packageName: string;
+      version?: string;
+      findingCategory?: string;
+      findingTitle?: string;
+      reason: string;
+    }
+  ): Promise<SuppressionSummary> {
+    const [row] = await this.insert<SuppressionRow>("finding_suppressions", {
+      org_id: orgId,
+      ecosystem: input.ecosystem,
+      package_name: input.packageName,
+      version: input.version ?? null,
+      finding_category: input.findingCategory ?? null,
+      finding_title: input.findingTitle ?? null,
+      reason: input.reason
+    });
+    return toSuppressionSummary(row);
+  }
+
+  async deleteSuppression(orgId: string, suppressionId: string): Promise<boolean> {
+    try {
+      await this.request<unknown>(
+        `/finding_suppressions?id=eq.${suppressionId}&org_id=eq.${orgId}`,
+        { method: "DELETE" }
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // getRiskWithActiveVulns — Supabase implementation
+  // ---------------------------------------------------------------------------
+
+  async getRiskWithActiveVulns(
+    packageId: string,
+    versionId: string,
+    activeVulnerabilities: ActiveVulnerability[] = []
+  ): Promise<(PackageAnalysis & { activeThreatContext: ActiveThreatContext }) | null> {
+    const packageRows = await this.select<PackageRow>("packages", `select=*&id=eq.${packageId}`);
+    const packageRow = packageRows[0];
+    if (!packageRow) return null;
+
+    const analysisRows = await this.select<AnalysisRow>(
+      "analyses",
+      `select=*&id=eq.${versionId}&package_id=eq.${packageId}`
+    );
+    const analysisRow = analysisRows[0];
+    if (!analysisRow) return null;
+
+    const binaryRows = await this.select<BinaryRow>("binaries", `select=*&analysis_id=eq.${analysisRow.id}`);
+    const analysis = this.mapAnalysis(packageRow, analysisRow, binaryRows);
+
+    const { riskScore, riskLevel, activeThreatContext } = scoreWithActiveVulnerabilities(
+      analysis.binaries as import("@binshield/analysis-types").BinaryAnalysis[],
+      analysis.manifestAnalysis,
+      activeVulnerabilities
+    );
+
+    return {
+      ...analysis,
+      riskScore,
+      riskLevel,
+      activeThreatContext
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Binary fingerprint similarity clustering — Supabase implementation
+  // ---------------------------------------------------------------------------
+
+  async storeBinaryFingerprint(fingerprintData: BinaryFingerprintInput): Promise<StoredBinaryFingerprint> {
+    const rows = await this.request<Array<{
+      id: string; ecosystem: string; package_name: string; version: string;
+      binary_path: string; sha256: string; import_sig: string;
+      syscall_sig: string; ssdeep_fuzzy_hash: string;
+      computed_at: string; created_at: string;
+    }>>(`/binary_fingerprints?on_conflict=ecosystem,package_name,version,binary_path&select=*`, {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify({
+        ecosystem: fingerprintData.ecosystem,
+        package_name: fingerprintData.packageName,
+        version: fingerprintData.version,
+        binary_path: fingerprintData.binaryPath,
+        sha256: fingerprintData.fingerprint.sha256,
+        import_sig: fingerprintData.fingerprint.importSig ?? "",
+        syscall_sig: fingerprintData.fingerprint.syscallSig ?? "",
+        ssdeep_fuzzy_hash: fingerprintData.fingerprint.ssdeepFuzzyHash ?? "",
+        computed_at: fingerprintData.computedAt
+      })
+    });
+    const row = rows[0]!;
+    return {
+      id: row.id,
+      ecosystem: row.ecosystem,
+      packageName: row.package_name,
+      version: row.version,
+      binaryPath: row.binary_path,
+      sha256: row.sha256,
+      importSig: row.import_sig,
+      syscallSig: row.syscall_sig,
+      ssdeepFuzzyHash: row.ssdeep_fuzzy_hash,
+      computedAt: row.computed_at,
+      createdAt: row.created_at
+    };
+  }
+
+  async queryByFingerprints(
+    ecosystem: string,
+    hashSigs: { importSig?: string; syscallSig?: string; ssdeepFuzzyHash?: string },
+    limit = 50
+  ): Promise<SimilarBinaryMatch[]> {
+    const { importSig, syscallSig, ssdeepFuzzyHash } = hashSigs;
+
+    // Build an OR filter across the three signal columns
+    const orClauses: string[] = [];
+    if (importSig && importSig.length > 0) {
+      orClauses.push(`import_sig.eq.${encodeURIComponent(importSig)}`);
+    }
+    if (syscallSig && syscallSig.length > 0) {
+      orClauses.push(`syscall_sig.eq.${encodeURIComponent(syscallSig)}`);
+    }
+    if (ssdeepFuzzyHash && ssdeepFuzzyHash.length > 0) {
+      orClauses.push(`ssdeep_fuzzy_hash.eq.${encodeURIComponent(ssdeepFuzzyHash)}`);
+    }
+    if (orClauses.length === 0) return [];
+
+    const rows = await this.select<{
+      id: string; ecosystem: string; package_name: string; version: string;
+      binary_path: string; sha256: string; import_sig: string;
+      syscall_sig: string; ssdeep_fuzzy_hash: string;
+      computed_at: string; created_at: string;
+    }>(
+      "binary_fingerprints",
+      `select=*&ecosystem=eq.${encodeURIComponent(ecosystem)}&or=(${orClauses.join(",")})&order=created_at.desc&limit=${limit * 2}`
+    );
+
+    const matches: SimilarBinaryMatch[] = [];
+    const seen = new Set<string>();
+
+    for (const fp of rows) {
+      const matchedSignals: string[] = [];
+      if (importSig && importSig.length > 0 && fp.import_sig === importSig) matchedSignals.push("importSig");
+      if (syscallSig && syscallSig.length > 0 && fp.syscall_sig === syscallSig) matchedSignals.push("syscallSig");
+      if (ssdeepFuzzyHash && ssdeepFuzzyHash.length > 0 && fp.ssdeep_fuzzy_hash === ssdeepFuzzyHash) matchedSignals.push("ssdeepFuzzyHash");
+      if (matchedSignals.length === 0) continue;
+
+      const dedupeKey = `${fp.package_name}@${fp.version}:${fp.binary_path}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      matches.push({
+        ecosystem: fp.ecosystem,
+        packageName: fp.package_name,
+        version: fp.version,
+        binaryPath: fp.binary_path,
+        sha256: fp.sha256,
+        matchScore: matchedSignals.length,
+        matchedSignals
+      });
+      if (matches.length >= limit) break;
+    }
+
+    matches.sort((a, b) => b.matchScore - a.matchScore);
+    return matches;
+  }
+
+  // ---------------------------------------------------------------------------
+  // FailedScanQueue — Supabase implementation
+  // ---------------------------------------------------------------------------
+
+  async upsertFailedScan(entry: Omit<FailedScanEntry, "id" | "createdAt" | "expiresAt">): Promise<FailedScanEntry> {
+    const rows = await this.request<Array<{
+      id: string; scan_id: string; job_id: string; org_id: string | null;
+      ecosystem: string; package_name: string; version: string;
+      error_reason: string; failure_count: number;
+      last_attempt_at: string; next_retry_at: string;
+      status: string; metadata: Record<string, unknown>;
+      created_at: string; expires_at: string;
+    }>>(`/failed_scan_queue?on_conflict=scan_id&select=*`, {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify({
+        scan_id: entry.scanId,
+        job_id: entry.jobId,
+        org_id: entry.orgId ?? null,
+        ecosystem: entry.ecosystem,
+        package_name: entry.packageName,
+        version: entry.version,
+        error_reason: entry.errorReason,
+        failure_count: entry.failureCount,
+        last_attempt_at: entry.lastAttemptAt,
+        next_retry_at: entry.nextRetryAt,
+        status: entry.status,
+        metadata: entry.metadata
+      })
+    });
+    const row = rows[0]!;
+    return {
+      id: row.id, scanId: row.scan_id, jobId: row.job_id, orgId: row.org_id,
+      ecosystem: row.ecosystem, packageName: row.package_name, version: row.version,
+      errorReason: row.error_reason, failureCount: row.failure_count,
+      lastAttemptAt: row.last_attempt_at, nextRetryAt: row.next_retry_at,
+      status: row.status as FailedScanStatus, metadata: row.metadata,
+      createdAt: row.created_at, expiresAt: row.expires_at
+    };
+  }
+
+  async getFailedScan(scanId: string): Promise<FailedScanEntry | null> {
+    const rows = await this.select<{
+      id: string; scan_id: string; job_id: string; org_id: string | null;
+      ecosystem: string; package_name: string; version: string;
+      error_reason: string; failure_count: number;
+      last_attempt_at: string; next_retry_at: string;
+      status: string; metadata: Record<string, unknown>;
+      created_at: string; expires_at: string;
+    }>("failed_scan_queue", `select=*&scan_id=eq.${encodeURIComponent(scanId)}`);
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      id: row.id, scanId: row.scan_id, jobId: row.job_id, orgId: row.org_id,
+      ecosystem: row.ecosystem, packageName: row.package_name, version: row.version,
+      errorReason: row.error_reason, failureCount: row.failure_count,
+      lastAttemptAt: row.last_attempt_at, nextRetryAt: row.next_retry_at,
+      status: row.status as FailedScanStatus, metadata: row.metadata,
+      createdAt: row.created_at, expiresAt: row.expires_at
+    };
+  }
+
+  async listPendingRetries(limit = 50): Promise<FailedScanEntry[]> {
+    const nowIso = new Date().toISOString();
+    const rows = await this.select<{
+      id: string; scan_id: string; job_id: string; org_id: string | null;
+      ecosystem: string; package_name: string; version: string;
+      error_reason: string; failure_count: number;
+      last_attempt_at: string; next_retry_at: string;
+      status: string; metadata: Record<string, unknown>;
+      created_at: string; expires_at: string;
+    }>(
+      "failed_scan_queue",
+      `select=*&status=in.(pending,retrying)&next_retry_at=lte.${encodeURIComponent(nowIso)}&order=next_retry_at.asc&limit=${limit}`
+    );
+    return rows.map((row) => ({
+      id: row.id, scanId: row.scan_id, jobId: row.job_id, orgId: row.org_id,
+      ecosystem: row.ecosystem, packageName: row.package_name, version: row.version,
+      errorReason: row.error_reason, failureCount: row.failure_count,
+      lastAttemptAt: row.last_attempt_at, nextRetryAt: row.next_retry_at,
+      status: row.status as FailedScanStatus, metadata: row.metadata,
+      createdAt: row.created_at, expiresAt: row.expires_at
+    }));
+  }
+
+  async markFailedScanAbandoned(scanId: string): Promise<void> {
+    await this.request<unknown>(
+      `/failed_scan_queue?scan_id=eq.${encodeURIComponent(scanId)}`,
+      { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "abandoned" }) }
+    );
+  }
+
+  async resolveFailedScan(scanId: string): Promise<void> {
+    await this.request<unknown>(
+      `/failed_scan_queue?scan_id=eq.${encodeURIComponent(scanId)}`,
+      { method: "PATCH", headers: { Prefer: "return=minimal" }, body: JSON.stringify({ status: "resolved" }) }
+    );
+  }
+
+  async appendScanAuditLog(entry: Omit<ScanAuditLogEntry, "id" | "createdAt">): Promise<void> {
+    await this.request<unknown>("/scan_audit_log", {
+      method: "POST",
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify({
+        scan_id: entry.scanId,
+        org_id: entry.orgId ?? null,
+        event_type: entry.eventType,
+        retry_attempt: entry.retryAttempt,
+        details: entry.details
+      })
+    });
+  }
+
+  async listScanAuditLog(scanId: string): Promise<ScanAuditLogEntry[]> {
+    const rows = await this.select<{
+      id: string; scan_id: string; org_id: string | null;
+      event_type: string; retry_attempt: number;
+      details: Record<string, unknown>; created_at: string;
+    }>("scan_audit_log", `select=*&scan_id=eq.${encodeURIComponent(scanId)}&order=created_at.asc`);
+    return rows.map((row) => ({
+      id: row.id, scanId: row.scan_id, orgId: row.org_id,
+      eventType: row.event_type as ScanAuditLogEntry["eventType"],
+      retryAttempt: row.retry_attempt, details: row.details, createdAt: row.created_at
+    }));
   }
 }
 

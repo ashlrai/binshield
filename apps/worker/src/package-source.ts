@@ -1,10 +1,15 @@
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { isPythonNativeExtension, hasPyPiAbiTag } from "./native-indicators";
+import { analyzePypiBuildSystem } from "./pypi-sdist-analyzer";
+import { detectWheelOnlyPackage, selectBestWheel, analyzeWheelBinaries } from "./pypi-wheel-binary-analyzer";
+
 import type { AcquiredPackage, PackageManifest, PackageAcquisitionService, WorkerScanRequest } from "./types";
+import type { BuildSystemType, PythonBuildThreatDetails } from "@binshield/analysis-types";
 
 const execFileAsync = promisify(execFile);
 
@@ -15,6 +20,82 @@ async function fileExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Walk every file/dir produced by an archive extraction and verify nothing
+ * escaped the intended output directory.  Checks two attack vectors:
+ *
+ *  1. Path traversal — entry whose resolved absolute path is outside extractDir
+ *     (e.g. "../../evil" in a tarball header).
+ *  2. Symlink escape — a symlink whose target resolves to a path outside
+ *     extractDir (absolute symlinks or chained "../.." hops).
+ *
+ * Throws a clear "rejected malicious archive" error on the first violation found.
+ */
+async function validateExtraction(extractDir: string): Promise<void> {
+  // Resolve the canonical base so we can do prefix-check comparisons.
+  const resolvedBase = await realpath(extractDir);
+  const base = resolvedBase.endsWith(path.sep) ? resolvedBase : resolvedBase + path.sep;
+
+  async function walk(dir: string): Promise<void> {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const entryPath = path.join(dir, entry.name);
+
+      // Resolve the real path of the entry itself (not its target if symlink).
+      // We use lstat so we can distinguish symlinks from regular files/dirs.
+      const st = await lstat(entryPath);
+
+      if (st.isSymbolicLink()) {
+        // For symlinks, resolve the full target and verify it stays inside.
+        // realpath() follows all hops, so chained symlinks are covered.
+        let resolved: string;
+        try {
+          resolved = await realpath(entryPath);
+        } catch {
+          // Dangling symlink — target does not exist yet inside extractDir.
+          // A dangling symlink cannot be exploited for reads, but an absolute
+          // dangling symlink that points outside is still suspicious.  Resolve
+          // the raw target relative to the symlink's directory instead.
+          const { readlink } = await import("node:fs/promises");
+          const rawTarget = await readlink(entryPath);
+          const candidate = path.resolve(path.dirname(entryPath), rawTarget);
+          if (!candidate.startsWith(base)) {
+            throw new Error(
+              `Rejected malicious archive: symlink "${entryPath}" points outside the extraction directory (target: "${rawTarget}")`
+            );
+          }
+          continue;
+        }
+        if (!resolved.startsWith(base)) {
+          throw new Error(
+            `Rejected malicious archive: symlink "${entryPath}" resolves to "${resolved}" which is outside the extraction directory`
+          );
+        }
+        // Do NOT recurse into symlink targets — that could loop and is already covered.
+      } else {
+        // Regular file or directory — verify its own real path stays inside.
+        let resolved: string;
+        try {
+          resolved = await realpath(entryPath);
+        } catch {
+          // Entry disappeared between readdir and realpath (race) — skip it.
+          continue;
+        }
+        if (!resolved.startsWith(base)) {
+          throw new Error(
+            `Rejected malicious archive: entry "${entryPath}" resolves to "${resolved}" which is outside the extraction directory`
+          );
+        }
+        if (entry.isDirectory()) {
+          await walk(entryPath);
+        }
+      }
+    }
+  }
+
+  await walk(extractDir);
 }
 
 function normalizeManifest(raw: Record<string, unknown> | undefined): PackageManifest {
@@ -86,7 +167,8 @@ export class RegistryPackageSource implements PackageAcquisitionService {
       }
 
       const tarballPath = path.join(tarballDir, tarballName);
-      await execFileAsync("tar", ["-xzf", tarballPath, "-C", extractDir]);
+      await execFileAsync("tar", ["--no-same-owner", "-xzf", tarballPath, "-C", extractDir]);
+      await validateExtraction(extractDir);
 
       const nestedRoot = await findPackageRoot(extractDir);
       const manifest = await readManifest(nestedRoot);
@@ -190,6 +272,38 @@ export class PyPiPackageSource implements PackageAcquisitionService {
       };
       const sdist = meta.urls?.find((entry) => entry.packagetype === "sdist");
       if (!sdist) {
+        // No sdist available — attempt the wheel-binary analysis path instead.
+        // This handles wheel-only packages (e.g. cryptography, numpy binaries)
+        // that never publish a source distribution.
+        const wheels = (meta.urls ?? []).filter((entry) => entry.packagetype === "bdist_wheel");
+        const best = selectBestWheel(wheels);
+        if (best) {
+          let wheelBinaryAnalysis;
+          try {
+            wheelBinaryAnalysis = await analyzeWheelBinaries(request.packageName, request.version, best);
+          } catch {
+            // wheel-binary analysis failure is non-fatal — fall through to error
+          }
+          if (wheelBinaryAnalysis) {
+            // NOTE: do NOT rm(tempRoot) here — we return it as packageRoot below,
+            // and deleting it would leave downstream consumers with an ENOENT
+            // (use-after-delete). The temp dir must survive until the caller is
+            // done; cleanup is the caller's responsibility.
+            const manifest: PackageManifest = {
+              name: request.packageName,
+              version: request.version,
+              scripts: {},
+              dependencies: {},
+              optionalDependencies: {}
+            };
+            return {
+              sourceKind: "tarball",
+              packageRoot: tempRoot,
+              packageJsonPath: path.join(tempRoot, "package.json"),
+              manifest
+            };
+          }
+        }
         throw new Error(`No source distribution published for ${spec}`);
       }
 
@@ -203,8 +317,9 @@ export class PyPiPackageSource implements PackageAcquisitionService {
       if (sdist.filename.endsWith(".zip")) {
         await execFileAsync("unzip", ["-q", tarballPath, "-d", extractDir]);
       } else {
-        await execFileAsync("tar", ["-xzf", tarballPath, "-C", extractDir]);
+        await execFileAsync("tar", ["--no-same-owner", "-xzf", tarballPath, "-C", extractDir]);
       }
+      await validateExtraction(extractDir);
 
       const nestedRoot = await findPackageRoot(extractDir);
       const manifest: PackageManifest = {
@@ -215,11 +330,25 @@ export class PyPiPackageSource implements PackageAcquisitionService {
         optionalDependencies: {}
       };
 
+      // Perform deep build-system analysis on the extracted sdist.
+      // Failures are non-fatal — we still return the acquired package.
+      let buildSystemType: BuildSystemType | undefined;
+      let pythonBuildThreatDetails: PythonBuildThreatDetails | undefined;
+      try {
+        const buildAnalysis = await analyzePypiBuildSystem(nestedRoot);
+        buildSystemType = buildAnalysis.buildSystemType;
+        pythonBuildThreatDetails = buildAnalysis.threatDetails;
+      } catch {
+        // Deep analysis failure is non-fatal
+      }
+
       return {
         sourceKind: "tarball",
         packageRoot: nestedRoot,
         packageJsonPath: path.join(nestedRoot, "package.json"),
-        manifest
+        manifest,
+        buildSystemType,
+        pythonBuildThreatDetails
       };
     } catch (error) {
       await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
@@ -228,6 +357,120 @@ export class PyPiPackageSource implements PackageAcquisitionService {
       );
     }
   }
+}
+
+/**
+ * Acquires a PyPI package by downloading its binary wheel (.whl) distribution
+ * from the PyPI JSON API. Wheels are zip archives; they may contain compiled
+ * native extensions (.so / .pyd / .dylib) in addition to Python source.
+ *
+ * Selection strategy: prefer wheels that match the current platform; fall back
+ * to the first `bdist_wheel` entry. The extracted tree is passed to the
+ * extractor just like an sdist — FileSystemBinaryExtractor will find any .so /
+ * .pyd files, and the manifest analyzer will mark the package as having Python
+ * binary extensions.
+ *
+ * If no wheel is published for this version (pure-Python or sdist-only),
+ * this source throws and the coordinator falls back to PyPiPackageSource.
+ */
+export class PyPiWheelPackageSource implements PackageAcquisitionService {
+  readonly name = "pypi-wheel";
+
+  async acquire(request: WorkerScanRequest): Promise<AcquiredPackage> {
+    const spec = `${request.packageName}@${request.version}`;
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "binshield-pypi-wheel-"));
+    const extractDir = path.join(tempRoot, "package");
+    await mkdir(extractDir, { recursive: true });
+
+    try {
+      const metaUrl = `https://pypi.org/pypi/${encodeURIComponent(request.packageName)}/${encodeURIComponent(
+        request.version
+      )}/json`;
+      const metaResponse = await fetch(metaUrl);
+      if (!metaResponse.ok) {
+        throw new Error(`PyPI metadata request returned ${metaResponse.status}`);
+      }
+
+      const meta = (await metaResponse.json()) as {
+        urls?: Array<{ packagetype: string; url: string; filename: string }>;
+      };
+
+      // Filter to wheel distributions only.
+      const wheels = (meta.urls ?? []).filter((entry) => entry.packagetype === "bdist_wheel");
+      if (wheels.length === 0) {
+        throw new Error(`No wheel distribution published for ${spec}`);
+      }
+
+      // Prefer a wheel with a CPython ABI tag (compiled, platform-specific)
+      // over a pure-Python wheel (py3-none-any.whl), to maximise coverage of
+      // native extension binaries.
+      const platformWheel =
+        wheels.find((w) => hasPyPiAbiTag(w.filename)) ?? wheels[0];
+
+      const wheelResponse = await fetch(platformWheel.url);
+      if (!wheelResponse.ok) {
+        throw new Error(`PyPI wheel download returned ${wheelResponse.status}`);
+      }
+      const wheelPath = path.join(tempRoot, platformWheel.filename);
+      await writeFile(wheelPath, Buffer.from(await wheelResponse.arrayBuffer()));
+
+      // Wheels are zip archives — extract with unzip.
+      await execFileAsync("unzip", ["-q", wheelPath, "-d", extractDir]);
+      await validateExtraction(extractDir);
+
+      // Unlike sdists, wheels don't have a single top-level package directory;
+      // the contents are laid out flat inside the zip. Use extractDir directly
+      // as the package root so the extractor can walk the whole tree.
+      const manifest: PackageManifest = {
+        name: request.packageName,
+        version: request.version,
+        scripts: {},
+        dependencies: {},
+        optionalDependencies: {}
+      };
+
+      return {
+        sourceKind: "tarball",
+        packageRoot: extractDir,
+        packageJsonPath: path.join(extractDir, "package.json"),
+        manifest
+      };
+    } catch (error) {
+      await rm(tempRoot, { recursive: true, force: true }).catch(() => {});
+      throw new Error(
+        `Failed to acquire wheel for ${spec} from PyPI: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+}
+
+/**
+ * Walk a wheel extraction directory and collect all Python native extension
+ * files (.so / .pyd / .dylib). Used by manifest-analyzer to mark the package
+ * as having binary extensions and emit a pythonBinaryExtension finding.
+ */
+export async function collectWheelNativeExtensions(packageRoot: string): Promise<string[]> {
+  const found: string[] = [];
+
+  async function walk(dir: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isFile() && isPythonNativeExtension(entry.name)) {
+        found.push(path.relative(packageRoot, full));
+      }
+    }
+  }
+
+  await walk(packageRoot);
+  return found;
 }
 
 async function findPackageRoot(extractDir: string): Promise<string> {

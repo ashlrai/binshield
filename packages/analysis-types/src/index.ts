@@ -1,4 +1,62 @@
 export type Ecosystem = "npm" | "pypi";
+
+// ---------------------------------------------------------------------------
+// Supply-chain provenance types
+// ---------------------------------------------------------------------------
+
+/** Category of a supply-chain provenance check finding. */
+export type ProvenanceCheckType =
+  | "registry-mismatch"
+  | "unresolved-dependency"
+  | "yanked-version";
+
+/** A single provenance check result for one dependency. */
+export interface ProvenanceCheck {
+  /** Package name (e.g. "lodash" or "requests"). */
+  packageName: string;
+  /** Version string that appeared in the SBOM/lockfile. */
+  version: string;
+  /** Package ecosystem */
+  ecosystem: "npm" | "pypi";
+  /** Type of finding detected (undefined = no issue). */
+  checkType?: ProvenanceCheckType;
+  /** Severity mapped to the check type. */
+  severity?: "high" | "medium";
+  /** Whether this check passed (no issue found). */
+  passed: boolean;
+  /** Human-readable detail for the finding. */
+  detail: string;
+  /** SBOM-recorded integrity hash (purl/digest) if present. */
+  sbomHash?: string;
+  /** Registry-authoritative tarball hash for comparison. */
+  registryHash?: string;
+  /** Resolved URL recorded in the lockfile (may indicate a private registry). */
+  resolvedUrl?: string;
+  /** ISO timestamp when the registry metadata was fetched. */
+  checkedAt: string;
+}
+
+/** Aggregated result from the SBOM provenance verification endpoint. */
+export interface SbomProvenanceResult {
+  isValid: boolean;
+  checks: ProvenanceCheck[];
+  riskLevel: RiskLevel;
+  recommendations: string[];
+  checkedAt: string;
+}
+
+/** Persisted audit row shape for `sbom_provenance_audit_log`. */
+export interface SbomProvenanceAuditRow {
+  id: string;
+  packageFormat: "npm" | "pypi";
+  isValid: boolean;
+  checkCount: number;
+  failedCheckCount: number;
+  riskLevel: RiskLevel;
+  checks: ProvenanceCheck[];
+  recommendations: string[];
+  createdAt: string;
+}
 export type AnalysisStatus = "queued" | "analyzing" | "complete" | "failed";
 export type RiskLevel = "none" | "low" | "medium" | "high" | "critical";
 export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
@@ -52,7 +110,33 @@ export type ScriptThreatCategory =
   | "reverseShell"
   | "remoteCodeExecution"
   | "obfuscation"
-  | "knownMalware";
+  | "knownMalware"
+  | "pythonBinaryExtension"
+  | "setupToolsHookExecution"
+  | "cythonBinaryExtension"
+  /**
+   * High-confidence finding produced by the PyPI wheel-only binary analyzer.
+   * Unlike `pythonBinaryExtension` (which is inferred from sdist build config),
+   * this category reflects direct inspection of the compiled native extension
+   * extracted from a wheel archive (.so / .pyd / .dylib).
+   */
+  | "wheelNativeBinary"
+  /**
+   * Supply-chain repackaging attack detected via cross-package binary similarity.
+   * Fired when a native binary (.so/.pyd/.dylib) inside a PyPI wheel matches
+   * a binary registered under a different package name — either an exact SHA-256
+   * match (copy/fork) or a fuzzy-hash similarity above the 85% threshold
+   * (likely variant or backdoored fork).
+   */
+  | "pypi_binary_repackaging"
+  /**
+   * Cross-ecosystem name confusion detected: a package on npm and a package on
+   * PyPI share a highly similar or identical name (Jaro-Winkler / Levenshtein
+   * similarity >= 0.85), which attackers exploit by publishing a malicious
+   * package on one ecosystem knowing developers from the other might accidentally
+   * install it (e.g. `pip install left-pad` in a Python CI that also uses npm).
+   */
+  | "crossEcosystemConfusion";
 
 export interface ScriptFinding {
   category: ScriptThreatCategory;
@@ -85,6 +169,169 @@ export interface KnownMalwareMatch {
   url?: string;
 }
 
+export type BuildSystemType = "setuptools" | "poetry" | "pdm" | "flit" | "hatch" | "other";
+
+export interface PythonBuildThreatDetails {
+  /** Custom build commands / install hooks found in build config (e.g. cmdclass entries). */
+  detectedHooks: string[];
+  /** Cython source files (.pyx / .pxd) found in the package tree. */
+  cythonFiles: string[];
+  /** Suspicious patterns detected in build configuration files. */
+  suspiciousPatterns: string[];
+}
+
+// ---------------------------------------------------------------------------
+// PyPI native extension provenance types (pypi-extension-simulator)
+// ---------------------------------------------------------------------------
+
+/**
+ * Severity levels for extension-level findings (mirrors FindingSeverity but
+ * imported here to keep analysis-types self-contained).
+ */
+export type ExtensionFindingSeverity = "info" | "low" | "medium" | "high" | "critical";
+
+/** A single FFI call site found during Cython simulation. */
+export interface FfiCallSite {
+  /** Classification of the FFI mechanism. */
+  mechanism:
+    | "ctypes.WinDLL"
+    | "ctypes.CDLL"
+    | "ctypes.cdll"
+    | "cffi.dlopen"
+    | "cffi.cdef"
+    | "cdef extern"
+    | "cimport"
+    | "other";
+  /** The raw matched snippet (truncated). */
+  snippet: string;
+  /** Approximate line number containing the call. */
+  approximateLine?: number;
+  /** Human-readable description. */
+  description: string;
+  /** Assessed severity for this call site. */
+  severity: ExtensionFindingSeverity;
+}
+
+/** A cross-referenced risk finding produced by the Cython simulator. */
+export interface CythonRiskFinding {
+  title: string;
+  description: string;
+  evidence: string;
+  severity: ExtensionFindingSeverity;
+  /** MITRE ATT&CK technique identifier, if applicable. */
+  mitreAttack?: string;
+  recommendation: string;
+}
+
+/**
+ * Result of deep Cython simulation for a single .pyx / .pxd file.
+ *
+ * Produced by `simulateCythonFile()` in `pypi-extension-simulator.ts`.
+ * Extends basic CythonFileAnalysis with risk classification and
+ * cross-referenced FFI call categorisation.
+ */
+export interface CythonSimulationResult {
+  /** Relative path to the .pyx or .pxd file. */
+  filePath: string;
+  /** Every FFI call site identified (ctypes, cffi, cdef extern). */
+  ffiCallSites: FfiCallSite[];
+  /** Risk findings cross-referenced against the known-dangerous pattern library. */
+  riskFindings: CythonRiskFinding[];
+  /** Highest severity among all riskFindings, or "info" when none found. */
+  overallSeverity: ExtensionFindingSeverity;
+  /** Whether any Windows-specific DLL injection risk was detected. */
+  hasWindowsInjectionRisk: boolean;
+  /** Whether the file accesses credential/secret environment variables. */
+  hasCredentialAccess: boolean;
+  /** Whether the file performs any network socket operations. */
+  hasNetworkAccess: boolean;
+}
+
+/** A custom cmdclass entry in setup.py. */
+export interface CmdclassEntry {
+  /** Hook name (e.g. "install", "build_ext", "develop"). */
+  hookName: string;
+  /** Class name implementing the hook. */
+  className: string;
+  /** Whether the class body contains suspicious code patterns. */
+  isSuspicious: boolean;
+  /** Specific suspicious patterns found in the class body. */
+  suspiciousPatterns: string[];
+}
+
+/** A suspicious compiler/linker flag found in an Extension definition. */
+export interface CompilerFlagFinding {
+  flag: string;
+  riskDescription: string;
+  severity: ExtensionFindingSeverity;
+}
+
+/** A finding from the sandboxed setup.py execution simulation. */
+export interface SandboxFinding {
+  category:
+    | "env-theft"
+    | "network-call"
+    | "file-write-outside-build"
+    | "process-execution"
+    | "eval-exec"
+    | "dynamic-import"
+    | "credential-access";
+  description: string;
+  evidence: string;
+  severity: ExtensionFindingSeverity;
+  recommendation: string;
+}
+
+/**
+ * Result of deep setuptools / distutils hook extraction and analysis.
+ *
+ * Produced by `analyzeSetuptoolsHooks()` in `pypi-extension-simulator.ts`.
+ * Covers ext_modules, custom cmdclass entries, compiler flags, and sandboxed
+ * simulation of install-time code paths.
+ */
+export interface SetuptoolsHookAnalysis {
+  /** True when ext_modules are declared (C/Cython code compiled at install). */
+  hasExtModules: boolean;
+  /** Names of Extension objects found in ext_modules. */
+  extModuleNames: string[];
+  /** Custom cmdclass entries mapped to their class names. */
+  customCmdclassEntries: CmdclassEntry[];
+  /** Suspicious compiler/linker flags found in Extension definitions. */
+  suspiciousCompilerFlags: CompilerFlagFinding[];
+  /** Sensitive packages imported by custom build commands. */
+  buildCommandDependencies: string[];
+  /** Risk findings from the sandboxed simulation of install-time code paths. */
+  sandboxFindings: SandboxFinding[];
+  /** Highest severity among all findings. */
+  overallSeverity: ExtensionFindingSeverity;
+}
+
+/**
+ * Result of wheel provenance matching for a package that ships both sdist and
+ * compiled wheel distributions.
+ *
+ * Produced by `matchWheelProvenance()` in `pypi-extension-simulator.ts`.
+ */
+export interface WheelProvenanceResult {
+  packageName: string;
+  version: string;
+  /** Whether all wheel native binaries can be traced to sdist ext_modules. */
+  extensionModulesMatch: boolean;
+  /** Extension modules declared in the sdist build config. */
+  sdistDeclaredExtensions: string[];
+  /** Native binary filenames found in the wheel. */
+  wheelNativeBinaries: string[];
+  /**
+   * Wheel binaries that cannot be traced to a sdist ext_modules declaration
+   * ("Wheel binary origin unknown").
+   */
+  untracedWheelBinaries: string[];
+  /** True when the wheel ships more native binaries than the sdist declares. */
+  hasProvenanceMismatch: boolean;
+  summary: string;
+  severity: ExtensionFindingSeverity;
+}
+
 export interface ManifestAnalysis {
   id: string;
   ecosystem: Ecosystem;
@@ -103,12 +350,100 @@ export interface ManifestAnalysis {
   aiExplanation?: string;
   sourceMatchConfidence: SourceMatchConfidence;
   analyzedAt: string;
+  /**
+   * True when the package is a PyPI wheel that contains compiled native
+   * extensions (.so / .pyd). Distinct from hasInstallScripts — a wheel may
+   * ship binaries without any setup.py.
+   */
+  hasPythonBinaryExtension?: boolean;
+  /** Filenames of Python native extensions found inside the wheel. */
+  pythonExtensionFiles?: string[];
+  /**
+   * Python build backend detected from pyproject.toml / setup.cfg / setup.py.
+   * Populated only for PyPI packages.
+   */
+  buildSystemType?: BuildSystemType;
+  /**
+   * Detailed PyPI build-system threat inventory: hooks, Cython files, and
+   * suspicious patterns discovered during deep sdist analysis.
+   * Populated only for PyPI packages that have a build config.
+   */
+  pythonBuildThreatDetails?: PythonBuildThreatDetails;
 }
 
 export interface BinaryFingerprint {
   sha256: string;
   packageVersionKey: string;
   binaryKey: string;
+  /**
+   * Hash algorithm used for the cryptographic fingerprint.
+   * Currently always "sha256".
+   */
+  hashAlgorithm?: "sha256";
+  /**
+   * SHA-256 of the sorted, deduplicated import/API symbol names extracted from
+   * the binary (post-decompilation). Used for import-level similarity matching
+   * across packages that share the same malware payload.
+   */
+  importSig?: string;
+  /**
+   * SHA-256 of the sorted, deduplicated syscall sequence extracted from
+   * decompilation output (Rizin/Ghidra pseudocode comments). Used for
+   * syscall-pattern similarity matching.
+   */
+  syscallSig?: string;
+  /**
+   * ssdeep-style fuzzy hash of the binary content, represented as a
+   * 96-byte hex string (simulated via block-level rolling hash since
+   * ssdeep is not a native Node dependency). Enables approximate matching
+   * of variant malware payloads that differ by only a few bytes.
+   */
+  ssdeepFuzzyHash?: string;
+}
+
+/**
+ * Per-analyzer malware detection result, produced by the malware-engines
+ * plugin registry and stored on each `BinaryAnalysis` record.
+ * Absent on legacy records produced before the plugin system was introduced.
+ */
+export interface MalwareDetectionResult {
+  /** Name of the analyzer that produced this result (e.g. "entropy", "import-table", "string-literal"). */
+  analyzerName: string;
+  /** Semver version of the analyzer at scan time, for audit / traceability. */
+  analyzerVersion: string;
+  /** Whether this analyzer detected malware indicators (after confidence threshold applied). */
+  detected: boolean;
+  /**
+   * Human-readable evidence strings collected by this analyzer.
+   * Empty when no indicators were found.
+   */
+  signals: string[];
+  /**
+   * Confidence score [0, 1] for this analyzer's verdict.
+   *   0.0 = no signal / inconclusive.
+   *   1.0 = very high confidence, multiple strong indicators.
+   */
+  confidence: number;
+}
+
+/**
+ * A structured provenance finding emitted by ProvenanceVerifier.
+ * Imported inline here to keep @binshield/analysis-types self-contained —
+ * the canonical definition lives in @binshield/malware-engines.
+ */
+export interface ProvenanceFinding {
+  /** Stable finding type identifier. */
+  type: string;
+  /** Finding severity. */
+  severity: "info" | "low" | "medium" | "high" | "critical";
+  /** Human-readable title. */
+  title: string;
+  /** Detailed description with evidence. */
+  description: string;
+  /** Machine-readable evidence payload. */
+  evidence: Record<string, unknown>;
+  /** Remediation recommendation. */
+  recommendation: string;
 }
 
 export interface BinaryAnalysis {
@@ -128,12 +463,131 @@ export interface BinaryAnalysis {
   fingerprint?: BinaryFingerprint;
   behaviors: BehaviorSummary;
   findings: Finding[];
+  /**
+   * Per-analyzer version strings recorded at scan time for traceability.
+   * Keys are analyzer names (e.g. "yara", "heuristic", "string-sig");
+   * values are semver version strings for the rule-set / analyzer used.
+   * Absent on legacy records produced before the plugin system was introduced.
+   */
+  analyzerVersions?: Record<string, string>;
+  /**
+   * Results from the malware-engines plugin registry, one entry per active
+   * analyzer (entropy, import-table, string-literal, plus any custom plugins).
+   * Absent on legacy records produced before the malware-engines package was
+   * introduced.
+   */
+  malwareDetectionResults?: MalwareDetectionResult[];
+  /**
+   * PyPI wheel supply-chain provenance findings from ProvenanceVerifier.
+   * Present only for PyPI wheel analyses where the provenance verifier ran.
+   * Covers PEP 740 GPG signatures, publisher identity (PEP 503), build
+   * provenance correlation, timestamp freshness, and orphaned-wheel detection.
+   * Absent on non-PyPI analyses and legacy records.
+   */
+  provenance_findings?: ProvenanceFinding[];
 }
 
 export interface PackageCoordinate {
   ecosystem: Ecosystem;
   packageName: string;
   version: string;
+}
+
+// ---------------------------------------------------------------------------
+// Supply-Chain Health types
+// ---------------------------------------------------------------------------
+
+/**
+ * Supply-chain health signals measured for a specific package version.
+ * All numeric fields are optional — unavailable when the underlying registry
+ * data does not expose the required metadata (e.g. no public VCS history).
+ */
+export interface SupplyChainSignals {
+  /** Average commits per 90-day rolling window (proxy via publish frequency). */
+  commit_velocity_90d: number | undefined;
+  /** Average days between consecutive releases; undefined for single-release packages. */
+  release_cadence_days: number | undefined;
+  /** Fraction [0–1] of contributors who left in the last 12 months. */
+  contributor_turnover: number | undefined;
+  /** Percentile rank (0–100) of transitive dependency age — higher = older deps. */
+  dependency_age_percentile: number | undefined;
+  /** Number of circular dependency pairs detected in the direct-dep graph. */
+  circular_dep_count: number;
+  /** Number of declared dependencies never referenced by other deps ("orphaned"). */
+  orphaned_dep_count: number;
+  /** True when the declared SPDX license identifier is deprecated or missing. */
+  license_deprecated: boolean;
+}
+
+/**
+ * A single degraded supply-chain signal finding in the threat taxonomy.
+ * Structurally parallel to `ScriptFinding` so UI components can render both.
+ */
+export interface SupplyChainHealthFinding {
+  /** Which supply-chain signal triggered this finding. */
+  signal: keyof SupplyChainSignals;
+  severity: FindingSeverity;
+  title: string;
+  description: string;
+  /** Observed metric value (stringified for display). */
+  observed: string;
+  /** Healthy threshold breached (stringified for display). */
+  threshold: string;
+  recommendation: string;
+}
+
+/** Aggregated supply-chain health result for one package@version. */
+export interface SupplyChainHealthResult {
+  packageName: string;
+  version: string;
+  ecosystem: "npm" | "pypi";
+  signals: SupplyChainSignals;
+  findings: SupplyChainHealthFinding[];
+  /** Composite risk score 0–100 (deterministic from signal weights). */
+  riskScore: number;
+  riskLevel: RiskLevel;
+  summary: string;
+  analyzedAt: string;
+}
+
+/**
+ * Audit trail for an EPSS-driven risk score boost applied during package scoring.
+ *
+ * Persisted to analyses.findings (as boost_reason) so that every automatic
+ * risk_score elevation can be traced back to the exact CVE + EPSS signal that
+ * caused it.  Present only when at least one CVE has EPSS percentile >= 0.40
+ * or the package appears in the CISA KEV catalogue.
+ */
+export interface EpssBoostContext {
+  /** CVE ID that contributed the highest EPSS boost to the risk score. */
+  primaryCveId: string;
+  /** EPSS percentile for the primary CVE [0, 1]. */
+  epss_percentile: number;
+  /**
+   * Net risk points added by the EPSS percentile boost alone (0 | 5 | 15 | 25).
+   * Corresponds to the output of `epssPercentileBoost(epss_percentile)` in the
+   * risk-engine.
+   */
+  epss_boost_pts: number;
+  /**
+   * True when the primary CVE (or any CVE for this package) appears in the
+   * CISA Known Exploited Vulnerabilities catalogue.
+   */
+  kev_status: boolean;
+  /**
+   * Net risk points added by the CISA KEV boost (0 | 20).
+   * Corresponds to the output of `kevBoostForVuln()` in the risk-engine.
+   */
+  kev_boost_pts: number;
+  /**
+   * Human-readable explanation for the boost, suitable for persisting to
+   * analyses.findings as the `description` field.
+   *
+   * Example: "EPSS 97th percentile (CVE-2024-12345) + CISA KEV active-exploitation"
+   */
+  boost_reason: string;
+  /** ISO timestamp when this boost context was computed. */
+  computed_at: string;
 }
 
 export interface PackageAnalysis extends PackageCoordinate {
@@ -151,6 +605,39 @@ export interface PackageAnalysis extends PackageCoordinate {
   binaries: BinaryAnalysis[];
   /** Install-script / manifest analysis. Optional — absent on legacy records. */
   manifestAnalysis?: ManifestAnalysis;
+  /**
+   * Supply-chain health assessment for this package version.
+   * Optional — absent on legacy records and when the health check has not
+   * yet been run (e.g. offline / sandbox mode).
+   */
+  supplyChainHealth?: SupplyChainHealthResult;
+  /**
+   * Real-time CVE/EPSS/KEV threat context derived from live feed correlation.
+   * Present when the worker pipeline successfully fetched and correlated
+   * vulnerability feeds for this package. Absent on legacy/cached records.
+   */
+  activeThreatContext?: {
+    /** CVE IDs confirmed as actively exploited (KEV active-exploitation or widespread). */
+    exploitedCVEs: string[];
+    /** Number of vulnerabilities where no fix has been applied yet. */
+    unfixed_count: number;
+    /** Highest EPSS percentile across all active vulnerabilities [0, 1]. */
+    highest_epss_pct: number;
+    /**
+     * Net risk adjustment vs. the base score (positive = higher risk).
+     * Aggregated across all transitive deps.
+     */
+    risk_adjusted_from_base: number;
+  };
+  /**
+   * EPSS severity override context persisted during risk scoring.
+   * Present when at least one CVE affecting this package has EPSS percentile >= 0.40,
+   * indicating the NVD/CISA KEV feed correlation boosted the risk_score.
+   *
+   * Designed to provide a full audit trail for any risk_score boost applied by
+   * the EPSS severity override pipeline (epssBoost + cisaKevBoost in aggregatePackageRisk).
+   */
+  epss_context?: EpssBoostContext;
 }
 
 export interface PackageDiff {
@@ -322,11 +809,17 @@ export const SCRIPT_THREAT_KEYS: Array<keyof ScriptThreatSummary> = [
   "remoteCodeExecution"
 ];
 
-/** Every ScriptThreatCategory — the summary keys plus obfuscation and knownMalware. */
+/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, pythonBinaryExtension, PyPI build-system categories, wheelNativeBinary, pypi_binary_repackaging, and crossEcosystemConfusion. */
 export const SCRIPT_THREAT_CATEGORIES: ScriptThreatCategory[] = [
   ...SCRIPT_THREAT_KEYS,
   "obfuscation",
-  "knownMalware"
+  "knownMalware",
+  "pythonBinaryExtension",
+  "setupToolsHookExecution",
+  "cythonBinaryExtension",
+  "wheelNativeBinary",
+  "pypi_binary_repackaging",
+  "crossEcosystemConfusion"
 ];
 
 export function entitlementForPlan(plan: PlanName): EntitlementRecord {
@@ -1057,6 +1550,196 @@ export function getSamplePackageDiff(packageName: string, fromVersion: string, t
 
 export function getSampleActionSummaries(packageName?: string): ActionScanSummary[] {
   return packageName ? sampleActionSummaries.filter((summary) => summary.packageName === packageName) : sampleActionSummaries;
+}
+
+// ---------------------------------------------------------------------------
+// EPSS/CVE Enrichment types
+// ---------------------------------------------------------------------------
+
+/** Exploit maturity classification for a CVE. */
+export type ExploitMaturity = "proof-of-concept" | "active-exploitation" | "widespread" | "none";
+
+/** A single enriched CVE finding returned by the /vulnerabilities/enriched endpoint. */
+export interface EnrichedFinding {
+  /** CVE or GHSA identifier. */
+  cvId: string;
+  /** Human-readable advisory title. */
+  title: string;
+  /** CVSS v3 base severity label. */
+  severity: string;
+  /** CVSS v3 base score (0–10), if available. */
+  cvssScore?: number;
+  /** EPSS probability percentile (0–1), if available. */
+  epssPercentile?: number;
+  /** Date the CVE was added to CISA KEV catalogue, if applicable. */
+  cisaKevDate?: string;
+  /** Exploit maturity classification, if known. */
+  exploitMaturity?: ExploitMaturity;
+  /** Prioritized remediation recommendation. */
+  recommendation: string;
+}
+
+/** How EPSS and CISA KEV scores boost the overall risk score. */
+export interface RiskBoost {
+  /** Base risk score derived from maximum CVSS score (0–100). */
+  baseScore: number;
+  /** Additional risk points added because of high EPSS percentile (0–40). */
+  epssBoost: number;
+  /** Additional risk points added because of CISA KEV membership (0–30). */
+  cisaKevBoost: number;
+  /** Final composite risk score after boosts, capped at 100. */
+  finalScore: number;
+}
+
+/** Breakdown of exploit maturity levels across all CVEs for this package version. */
+export interface ExploitMaturityStats {
+  proofOfConcept: number;
+  activeExploitation: number;
+  widespread: number;
+}
+
+/** Full enriched vulnerability response for a package version. */
+export interface VulnerabilityEnrichment {
+  ecosystem: string;
+  packageName: string;
+  version: string;
+  /** List of enriched CVE findings sorted by exploitability (highest EPSS first). */
+  findings: EnrichedFinding[];
+  /** Aggregate risk metrics. */
+  maxEpssPercentile: number;
+  maxCvssV3Score: number;
+  /** CVE IDs that also appear in the CISA KEV catalogue. */
+  cisaKevMatches: string[];
+  /** Breakdown of exploit maturity levels. */
+  exploitMaturityStats: ExploitMaturityStats;
+  /** How EPSS and KEV scores boost the base CVSS risk. */
+  riskBoost: RiskBoost;
+  /** Prioritised remediation recommendations (highest exploit activity first). */
+  recommendations: string[];
+  /** ISO timestamp when this enrichment was generated. */
+  enrichedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// EPSS/CVE Risk Correlation Engine types
+// ---------------------------------------------------------------------------
+
+/**
+ * Input advisory record for the EPSS/CVE risk correlation engine.
+ * Callers populate this from NVD + EPSS + CISA KEV feed output.
+ */
+export interface Advisory {
+  /** CVE identifier, e.g. "CVE-2024-12345". */
+  cveId: string;
+  /** Human-readable advisory title. */
+  title: string;
+  /**
+   * CVSS v3 base score [0, 10].
+   * When undefined the engine falls back to a floor of 0.
+   */
+  cvssV3Score?: number;
+  /**
+   * EPSS probability percentile [0, 1].
+   * When undefined no EPSS boost is applied.
+   */
+  epssPercentile?: number;
+  /**
+   * True when this CVE appears in the CISA Known Exploited Vulnerabilities
+   * catalogue and has confirmed in-the-wild exploitation.
+   */
+  cisaKev?: boolean;
+  /** ISO timestamp of the advisory's last update. */
+  updatedAt?: string;
+}
+
+/** Which scoring signals contributed to the final correlated risk score. */
+export interface CorrelationBreakdown {
+  /** Risk floor derived from CVSS v3 score (0–55). */
+  cvssFloor: number;
+  /** Points added for high EPSS percentile (0 | 10 | 20). */
+  epssBoost: number;
+  /** Points added for CISA KEV active exploitation status (0 | 15). */
+  cisaKevBoost: number;
+  /** Points added from correlated malware-engine detection signals (0–15). */
+  malwareSignalBoost: number;
+  /** Final composite score after all boosts, capped at 100. */
+  finalScore: number;
+}
+
+/** Severity tier derived from the final correlated score. */
+export type CorrelatedSeverity = "none" | "low" | "medium" | "high" | "critical";
+
+/**
+ * Enriched advisory returned by `correlateEpssWithMalware`.
+ * Extends the input `Advisory` with correlated threat signals and a
+ * deterministic composite risk score [0–100].
+ */
+export interface EnrichedAdvisory extends Advisory {
+  /**
+   * Composite correlated risk score [0, 100].
+   * Deterministic: same inputs always produce the same score.
+   */
+  correlatedScore: number;
+  /** Severity tier mapped from `correlatedScore`. */
+  correlatedSeverity: CorrelatedSeverity;
+  /** Full breakdown of how each signal contributed to the final score. */
+  scoreBreakdown: CorrelationBreakdown;
+  /**
+   * Names of malware-engine analyzers that produced detection signals
+   * that were included in the correlation.  Empty when no malware signals
+   * matched this CVE.
+   */
+  matchedMalwareAnalyzers: string[];
+  /** ISO timestamp when the correlation was computed. */
+  correlatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
+// Manifest Behavior Correlation Engine types
+// ---------------------------------------------------------------------------
+
+/**
+ * A canonical attack profile that the behavior correlator recognises.
+ * Each profile aggregates multiple threat categories into a named attack
+ * pattern (e.g. "env-exfil" = environmentTheft + remoteCodeExecution).
+ */
+export interface AttackProfile {
+  /** Stable machine-readable identifier, e.g. "env-exfil". */
+  id: string;
+  /** Human-readable display name. */
+  name: string;
+  /**
+   * Threat categories that must be present for this profile to fire.
+   * Matching requires >= 2 signals present AND combined confidence >= confidenceFloor.
+   */
+  threatSignals: ScriptThreatCategory[];
+  /**
+   * Minimum combined confidence [0, 1] required to emit this profile.
+   * Combined confidence = mean of per-signal confidences for matched signals.
+   */
+  confidenceFloor: number;
+  /** Human-readable description of the attack pattern. */
+  description: string;
+}
+
+/**
+ * Result of running the ManifestBehaviorCorrelator against a set of findings.
+ * One BehaviorCorrelationResult is emitted per matched AttackProfile.
+ */
+export interface BehaviorCorrelationResult {
+  /** ID of the matched AttackProfile. */
+  profileId: string;
+  /** Display name of the matched AttackProfile. */
+  profileName: string;
+  /** ScriptThreatCategory IDs that were actually matched (subset of profile.threatSignals). */
+  matchedThreatIds: ScriptThreatCategory[];
+  /**
+   * Aggregated confidence [0, 1] — mean of the per-signal confidences for
+   * each matched threat, further weighted by matched / required signal ratio.
+   */
+  aggregatedConfidence: number;
+  /** Description from the matched AttackProfile. */
+  description: string;
 }
 
 export function getSampleAnalysis(packageName: string, version?: string): PackageAnalysis | undefined {

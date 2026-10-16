@@ -2,7 +2,12 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
 
-import { AdvisoryService } from "./lib/advisory-service";
+import { PackageNameIntelligence } from "@binshield/package-intelligence";
+import type { Ecosystem as PkgIntelEcosystem } from "@binshield/package-intelligence";
+import { AnalyticsCollector, DashboardAggregator } from "@binshield/analytics-collector";
+
+import { AdvisoryService, getHeatMapData } from "./lib/advisory-service";
+import { EpssCache } from "./lib/epss-cache";
 import { logAudit } from "./lib/audit";
 import { assertSameOrg, resolvePrincipal } from "./lib/auth";
 import { generateReport } from "./lib/compliance-reports";
@@ -10,10 +15,18 @@ import { readApiEnv } from "./lib/env";
 import { requireFeature, requireRepoQuota, requireScanQuota, trackScanUsage } from "./lib/middleware";
 import { rateLimitByIp, rateLimitByAuth } from "./lib/rate-limit";
 import { createServices } from "./lib/repository";
-import type { AppServices } from "./lib/repository";
+import type { AppServices, FailedScanEntry, SimilarBinaryMatch } from "./lib/repository";
 import { generateCycloneDxSbom } from "./lib/sbom";
-import type { AuthPrincipal, Ecosystem, PackageAnalysis } from "./lib/types";
+import { verifySbomProvenance } from "./lib/sbom-provenance-checker";
+import type { AuthPrincipal, Ecosystem, PackageAnalysis, SuppressionSummary } from "./lib/types";
 import { detectLockfileFormat, validateEcosystem, validateReportType } from "./lib/validation";
+import {
+  analyzeLockfileGraph,
+  buildNpmLockfileGraph,
+  buildPnpmLockfileGraph,
+  buildRequirementsTxtGraph,
+} from "./lib/lockfile-graph-analyzer";
+import type { LockfileGraphAnalysis, VulnFixInfo } from "./lib/lockfile-graph-analyzer";
 
 type AppVariables = {
   auth: AuthPrincipal | null;
@@ -58,8 +71,124 @@ function getAuditConfig(c: AppContext) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Scan resilience helpers
+// ---------------------------------------------------------------------------
+
+/** Exponential backoff delays (ms) for retry attempts 1–5. */
+const RETRY_BACKOFF_MS = [1_000, 4_000, 16_000, 60_000, 300_000] as const;
+
+/** Maximum number of retry attempts before a scan is marked 'abandoned'. */
+const MAX_RETRY_ATTEMPTS = 3;
+
+/** How long (ms) a scan may remain 'queued' before it is considered timed-out. */
+const QUEUE_TIMEOUT_MS = 60_000;
+
+/** Compute the next retry timestamp given the current failure count (1-based). */
+function nextRetryAt(failureCount: number): string {
+  const delayMs = RETRY_BACKOFF_MS[Math.min(failureCount - 1, RETRY_BACKOFF_MS.length - 1)] ?? 300_000;
+  return new Date(Date.now() + delayMs).toISOString();
+}
+
+/**
+ * Fire-and-forget background poller that monitors a newly submitted scan job.
+ * If the job remains 'queued' for > QUEUE_TIMEOUT_MS or transitions to 'failed',
+ * it is inserted into the FailedScanQueue.  After MAX_RETRY_ATTEMPTS failures
+ * the job is abandoned and a console alert is emitted (hook for email/webhook).
+ */
+function startScanTimeoutWatch(
+  repository: AppServices["repository"],
+  jobId: string,
+  orgId: string,
+  scanPayload: { ecosystem: string; packageName: string; version: string }
+): void {
+  const POLL_INTERVAL_MS = 2_000;
+  const deadlineMs = Date.now() + QUEUE_TIMEOUT_MS;
+  let pollHandle: ReturnType<typeof setTimeout> | undefined;
+
+  async function poll(): Promise<void> {
+    try {
+      const job = await repository.getScanJob(jobId, orgId === "anon" ? undefined : orgId);
+      if (!job) return; // job vanished — nothing to do
+
+      const timedOut = job.status === "queued" && Date.now() > deadlineMs;
+      const failed = job.status === "failed";
+
+      if (!timedOut && !failed) {
+        // Still in progress — schedule next poll unless deadline already past
+        if (Date.now() < deadlineMs + POLL_INTERVAL_MS) {
+          pollHandle = setTimeout(() => { void poll(); }, POLL_INTERVAL_MS);
+        }
+        return;
+      }
+
+      const errorReason = timedOut ? "timeout: job remained queued for > 60s" : (job.error ?? "worker reported failure");
+
+      // Read existing DLQ entry (if any) to determine failure count
+      const existing = await repository.getFailedScan(jobId).catch(() => null);
+      const failureCount = (existing?.failureCount ?? 0) + 1;
+      const status: FailedScanEntry["status"] = failureCount >= MAX_RETRY_ATTEMPTS ? "abandoned" : "retrying";
+
+      await repository.upsertFailedScan({
+        scanId: jobId,
+        jobId,
+        orgId: orgId === "anon" ? null : orgId,
+        ecosystem: scanPayload.ecosystem,
+        packageName: scanPayload.packageName,
+        version: scanPayload.version,
+        errorReason,
+        failureCount,
+        lastAttemptAt: new Date().toISOString(),
+        nextRetryAt: nextRetryAt(failureCount),
+        status,
+        metadata: { originalStatus: job.status, timedOut }
+      });
+
+      await repository.appendScanAuditLog({
+        scanId: jobId,
+        orgId: orgId === "anon" ? null : orgId,
+        eventType: timedOut ? "scan_timeout" : "scan_failed",
+        retryAttempt: failureCount,
+        details: { errorReason, packageName: scanPayload.packageName, version: scanPayload.version }
+      });
+
+      if (status === "abandoned") {
+        console.warn(
+          `[BinShield] scan ${jobId} abandoned after ${failureCount} failed attempts ` +
+          `(org=${orgId}, pkg=${scanPayload.packageName}@${scanPayload.version}). ` +
+          "Consider configuring an email/webhook alert channel."
+        );
+        await repository.appendScanAuditLog({
+          scanId: jobId,
+          orgId: orgId === "anon" ? null : orgId,
+          eventType: "scan_abandoned",
+          retryAttempt: failureCount,
+          details: { alertSent: false }
+        });
+      }
+    } catch (err) {
+      // Poller errors must never crash the server process
+      console.error("[BinShield] startScanTimeoutWatch poll error:", err instanceof Error ? err.message : err);
+    }
+  }
+
+  // First poll fires after the timeout window; intermediate polls track status
+  pollHandle = setTimeout(() => { void poll(); }, POLL_INTERVAL_MS);
+  // Suppress TS unused-variable warning
+  void pollHandle;
+}
+
 export function createApp(services = createServices(readApiEnv())) {
   const app = new Hono<{ Variables: AppVariables }>();
+
+  // Analytics collector — demo mode when no Supabase credentials are present
+  const isDemo = !services.env.supabaseUrl || !services.env.supabaseServiceRoleKey;
+  const analyticsCollector = new AnalyticsCollector({
+    supabaseUrl: services.env.supabaseUrl,
+    supabaseServiceRoleKey: services.env.supabaseServiceRoleKey,
+    demoMode: isDemo
+  });
+  const dashboardAggregator = new DashboardAggregator();
 
   // Global error handler
   app.onError((err, c) => {
@@ -90,7 +219,24 @@ export function createApp(services = createServices(readApiEnv())) {
     c.set("services", services);
     c.set("auth", await resolvePrincipal(services.repository, c, services.env));
     await next();
-    console.log(`[BinShield API] ${c.req.method} ${c.req.path} ${c.res.status} ${Date.now() - start}ms`);
+    const durationMs = Date.now() - start;
+    console.log(`[BinShield API] ${c.req.method} ${c.req.path} ${c.res.status} ${durationMs}ms`);
+    // Emit user_action for every authenticated route hit
+    const auth = c.get("auth");
+    if (auth) {
+      analyticsCollector.userAction(
+        {
+          action: "api_request",
+          metadata: {
+            method: c.req.method,
+            path: c.req.path,
+            status: c.res.status,
+            durationMs
+          }
+        },
+        auth.orgId
+      );
+    }
   });
 
   // Rate limiting (after auth so rateLimitByAuth can use orgId)
@@ -109,6 +255,34 @@ export function createApp(services = createServices(readApiEnv())) {
     await next();
   });
 
+  // Strict IP-based rate limiter for anonymous public scan (10 req/min per IP)
+  const publicScanRateLimit = rateLimitByIp({ windowMs: 60_000, max: 10 });
+
+  /** Filter binary-level findings out of an analysis according to org suppressions. */
+  function applySuppressions(analysis: PackageAnalysis, suppressions: SuppressionSummary[]): PackageAnalysis {
+    if (suppressions.length === 0) return analysis;
+
+    const active = suppressions.filter(
+      (s) =>
+        s.ecosystem === analysis.ecosystem &&
+        s.packageName === analysis.packageName &&
+        (s.version == null || s.version === analysis.version)
+    );
+
+    if (active.length === 0) return analysis;
+
+    return {
+      ...analysis,
+      binaries: analysis.binaries.map((b) => ({
+        ...b,
+        // Finding has only title/severity/description — match on title only
+        findings: (b.findings ?? []).filter(
+          (f) => !active.some((s) => s.findingTitle == null || s.findingTitle === f.title)
+        )
+      }))
+    };
+  }
+
   app.get("/health", (c) => {
     const { env, repositoryInfo } = getServices(c);
     return c.json({
@@ -118,6 +292,38 @@ export function createApp(services = createServices(readApiEnv())) {
       repository: repositoryInfo,
       defaultFailOn: env.defaultFailOn
     });
+  });
+
+  // -----------------------------------------------------------------------
+  // Public anonymous scan — no API key required, strictly IP-rate-limited
+  // -----------------------------------------------------------------------
+
+  app.post("/public/scan", publicScanRateLimit, async (c) => {
+    const body = await c.req.json();
+    const validationError = requireBody<{ ecosystem: Ecosystem; packageName: string; version: string }>(body, [
+      "ecosystem",
+      "packageName",
+      "version"
+    ]);
+    if (validationError) {
+      return c.json({ error: validationError }, 400);
+    }
+
+    if (!validateEcosystem(body.ecosystem)) {
+      return c.json({ error: "Invalid ecosystem. Must be one of: npm, pypi, crates, go" }, 400);
+    }
+
+    // Use a synthetic anonymous principal so the job is not org-scoped and
+    // does not consume any org's quota.
+    const anonPrincipal: AuthPrincipal = {
+      apiKeyId: "anon",
+      orgId: "anon",
+      label: "public-scan",
+      scopes: []
+    };
+
+    const job = await getServices(c).repository.submitScan(body, anonPrincipal);
+    return c.json(job, job.status === "complete" ? 200 : 202);
   });
 
   app.get("/packages/search", async (c) => {
@@ -155,6 +361,13 @@ export function createApp(services = createServices(readApiEnv())) {
       return c.json({ error: "Analysis not found" }, 404);
     }
 
+    // Apply org-level finding suppressions for authenticated requests
+    const auth = c.get("auth");
+    if (auth) {
+      const suppressions = await getServices(c).repository.listSuppressions(auth.orgId);
+      return c.json(applySuppressions(analysis, suppressions));
+    }
+
     return c.json(analysis);
   });
 
@@ -172,6 +385,73 @@ export function createApp(services = createServices(readApiEnv())) {
     c.header("Content-Type", "application/json");
     c.header("Content-Disposition", `attachment; filename="sbom-${name}-${version}.cdx.json"`);
     return c.json(sbom);
+  });
+
+  // -------------------------------------------------------------------------
+  // GET /packages/:ecosystem/:name/versions/:version/similar-binaries
+  //
+  // Returns wheels in the scanned corpus that share one or more binary
+  // fingerprint signals (importSig, syscallSig, ssdeepFuzzyHash) with the
+  // native binaries in the requested package version.
+  //
+  // Query params:
+  //   importSig       — SHA-256 of import/API symbol list to match against
+  //   syscallSig      — SHA-256 of attack-pattern IDs to match against
+  //   ssdeepFuzzyHash — rolling block hash to match against
+  //   limit           — max results to return (1–200, default 50)
+  //
+  // At least one of importSig, syscallSig, or ssdeepFuzzyHash must be provided.
+  // Results are sorted by descending matchScore (most signals matched first).
+  // -------------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/:name/versions/:version/similar-binaries", async (c) => {
+    const ecosystem = c.req.param("ecosystem");
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    const importSig = c.req.query("importSig");
+    const syscallSig = c.req.query("syscallSig");
+    const ssdeepFuzzyHash = c.req.query("ssdeepFuzzyHash");
+    const limitRaw = Number(c.req.query("limit") ?? 50);
+    const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 50, 1), 200);
+
+    // At least one hash signal is required
+    if (!importSig && !syscallSig && !ssdeepFuzzyHash) {
+      return c.json(
+        {
+          error:
+            "At least one of importSig, syscallSig, or ssdeepFuzzyHash must be provided as a query parameter."
+        },
+        400
+      );
+    }
+
+    const { repository } = getServices(c);
+
+    // Verify the package/version exists (404 if not)
+    const analysis = await repository.getPackage(ecosystem as Parameters<typeof repository.getPackage>[0], name, version);
+    if (!analysis) {
+      return c.json({ error: "Analysis not found" }, 404);
+    }
+
+    const matches: SimilarBinaryMatch[] = await repository.queryByFingerprints(
+      ecosystem,
+      { importSig, syscallSig, ssdeepFuzzyHash },
+      limit
+    );
+
+    return c.json({
+      ecosystem,
+      packageName: name,
+      version,
+      queriedSignals: {
+        importSig: importSig ?? null,
+        syscallSig: syscallSig ?? null,
+        ssdeepFuzzyHash: ssdeepFuzzyHash ?? null
+      },
+      total: matches.length,
+      matches
+    });
   });
 
   app.get("/packages/:ecosystem/:name/diff", async (c) => {
@@ -209,7 +489,9 @@ export function createApp(services = createServices(readApiEnv())) {
       return c.json({ error: "Invalid ecosystem. Must be one of: npm, pypi, crates, go" }, 400);
     }
 
+    const scanStart = Date.now();
     const job = await getServices(c).repository.submitScan(body, auth);
+    const scanDurationMs = Date.now() - scanStart;
 
     // Fire-and-forget audit log
     logAudit(getAuditConfig(c), auth.orgId, "scan.submitted", "scan", job.id, auth.userId, {
@@ -217,6 +499,59 @@ export function createApp(services = createServices(readApiEnv())) {
       packageName: body.packageName,
       version: body.version
     });
+
+    // Analytics instrumentation
+    if (job.status === "complete" && "analysis" in job && job.analysis) {
+      const analysis = job.analysis as { riskLevel?: string; riskScore?: number; binaryCount?: number };
+      analyticsCollector.scanCompleted(
+        {
+          ecosystem: body.ecosystem,
+          packageName: body.packageName,
+          version: body.version,
+          binaryCount: analysis.binaryCount ?? 0,
+          durationMs: scanDurationMs,
+          riskLevel: (analysis.riskLevel ?? "none") as "none" | "low" | "medium" | "high" | "critical",
+          riskScore: analysis.riskScore ?? 0,
+          cached: false
+        },
+        auth.orgId
+      );
+    } else if (job.status === "failed") {
+      analyticsCollector.scanFailed(
+        {
+          ecosystem: body.ecosystem,
+          packageName: body.packageName,
+          version: body.version,
+          errorCategory: "worker_failure",
+          errorMessage: "scan job failed",
+          durationMs: scanDurationMs
+        },
+        auth.orgId
+      );
+    } else {
+      // queued / processing — emit user_action for scan submission tracking
+      analyticsCollector.userAction(
+        {
+          action: "scan_submitted",
+          metadata: {
+            ecosystem: body.ecosystem,
+            packageName: body.packageName,
+            version: body.version,
+            jobStatus: job.status
+          }
+        },
+        auth.orgId
+      );
+    }
+
+    // Start background timeout watcher for non-complete jobs
+    if (job.status !== "complete") {
+      startScanTimeoutWatch(getServices(c).repository, job.id, auth.orgId, {
+        ecosystem: body.ecosystem,
+        packageName: body.packageName,
+        version: body.version
+      });
+    }
 
     return c.json(job, job.status === "complete" ? 200 : 202);
   });
@@ -360,7 +695,31 @@ export function createApp(services = createServices(readApiEnv())) {
       return c.json({ error: validationError }, 400);
     }
 
-    const watchlist = await getServices(c).repository.createWatchlist(orgId, body);
+    // Validate internalPackagePattern if provided
+    if (body.internalPackagePattern !== undefined) {
+      if (typeof body.internalPackagePattern !== "string") {
+        return c.json({ error: "internalPackagePattern must be a string" }, 400);
+      }
+      try {
+        new RegExp(body.internalPackagePattern);
+      } catch {
+        return c.json({ error: "internalPackagePattern is not a valid regular expression" }, 400);
+      }
+    }
+    // Validate trustedDomains if provided
+    if (body.trustedDomains !== undefined) {
+      if (!Array.isArray(body.trustedDomains) || !body.trustedDomains.every((d: unknown) => typeof d === "string")) {
+        return c.json({ error: "trustedDomains must be an array of strings" }, 400);
+      }
+    }
+
+    const watchlist = await getServices(c).repository.createWatchlist(orgId, {
+      name: body.name,
+      channel: body.channel,
+      destination: body.destination,
+      internalPackagePattern: body.internalPackagePattern,
+      trustedDomains: body.trustedDomains
+    });
 
     logAudit(getAuditConfig(c), orgId, "watchlist.created", "watchlist", watchlist.id, auth.userId, {
       name: body.name,
@@ -550,6 +909,8 @@ export function createApp(services = createServices(readApiEnv())) {
       label: body.label
     });
 
+    analyticsCollector.userAction({ action: "api_key_created", metadata: { label: body.label } }, orgId);
+
     return c.json(apiKey, 201);
   });
 
@@ -633,6 +994,75 @@ export function createApp(services = createServices(readApiEnv())) {
   });
 
   // -----------------------------------------------------------------------
+  // Finding suppression routes
+  // -----------------------------------------------------------------------
+
+  app.get("/orgs/:orgId/suppressions", async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const items = await getServices(c).repository.listSuppressions(orgId);
+    return c.json({ items });
+  });
+
+  app.post("/orgs/:orgId/suppressions", async (c) => {
+    const orgId = c.req.param("orgId");
+    const auth = c.get("auth")!;
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const body = await c.req.json();
+    const validationError = requireBody<{ ecosystem: string; packageName: string; reason: string }>(body, [
+      "ecosystem",
+      "packageName",
+      "reason"
+    ]);
+    if (validationError) {
+      return c.json({ error: validationError }, 400);
+    }
+
+    const suppression = await getServices(c).repository.createSuppression(orgId, {
+      ecosystem: body.ecosystem,
+      packageName: body.packageName,
+      version: body.version,
+      findingCategory: body.findingCategory,
+      findingTitle: body.findingTitle,
+      reason: body.reason
+    });
+
+    logAudit(getAuditConfig(c), orgId, "suppression.created", "suppression", suppression.id, auth.userId, {
+      ecosystem: body.ecosystem,
+      packageName: body.packageName,
+      version: body.version
+    });
+
+    return c.json(suppression, 201);
+  });
+
+  app.delete("/orgs/:orgId/suppressions/:suppressionId", async (c) => {
+    const orgId = c.req.param("orgId");
+    const suppressionId = c.req.param("suppressionId");
+    const auth = c.get("auth")!;
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const removed = await getServices(c).repository.deleteSuppression(orgId, suppressionId);
+    if (!removed) {
+      return c.json({ error: "Suppression not found" }, 404);
+    }
+
+    logAudit(getAuditConfig(c), orgId, "suppression.deleted", "suppression", suppressionId, auth.userId, {});
+    return c.json({ ok: true });
+  });
+
+  // -----------------------------------------------------------------------
   // Billing routes
   // -----------------------------------------------------------------------
 
@@ -691,7 +1121,442 @@ export function createApp(services = createServices(readApiEnv())) {
     const ecosystem = c.req.param("ecosystem") as Ecosystem;
     const name = c.req.param("name");
     const advisories = await getServices(c).repository.getPackageAdvisories(ecosystem, name);
-    return c.json({ items: advisories, total: advisories.length });
+
+    // Enrich each advisory with vendor patch context when available.
+    // The advisory service parses patchedVersion from the affectedPackages
+    // array already stored in the advisory row, so no extra network call is needed.
+    const { env } = getServices(c);
+    const advisoryService = (env.supabaseUrl && env.supabaseServiceRoleKey)
+      ? new AdvisoryService({
+          supabaseUrl: env.supabaseUrl,
+          supabaseServiceRoleKey: env.supabaseServiceRoleKey,
+          githubToken: env.githubToken,
+          nvdApiKey: env.nvdApiKey
+        })
+      : null;
+
+    // Build a synthetic VendorAdvisoryJson array from the existing advisory
+    // rows so parseVendorAdvisoryPatches can derive VendorPatchContext entries
+    // without an additional DB round-trip.
+    const vendorAdvisoryJsons = advisories.map((a) => ({
+      id: a.sourceId,
+      cve_id: a.sourceId.toUpperCase().startsWith("CVE-") ? a.sourceId : null,
+      vulnerabilities: a.affectedPackages.map((ap) => ({
+        package: { name: ap.packageName, ecosystem: ap.ecosystem },
+        patched_versions: ap.patchedVersion ?? null,
+        first_patched_version: ap.patchedVersion ? { identifier: ap.patchedVersion } : null,
+        vulnerable_version_range: ap.vulnerableRange ?? null
+      })),
+      published_at: a.publishedAt ?? null,
+      updated_at: a.updatedAt ?? null,
+      withdrawn_at: null
+    }));
+
+    const { patches } = advisoryService
+      ? advisoryService.parseVendorAdvisoryPatches(vendorAdvisoryJsons, name)
+      : { patches: [] };
+
+    // Build a map of cveId → VendorPatchContext for O(1) lookup
+    const patchMap = new Map(patches.map((p) => [p.cveId.toUpperCase(), p]));
+
+    const enrichedItems = advisories.map((advisory) => {
+      const patch = patchMap.get(advisory.sourceId.toUpperCase());
+      return {
+        ...advisory,
+        vendorPatch: patch
+          ? {
+              patchedVersion: patch.patchedVersion,
+              daysToFix: patch.daysToFix,
+              vendorConfidence: patch.vendorConfidence
+            }
+          : null
+      };
+    });
+
+    return c.json({ items: enrichedItems, total: enrichedItems.length });
+  });
+
+  // -----------------------------------------------------------------------
+  // Risk-correlation endpoint — EPSS + CVSS enrichment
+  // GET /packages/:ecosystem/:name/versions/:version/risk-correlation
+  // Returns: { cves, cvssScores[], epssScores[], compositeExploitRisk }
+  // -----------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/:name/versions/:version/risk-correlation", async (c) => {
+    const ecosystem = c.req.param("ecosystem") as Ecosystem;
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    const { env } = getServices(c);
+    if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
+      // In local/dev mode return a mock correlation based on seed data
+      const advisories = await getServices(c).repository.getPackageAdvisories(ecosystem, name);
+      const cves = [...new Set(
+        advisories
+          .map((a) => a.sourceId)
+          .filter((id) => id.toUpperCase().startsWith("CVE-"))
+      )];
+      const cvssScores = advisories
+        .filter((a) => a.cvssScore != null)
+        .map((a) => ({ cveId: a.sourceId, cvssScore: a.cvssScore!, severity: a.severity }));
+      const compositeExploitRisk = cvssScores.length > 0
+        ? Math.min(100, Math.round((Math.max(...cvssScores.map((c) => c.cvssScore)) / 10) * 100))
+        : 0;
+      return c.json({ ecosystem, packageName: name, version, cves, cvssScores, epssScores: [], compositeExploitRisk });
+    }
+
+    const advisoryService = new AdvisoryService({
+      supabaseUrl: env.supabaseUrl,
+      supabaseServiceRoleKey: env.supabaseServiceRoleKey,
+      githubToken: env.githubToken,
+      nvdApiKey: env.nvdApiKey
+    });
+
+    const correlation = await advisoryService.getRiskCorrelation(ecosystem, name, version);
+    return c.json(correlation);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /advisories/:cveId/exploit-activity
+  // Returns CISA KEV + NVD exploit enrichment for a single CVE ID.
+  // -----------------------------------------------------------------------
+
+  app.get("/advisories/:cveId/exploit-activity", async (c) => {
+    const cveId = c.req.param("cveId").toUpperCase();
+
+    if (!cveId.startsWith("CVE-")) {
+      return c.json({ error: "cveId must be a CVE identifier (e.g. CVE-2024-1234)" }, 400);
+    }
+
+    const { env } = getServices(c);
+
+    // -----------------------------------------------------------------------
+    // Supabase mode: look up real advisory row
+    // -----------------------------------------------------------------------
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      const baseUrl = env.supabaseUrl.replace(/\/$/, "");
+      const dbHeaders = {
+        apikey: env.supabaseServiceRoleKey,
+        authorization: `Bearer ${env.supabaseServiceRoleKey}`
+      };
+
+      const res = await fetch(
+        `${baseUrl}/rest/v1/advisories` +
+        `?source_id=eq.${encodeURIComponent(cveId)}` +
+        `&select=source_id,cisa_kev_date,exploit_maturity_score,published_at,updated_at` +
+        `&limit=1`,
+        { headers: dbHeaders }
+      );
+
+      if (!res.ok) {
+        return c.json({ error: "Advisory lookup failed" }, 502);
+      }
+
+      const rows = await res.json() as Array<{
+        source_id: string;
+        cisa_kev_date: string | null;
+        exploit_maturity_score: string | null;
+        published_at: string | null;
+        updated_at: string | null;
+      }>;
+
+      if (rows.length === 0) {
+        return c.json({ error: "CVE not found" }, 404);
+      }
+
+      const row = rows[0]!;
+
+      // Fetch affected versions from package_advisories join
+      const paRes = await fetch(
+        `${baseUrl}/rest/v1/package_advisories` +
+        `?advisory_id=eq.${encodeURIComponent(row.source_id)}` +
+        `&select=ecosystem,package_name,vulnerable_range,patched_version`,
+        { headers: dbHeaders }
+      );
+
+      const paRows = paRes.ok
+        ? (await paRes.json() as Array<{
+            ecosystem: string;
+            package_name: string;
+            vulnerable_range: string | null;
+            patched_version: string | null;
+          }>)
+        : [];
+
+      const affectedVersions = paRows.map((pa) => pa.vulnerable_range ?? "unknown").filter(Boolean);
+
+      return c.json({
+        cveId: row.source_id,
+        cisa_confirmed: row.cisa_kev_date !== null,
+        first_seen_date: row.cisa_kev_date ?? null,
+        exploit_maturity: row.exploit_maturity_score ?? null,
+        affected_versions: affectedVersions
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // Local / dev mode: check against seeded sample advisories
+    // -----------------------------------------------------------------------
+    const advisories = await getServices(c).repository.getRecentAdvisories(200);
+    const match = advisories.find(
+      (a) => a.sourceId.toUpperCase() === cveId || a.source === "nvd" && a.sourceId.toUpperCase() === cveId
+    );
+
+    if (!match) {
+      return c.json({ error: "CVE not found" }, 404);
+    }
+
+    const affectedVersions = (match.affectedPackages ?? [])
+      .map((ap) => ap.vulnerableRange ?? "unknown")
+      .filter(Boolean);
+
+    return c.json({
+      cveId: match.sourceId,
+      cisa_confirmed: false,
+      first_seen_date: null,
+      exploit_maturity: null,
+      affected_versions: affectedVersions
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /binaries/:id/malware-analysis
+  // Returns per-analyzer malware detection breakdowns for a specific binary.
+  // The binary is located by scanning all stored package analyses for a
+  // matching binary id.
+  // -----------------------------------------------------------------------
+
+  app.get("/binaries/:id/malware-analysis", async (c) => {
+    const binaryId = c.req.param("id");
+    const { repository } = getServices(c);
+
+    // Search all indexed packages for a binary with this id.
+    const searchResults = await repository.searchPackages();
+    for (const item of searchResults.items) {
+      const analysis = await repository.getPackage(item.ecosystem, item.packageName);
+      if (!analysis) continue;
+
+      const binary = analysis.binaries.find((b) => b.id === binaryId);
+      if (!binary) continue;
+
+      const malwareDetectionResults = binary.malwareDetectionResults ?? [];
+      const anyDetected = malwareDetectionResults.some((r) => r.detected);
+      const maxConfidence =
+        malwareDetectionResults.length > 0
+          ? Math.max(...malwareDetectionResults.map((r) => r.confidence))
+          : 0;
+
+      return c.json({
+        binaryId: binary.id,
+        filename: binary.filename,
+        packageName: item.packageName,
+        ecosystem: item.ecosystem,
+        overallDetected: anyDetected,
+        overallConfidence: maxConfidence,
+        analyzerCount: malwareDetectionResults.length,
+        analyzers: malwareDetectionResults.map((r) => ({
+          analyzerName: r.analyzerName,
+          analyzerVersion: r.analyzerVersion,
+          detected: r.detected,
+          confidence: r.confidence,
+          signals: r.signals
+        }))
+      });
+    }
+
+    return c.json({ error: "Binary not found" }, 404);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /packages/:ecosystem/:name/:version/pypi-build-analysis
+  // Returns PyPI build system type and hook inventory for a package version.
+  // Only meaningful for PyPI packages; returns 404 for non-PyPI packages that
+  // have no build analysis recorded, and a structured empty result for PyPI
+  // packages with no build config.
+  // -----------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/:name/:version/pypi-build-analysis", async (c) => {
+    const ecosystem = c.req.param("ecosystem") as Ecosystem;
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    const analysis = await getServices(c).repository.getPackage(ecosystem, name, version);
+
+    if (!analysis) {
+      return c.json({ error: "Analysis not found" }, 404);
+    }
+
+    const manifest = analysis.manifestAnalysis;
+
+    // For non-PyPI or packages with no manifest analysis, return a minimal
+    // structured response so callers don't have to special-case missing fields.
+    if (ecosystem !== "pypi" || !manifest) {
+      return c.json({
+        ecosystem,
+        packageName: name,
+        version,
+        buildSystemType: "other",
+        pythonBuildThreatDetails: {
+          detectedHooks: [],
+          cythonFiles: [],
+          suspiciousPatterns: []
+        }
+      });
+    }
+
+    return c.json({
+      ecosystem,
+      packageName: name,
+      version,
+      buildSystemType: manifest.buildSystemType ?? "other",
+      pythonBuildThreatDetails: manifest.pythonBuildThreatDetails ?? {
+        detectedHooks: [],
+        cythonFiles: [],
+        suspiciousPatterns: []
+      }
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /packages/pypi/:name/:version/verify-provenance
+  //
+  // Deep PyPI wheel provenance + attestation verification engine (PEP 740).
+  //
+  // Performs:
+  //   1. PEP 740/691 metadata fetch from PyPI
+  //   2. SLSA provenance attestation verification via sigstore + TUF conventions
+  //   3. Build timestamp cross-reference against git commit history (GH API)
+  //   4. Pure-Python repackaging fraud detection
+  //   5. Builder reputation scoring for wheels lacking full provenance
+  //
+  // Body (optional JSON):
+  //   wheelFileList   string[]   — file list from inside the wheel for fraud detection
+  //   skipTimestamp   boolean    — skip GH API build-timestamp check
+  //   skipBuildLog    boolean    — skip GH Actions workflow check
+  //
+  // Returns: WheelProvenanceAttestationResult with structured findings including:
+  //   provenance_verified, attestation_signature_valid, build_timestamp_anomaly,
+  //   repackaging_fraud_suspected, riskScore, riskLevel, slsaLevel, findings[]
+  // -----------------------------------------------------------------------
+
+  app.post("/packages/pypi/:name/:version/verify-provenance", async (c) => {
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    if (!name || name.trim().length === 0) {
+      return c.json({ error: "package name must not be empty" }, 400);
+    }
+    if (!version || version.trim().length === 0) {
+      return c.json({ error: "version must not be empty" }, 400);
+    }
+
+    // Parse optional body
+    let wheelFileList: string[] | undefined;
+    let skipTimestamp = false;
+    let skipBuildLog = false;
+    try {
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      if (Array.isArray(body["wheelFileList"])) {
+        wheelFileList = (body["wheelFileList"] as unknown[])
+          .filter((f): f is string => typeof f === "string")
+          .slice(0, 5000);
+      }
+      if (body["skipTimestamp"] === true) skipTimestamp = true;
+      if (body["skipBuildLog"] === true) skipBuildLog = true;
+    } catch {
+      // body is optional — ignore parse errors
+    }
+
+    const { env } = getServices(c);
+
+    try {
+      const { verifyWheelProvenanceAttestation } = await import("./lib/pypi-wheel-provenance-attestator-proxy.js");
+      const result = await verifyWheelProvenanceAttestation(name, version, {
+        githubToken: env.githubToken,
+        skipTimestampCheck: skipTimestamp || !env.githubToken,
+        skipBuildLogCheck: skipBuildLog || !env.githubToken,
+        _wheelFileListOverride: wheelFileList,
+      });
+      return c.json(result);
+    } catch (err) {
+      console.error(
+        `[BinShield API] verify-provenance failed for pypi/${name}@${version}:`,
+        err instanceof Error ? err.message : err
+      );
+      return c.json({ error: "Provenance verification failed" }, 500);
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /packages/:ecosystem/:name/versions/:version/vulnerabilities/enriched
+  // EPSS/CVE enrichment: fetches CVEs from advisories table, queries FIRST
+  // EPSS API, checks CISA KEV membership, and returns a structured risk report.
+  // -----------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/:name/versions/:version/vulnerabilities/enriched", async (c) => {
+    const ecosystem = c.req.param("ecosystem") as Ecosystem;
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    const { env } = getServices(c);
+
+    // Build the EPSS cache: use Supabase backing when credentials are available
+    const epssCache = new EpssCache(
+      env.supabaseUrl && env.supabaseServiceRoleKey
+        ? { supabaseUrl: env.supabaseUrl, supabaseServiceRoleKey: env.supabaseServiceRoleKey }
+        : undefined
+    );
+
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      // Supabase mode — use real advisory data from the DB
+      const advisoryService = new AdvisoryService({
+        supabaseUrl: env.supabaseUrl,
+        supabaseServiceRoleKey: env.supabaseServiceRoleKey,
+        githubToken: env.githubToken,
+        nvdApiKey: env.nvdApiKey
+      });
+
+      try {
+        const enrichment = await advisoryService.enrichCvesWithEpss(ecosystem, name, version, epssCache);
+        return c.json(enrichment);
+      } catch (err) {
+        console.error(`[BinShield API] enrichCvesWithEpss failed for ${ecosystem}/${name}@${version}:`, err instanceof Error ? err.message : err);
+        return c.json({ error: "Enrichment failed" }, 500);
+      }
+    }
+
+    // Local/dev mode — use seeded advisory data with mocked EPSS (no live fetch)
+    const advisories = await getServices(c).repository.getPackageAdvisories(ecosystem, name);
+
+    const findings = advisories.map((advisory) => ({
+      cvId: advisory.sourceId,
+      title: advisory.title,
+      severity: advisory.severity ?? "unknown",
+      cvssScore: advisory.cvssScore,
+      epssPercentile: undefined as number | undefined,
+      cisaKevDate: undefined as string | undefined,
+      exploitMaturity: undefined as string | undefined,
+      recommendation: `Review ${advisory.sourceId} and apply the latest patched version.`
+    }));
+
+    const maxCvssV3Score = findings.reduce((max, f) => Math.max(max, f.cvssScore ?? 0), 0);
+    const baseScore = Math.round((maxCvssV3Score / 10) * 100);
+
+    return c.json({
+      ecosystem,
+      packageName: name,
+      version,
+      findings,
+      maxEpssPercentile: 0,
+      maxCvssV3Score,
+      cisaKevMatches: [],
+      exploitMaturityStats: { proofOfConcept: 0, activeExploitation: 0, widespread: 0 },
+      riskBoost: { baseScore, epssBoost: 0, cisaKevBoost: 0, finalScore: baseScore },
+      recommendations: findings.length > 0
+        ? [`Review all listed advisories and upgrade to the patched version as soon as feasible.`]
+        : ["No known CVEs found for this package version. Continue monitoring for new advisories."],
+      enrichedAt: new Date().toISOString()
+    });
   });
 
   app.get("/advisories/recent", async (c) => {
@@ -1077,6 +1942,555 @@ export function createApp(services = createServices(readApiEnv())) {
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : "Webhook processing failed" }, 400);
     }
+  });
+
+  // -----------------------------------------------------------------------
+  // SBOM Provenance Verification — supply-chain resilience checks
+  // POST /sbom/verify-provenance
+  //
+  // Accepts a CycloneDX SBOM and optional lockfile, fetches authoritative
+  // registry metadata for every dependency, and returns per-package
+  // provenance checks: registry-mismatch (HIGH), yanked-version (HIGH),
+  // unresolved-dependency (MEDIUM).
+  // -----------------------------------------------------------------------
+
+  app.post("/sbom/verify-provenance", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ error: "Request body must be a JSON object" }, 400);
+    }
+
+    const { sbomText, packageFormat, lockfileContent } = body as {
+      sbomText?: unknown;
+      packageFormat?: unknown;
+      lockfileContent?: unknown;
+    };
+
+    if (typeof sbomText !== "string" || sbomText.trim().length === 0) {
+      return c.json({ error: "Missing required field: sbomText (non-empty string)" }, 400);
+    }
+
+    if (packageFormat !== "npm" && packageFormat !== "pypi") {
+      return c.json({ error: "packageFormat must be 'npm' or 'pypi'" }, 400);
+    }
+
+    if (lockfileContent !== undefined && typeof lockfileContent !== "string") {
+      return c.json({ error: "lockfileContent must be a string if provided" }, 400);
+    }
+
+    // Size guard: 10 MB hard limit across sbomText + lockfileContent
+    const totalSize = sbomText.length + (typeof lockfileContent === "string" ? lockfileContent.length : 0);
+    if (totalSize > 10 * 1024 * 1024) {
+      return c.json({ error: "Combined sbomText + lockfileContent exceeds 10 MB limit" }, 413);
+    }
+
+    let result;
+    try {
+      result = await verifySbomProvenance({
+        sbomText,
+        packageFormat,
+        lockfileContent: typeof lockfileContent === "string" ? lockfileContent : undefined,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Provenance verification failed";
+      return c.json({ error: message }, 400);
+    }
+
+    // Persist to sbom_provenance_audit_log (fire-and-forget, Supabase only)
+    const { env } = getServices(c);
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      const baseUrl = env.supabaseUrl.replace(/\/$/, "");
+      fetch(`${baseUrl}/rest/v1/sbom_provenance_audit_log`, {
+        method: "POST",
+        headers: {
+          apikey: env.supabaseServiceRoleKey,
+          authorization: `Bearer ${env.supabaseServiceRoleKey}`,
+          "content-type": "application/json",
+          Prefer: "return=minimal",
+        },
+        body: JSON.stringify({
+          package_format: packageFormat,
+          is_valid: result.isValid,
+          check_count: result.checks.length,
+          failed_check_count: result.checks.filter((ch) => !ch.passed).length,
+          risk_level: result.riskLevel,
+          checks: result.checks,
+          recommendations: result.recommendations,
+          created_at: result.checkedAt,
+        }),
+      }).catch((err) => {
+        console.error("[BinShield] Failed to persist provenance audit log:", err instanceof Error ? err.message : err);
+      });
+    }
+
+    return c.json(result);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /packages/:ecosystem/confusable/:name
+  // Package name intelligence — returns Levenshtein + homoglyph + corpus
+  // analysis for the given package name in the given ecosystem.
+  // -----------------------------------------------------------------------
+
+  // -----------------------------------------------------------------------
+  // GET /orgs/:orgId/cve-heat-map?limit=100&ecosystem=npm|pypi|all
+  // CVE/EPSS Risk Heat Map — top CVEs by exploitability × severity × adoption.
+  // Returns HeatMapData: [{cveId, cvssScore, epssPercentile, heatScore, tier, …}]
+  // -----------------------------------------------------------------------
+
+  app.get("/orgs/:orgId/cve-heat-map", async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    const limitParam = Number.parseInt(c.req.query("limit") ?? "100", 10);
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(limitParam, 1), 200) : 100;
+    const ecosystemParam = (c.req.query("ecosystem") ?? "npm").toLowerCase();
+    const validEcosystems = ["npm", "pypi", "crates", "go", "all"];
+    if (!validEcosystems.includes(ecosystemParam)) {
+      return c.json({ error: `ecosystem must be one of: ${validEcosystems.join(", ")}` }, 400);
+    }
+
+    const { env } = getServices(c);
+
+    // Fetch recent advisories — Supabase or local seeded data
+    let advisories: import("./lib/types").Advisory[];
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      const advisoryService = new AdvisoryService({
+        supabaseUrl: env.supabaseUrl,
+        supabaseServiceRoleKey: env.supabaseServiceRoleKey,
+        githubToken: env.githubToken,
+        nvdApiKey: env.nvdApiKey
+      });
+      advisories = await advisoryService.getRecentAdvisories(500);
+    } else {
+      // Local/dev mode — use in-memory seeded advisories
+      advisories = await getServices(c).repository.getRecentAdvisories(500);
+    }
+
+    const heatMap = await getHeatMapData(
+      {
+        supabaseUrl: env.supabaseUrl ?? "",
+        supabaseServiceRoleKey: env.supabaseServiceRoleKey ?? "",
+        githubToken: env.githubToken,
+        nvdApiKey: env.nvdApiKey
+      },
+      advisories,
+      ecosystemParam,
+      limit
+    );
+
+    return c.json(heatMap);
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /packages/:ecosystem/:name/versions/:version/supply-chain-health
+  //
+  // Returns supply-chain health scorecard for a package version: seven signals
+  // (commit_velocity_90d, release_cadence_days, contributor_turnover,
+  // dependency_age_percentile, circular_dep_count, orphaned_dep_count,
+  // license_deprecated) aggregated into a deterministic RiskLevel.
+  //
+  // When the analysis has already been computed by the worker pipeline it is
+  // returned directly from the stored PackageAnalysis record.  When it is
+  // absent (legacy record or offline mode), the analyzer is invoked on the
+  // fly using whatever registry-like metadata is available in the record.
+  // -----------------------------------------------------------------------
+
+  app.get("/packages/:ecosystem/:name/versions/:version/supply-chain-health", async (c) => {
+    const ecosystem = c.req.param("ecosystem") as Ecosystem;
+    const name = c.req.param("name");
+    const version = c.req.param("version");
+
+    const analysis = await getServices(c).repository.getPackage(ecosystem, name, version);
+
+    if (!analysis) {
+      return c.json({ error: "Analysis not found" }, 404);
+    }
+
+    // Fast path: health already computed by the worker pipeline
+    if (analysis.supplyChainHealth) {
+      return c.json(analysis.supplyChainHealth);
+    }
+
+    // Slow path: compute on-the-fly from whatever metadata is available
+    try {
+      const { SupplyChainHealthAnalyzer } = await import("@binshield/supply-chain-health");
+      const schAnalyzer = new SupplyChainHealthAnalyzer();
+
+      const directDeps = Object.keys(analysis.manifestAnalysis
+        ? {} // manifest doesn't carry dep map in this shape
+        : {});
+
+      const registryMeta =
+        ecosystem === "pypi"
+          ? SupplyChainHealthAnalyzer.buildPypiMetadata({
+              info: {
+                name: analysis.packageName,
+                version: analysis.version,
+                license: null,
+                requires_dist: directDeps,
+                author: null,
+                maintainer: null,
+              },
+              releases: {},
+            })
+          : SupplyChainHealthAnalyzer.buildNpmMetadata({
+              name: analysis.packageName,
+              versions: {
+                [analysis.version]: {
+                  dependencies: {},
+                  license: undefined,
+                },
+              },
+              maintainers: [],
+            });
+
+      const health = schAnalyzer.analyze(registryMeta, analysis.version, {}, directDeps);
+      return c.json(health);
+    } catch (err) {
+      console.error(
+        `[BinShield API] supply-chain health on-the-fly failed for ${ecosystem}/${name}@${version}:`,
+        err instanceof Error ? err.message : err
+      );
+      return c.json({ error: "Supply-chain health analysis failed" }, 500);
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /orgs/:orgId/packages/:pkg/health
+  //
+  // Org-scoped supply-chain health endpoint.
+  //
+  // Route pattern: /orgs/{orgId}/packages/{pkg}@{ver}/health
+  // where `pkg` is URL-encoded and may include "@version" suffix
+  // (e.g. "lodash%401.0.0" or "lodash" — version defaults to "latest").
+  //
+  // Also supports explicit ?version=<ver> query param.
+  //
+  // Returns: SupplyChainHealthResult from @binshield/supply-chain-health
+  // -----------------------------------------------------------------------
+
+  app.get("/orgs/:orgId/packages/:pkg/health", async (c) => {
+    const orgId = c.req.param("orgId");
+    const { error } = await getOrgAuth(c, orgId);
+    if (error) {
+      return c.json({ error: error.message }, error.status);
+    }
+
+    // Parse package name + version from the :pkg segment.
+    // Callers may encode as "lodash%401.2.3" (@ URL-encoded) or pass
+    // ?version= separately; both forms are supported.
+    const rawPkg = decodeURIComponent(c.req.param("pkg"));
+    const atIndex = rawPkg.lastIndexOf("@");
+
+    let packageName: string;
+    let version: string;
+
+    if (atIndex > 0) {
+      // "lodash@4.17.21" — split on last @
+      packageName = rawPkg.slice(0, atIndex);
+      version = rawPkg.slice(atIndex + 1);
+    } else {
+      packageName = rawPkg;
+      version = c.req.query("version") ?? "latest";
+    }
+
+    // Allow explicit ?version= to override the @version suffix
+    const versionOverride = c.req.query("version");
+    if (versionOverride) version = versionOverride;
+
+    const ecosystemParam = (c.req.query("ecosystem") ?? "npm") as Ecosystem;
+
+    if (!packageName || packageName.trim().length === 0) {
+      return c.json({ error: "Package name must not be empty" }, 400);
+    }
+
+    // Attempt to load stored analysis first (fast path)
+    const analysis = await getServices(c).repository.getPackage(
+      ecosystemParam,
+      packageName,
+      version === "latest" ? undefined : version
+    );
+
+    if (analysis?.supplyChainHealth) {
+      return c.json(analysis.supplyChainHealth);
+    }
+
+    // Slow path: compute on-the-fly via SupplyChainHealthAnalyzer
+    try {
+      const { SupplyChainHealthAnalyzer } = await import("@binshield/supply-chain-health");
+      const schAnalyzer = new SupplyChainHealthAnalyzer();
+
+      const resolvedVersion = analysis?.version ?? version;
+
+      const registryMeta =
+        ecosystemParam === "pypi"
+          ? SupplyChainHealthAnalyzer.buildPypiMetadata({
+              info: {
+                name: packageName,
+                version: resolvedVersion,
+                license: null,
+                requires_dist: null,
+                author: null,
+                maintainer: null,
+              },
+              releases: {},
+            })
+          : SupplyChainHealthAnalyzer.buildNpmMetadata({
+              name: packageName,
+              versions: {
+                [resolvedVersion]: {
+                  dependencies: {},
+                  license: undefined,
+                },
+              },
+              maintainers: [],
+            });
+
+      const health = schAnalyzer.analyze(registryMeta, resolvedVersion, {}, []);
+      return c.json(health);
+    } catch (err) {
+      console.error(
+        `[BinShield API] org-scoped supply-chain health failed for ` +
+        `org=${orgId} pkg=${packageName}@${version}:`,
+        err instanceof Error ? err.message : err
+      );
+      return c.json({ error: "Supply-chain health analysis failed" }, 500);
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // GET /api/analytics/dashboard
+  //
+  // Returns aggregated product KPIs for the past 7 days (or custom window).
+  // In Supabase mode, reads from the analytics_events table.
+  // In local/demo mode, aggregates from the in-memory collector buffer.
+  //
+  // Query params:
+  //   window_days — lookback window in days (1–90, default 7)
+  // -----------------------------------------------------------------------
+
+  app.get("/api/analytics/dashboard", async (c) => {
+    const auth = c.get("auth");
+    if (!auth) {
+      return c.json({ error: "API key required" }, 401);
+    }
+
+    const windowDaysRaw = Number(c.req.query("window_days") ?? 7);
+    const windowDays = Number.isFinite(windowDaysRaw)
+      ? Math.min(Math.max(Math.floor(windowDaysRaw), 1), 90)
+      : 7;
+
+    const { env } = getServices(c);
+
+    // Supabase mode: query analytics_events table
+    if (env.supabaseUrl && env.supabaseServiceRoleKey) {
+      try {
+        const since = new Date();
+        since.setDate(since.getDate() - windowDays);
+        const baseUrl = env.supabaseUrl.replace(/\/$/, "");
+        const res = await fetch(
+          `${baseUrl}/rest/v1/analytics_events` +
+          `?timestamp=gte.${since.toISOString()}` +
+          `&select=event_type,org_id,demo,timestamp,payload` +
+          `&order=timestamp.desc&limit=10000`,
+          {
+            headers: {
+              apikey: env.supabaseServiceRoleKey,
+              authorization: `Bearer ${env.supabaseServiceRoleKey}`
+            }
+          }
+        );
+        if (res.ok) {
+          const rows = await res.json() as Array<{
+            event_type: string;
+            org_id: string | null;
+            demo: boolean;
+            timestamp: string;
+            payload: Record<string, unknown>;
+          }>;
+          const kpis = dashboardAggregator.computeFromRows(rows, windowDays);
+          return c.json(kpis);
+        }
+      } catch (err) {
+        console.error("[BinShield API] analytics dashboard Supabase query failed:", err instanceof Error ? err.message : err);
+        // Fall through to in-memory aggregation
+      }
+    }
+
+    // Local/demo mode: aggregate from in-memory buffer
+    const kpis = dashboardAggregator.compute(analyticsCollector.snapshot(), windowDays);
+    return c.json(kpis);
+  });
+
+  // -----------------------------------------------------------------------
+  // POST /lockfiles/analyze — deterministic dependency graph risk aggregation
+  // -----------------------------------------------------------------------
+  // Accepts a lockfile (package-lock.json JSON or pnpm-lock.yaml/requirements.txt text),
+  // builds a full adjacency graph, and returns risk aggregation + circular dep detection.
+  // No auth required — purely computational, no data persisted.
+  // -----------------------------------------------------------------------
+  app.post("/lockfiles/analyze", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Request body must be valid JSON" }, 400);
+    }
+
+    if (!body || typeof body !== "object") {
+      return c.json({ error: "Request body must be a JSON object" }, 400);
+    }
+
+    const {
+      filename,
+      content,
+      riskScores: rawRiskScores,
+      directDeps: rawDirectDeps,
+      vulnFixInfos: rawVulnFixInfos,
+    } = body as Record<string, unknown>;
+
+    if (!filename || typeof filename !== "string" || filename.trim() === "") {
+      return c.json({ error: "Missing required field: filename" }, 400);
+    }
+    if (!content || typeof content !== "string") {
+      return c.json({ error: "Missing required field: content (lockfile text or JSON string)" }, 400);
+    }
+    if (content.length > 10 * 1024 * 1024) {
+      return c.json({ error: "Lockfile content exceeds 10 MB limit" }, 413);
+    }
+
+    // Build optional risk score map
+    const riskScoreMap = new Map<string, number>();
+    if (rawRiskScores && typeof rawRiskScores === "object" && !Array.isArray(rawRiskScores)) {
+      for (const [pkg, score] of Object.entries(rawRiskScores as Record<string, unknown>)) {
+        if (typeof score === "number" && score >= 0 && score <= 100) {
+          riskScoreMap.set(pkg, score);
+        }
+      }
+    }
+
+    // Build optional direct-dep list (used for orphan detection)
+    const directDepNames: string[] = [];
+    if (Array.isArray(rawDirectDeps)) {
+      for (const d of rawDirectDeps) {
+        if (typeof d === "string" && d.trim()) directDepNames.push(d.trim());
+      }
+    }
+
+    // Build optional vuln fix infos (used for patchability cascade analysis)
+    const vulnFixInfos: VulnFixInfo[] = [];
+    if (Array.isArray(rawVulnFixInfos)) {
+      for (const item of rawVulnFixInfos) {
+        if (
+          item &&
+          typeof item === "object" &&
+          typeof (item as Record<string, unknown>).cveId === "string" &&
+          typeof (item as Record<string, unknown>).packageName === "string" &&
+          typeof (item as Record<string, unknown>).currentVersion === "string"
+        ) {
+          const entry = item as Record<string, unknown>;
+          const publishedVersionsSinceVuln: string[] = Array.isArray(entry.publishedVersionsSinceVuln)
+            ? (entry.publishedVersionsSinceVuln as unknown[]).filter((v): v is string => typeof v === "string")
+            : [];
+          const severity = entry.severity;
+          vulnFixInfos.push({
+            cveId: entry.cveId as string,
+            packageName: entry.packageName as string,
+            currentVersion: entry.currentVersion as string,
+            publishedVersionsSinceVuln,
+            severity:
+              severity === "CRITICAL" || severity === "HIGH" || severity === "MEDIUM" || severity === "LOW"
+                ? severity
+                : undefined,
+          });
+        }
+      }
+    }
+
+    // Detect format and build the graph
+    const base = filename.split("/").pop()?.toLowerCase() ?? filename.toLowerCase();
+
+    let analysis: LockfileGraphAnalysis;
+    try {
+      if (base === "package-lock.json" || base === "npm-shrinkwrap.json") {
+        let lockJson: Record<string, unknown>;
+        try {
+          lockJson = JSON.parse(content) as Record<string, unknown>;
+        } catch {
+          return c.json({ error: "package-lock.json content is not valid JSON" }, 400);
+        }
+        const nodes = buildNpmLockfileGraph(lockJson, riskScoreMap);
+        analysis = analyzeLockfileGraph(nodes, directDepNames, vulnFixInfos);
+      } else if (base === "pnpm-lock.yaml" || base === "pnpm-lock.yml") {
+        const nodes = buildPnpmLockfileGraph(content, riskScoreMap);
+        analysis = analyzeLockfileGraph(nodes, directDepNames, vulnFixInfos);
+      } else if (base === "requirements.txt") {
+        const nodes = buildRequirementsTxtGraph(content, riskScoreMap);
+        analysis = analyzeLockfileGraph(nodes, directDepNames, vulnFixInfos);
+      } else {
+        // Try content-based auto-detection
+        const detected = detectLockfileFormat(filename, content);
+        if (detected === "npm") {
+          let lockJson: Record<string, unknown>;
+          try {
+            lockJson = JSON.parse(content) as Record<string, unknown>;
+          } catch {
+            return c.json({ error: "Detected npm lockfile but content is not valid JSON" }, 400);
+          }
+          const nodes = buildNpmLockfileGraph(lockJson, riskScoreMap);
+          analysis = analyzeLockfileGraph(nodes, directDepNames, vulnFixInfos);
+        } else if (detected === "pnpm") {
+          const nodes = buildPnpmLockfileGraph(content, riskScoreMap);
+          analysis = analyzeLockfileGraph(nodes, directDepNames, vulnFixInfos);
+        } else {
+          return c.json(
+            {
+              error:
+                "Unrecognized lockfile format. Supported filenames: " +
+                "package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, requirements.txt",
+            },
+            400
+          );
+        }
+      }
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : "Graph analysis failed" },
+        500
+      );
+    }
+
+    return c.json(analysis, 200);
+  });
+
+  app.get("/packages/:ecosystem/confusable/:name", async (c) => {
+    const rawEcosystem = c.req.param("ecosystem");
+    const name = decodeURIComponent(c.req.param("name"));
+
+    if (rawEcosystem !== "npm" && rawEcosystem !== "pypi") {
+      return c.json(
+        { error: "ecosystem must be 'npm' or 'pypi' for name intelligence checks" },
+        400
+      );
+    }
+
+    const ecosystem = rawEcosystem as PkgIntelEcosystem;
+
+    if (!name || name.trim().length === 0) {
+      return c.json({ error: "package name must not be empty" }, 400);
+    }
+
+    // Optional: caller can assert the name is present on both ecosystems
+    const crossEcosystem = c.req.query("crossEcosystem") === "true";
+
+    const intelligence = new PackageNameIntelligence();
+    const result = intelligence.analyze(name, ecosystem, crossEcosystem);
+
+    return c.json(result);
   });
 
   return app;

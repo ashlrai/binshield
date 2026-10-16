@@ -10,12 +10,18 @@
     "seed": "tsx src/seed.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run src",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "benchmark": "tsx scripts/benchmark.ts"
   },
   "dependencies": {
     "@binshield/analysis-types": "workspace:*",
+    "@binshield/analytics-collector": "workspace:*",
     "@binshield/config": "workspace:*",
+    "@binshield/malware-engines": "workspace:*",
+    "@binshield/package-intelligence": "workspace:*",
     "@binshield/risk-engine": "workspace:*",
+    "@binshield/feed-sync-engine": "workspace:*",
+    "@binshield/supply-chain-health": "workspace:*",
     "tsx": "^4.19.3"
   },
   "devDependencies": {}

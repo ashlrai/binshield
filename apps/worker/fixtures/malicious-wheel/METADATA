@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: evil-package
+Version: 0.0.1
+Summary: TEST FIXTURE — malicious wheel with network-calling native extension

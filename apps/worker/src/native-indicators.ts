@@ -57,6 +57,47 @@ export function isNativePackage(name: string, dependencies?: Record<string, stri
 }
 
 /**
+ * Python native extension file extensions (.so, .pyd on Windows, .dylib on macOS).
+ * Also matches CPython ABI-tagged filenames like `_ssl.cpython-311-x86_64-linux-gnu.so`.
+ */
+export const PYTHON_NATIVE_EXTENSIONS = [".so", ".pyd", ".dylib"];
+
+/**
+ * Regex matching CPython ABI tags embedded in wheel filenames.
+ * Examples:
+ *   numpy-1.26.4-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+ *   cryptography-41.0.5-cp311-cp311-linux_x86_64.whl
+ *
+ * The tag format is: {python}-{abi}-{platform}
+ * where python starts with "cp" (CPython), "pp" (PyPy), or "cp3" etc.
+ */
+export const PYPI_ABI_TAG_RE =
+  /-(cp\d+|pp\d+|cp3\d*|py\d+)-(cp\d+|abi3|none)-(linux_\w+|manylinux[\w.]+|musllinux_\w+|macosx_[\w.]+|win\w*|aarch64|x86_64)\./i;
+
+/**
+ * Returns true if a wheel filename contains a CPython/PyPy ABI tag indicating
+ * it ships compiled native extensions for a specific platform.
+ */
+export function hasPyPiAbiTag(filename: string): boolean {
+  return PYPI_ABI_TAG_RE.test(filename);
+}
+
+/**
+ * Returns true if a file path looks like a Python native extension binary
+ * (.so / .pyd / .dylib), optionally with a CPython ABI suffix such as
+ * `_ssl.cpython-311-x86_64-linux-gnu.so`.
+ */
+export function isPythonNativeExtension(filename: string): boolean {
+  const ext = filename.toLowerCase();
+  if (PYTHON_NATIVE_EXTENSIONS.some((e) => ext.endsWith(e))) return true;
+  // Match CPython ABI-tagged shared objects: foo.cpython-311-x86_64-linux-gnu.so
+  if (/\.cpython-\d+-[\w-]+\.so$/i.test(filename)) return true;
+  // Match PyPy ABI-tagged: foo.pypy311-pp73-x86_64-linux-gnu.so
+  if (/\.pypy\d+-pp\d+-[\w-]+\.so$/i.test(filename)) return true;
+  return false;
+}
+
+/**
  * Check if a package.json has native binary indicators.
  */
 export function hasNativeIndicators(pkg: {
