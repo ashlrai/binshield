@@ -1,6 +1,11 @@
 name: CI
 
 on:
+  # push is scoped to main only: pull_request already covers every branch/PR,
+  # and firing push unconditionally too causes duplicate concurrent runs for
+  # the same commit (push + pull_request), which starves apps/worker's
+  # binary-extraction tests of CPU and trips their 5s timeouts under
+  # contention. main-only push still gets `verify` on every merge commit.
   push:
     branches: [main]
   pull_request:
@@ -13,7 +18,7 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

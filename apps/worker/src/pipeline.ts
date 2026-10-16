@@ -3,11 +3,30 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { ManifestAnalysis, PackageAnalysis } from "@binshield/analysis-types";
-import { aggregatePackageRiskWithManifest, summarizePackage, scoreBinary } from "@binshield/risk-engine";
+import { AnalyticsCollector } from "@binshield/analytics-collector";
+import { AnalyzerRegistry, getSharedMatchingEngine, PyPiBinaryRepackagingAnalyzer, BinaryProvenanceRegistry } from "@binshield/malware-engines";
+import type { OsvMatchResult } from "@binshield/malware-engines";
+import {
+  aggregatePackageRiskWithManifest,
+  summarizePackage,
+  scoreBinary,
+  scoreWithActiveVulnerabilities
+} from "@binshield/risk-engine";
+import type { ActiveVulnerability } from "@binshield/risk-engine";
+import { SupplyChainHealthAnalyzer, toHealthFinding } from "@binshield/supply-chain-health";
+import {
+  DepGraphEnricher,
+  NvdFeedIngester,
+  CisaKevSyncer,
+  type DepGraphEntry,
+  type DepGraphEnrichmentResult
+} from "@binshield/feed-sync-engine";
 
 import { buildCacheKey, InMemoryAnalysisCache } from "./cache";
 import { FileSystemBinaryExtractor } from "./extractor";
 import { InMemoryJobStore } from "./job-store";
+import { verifyWheelProvenanceAttestation } from "./pypi-wheel-provenance-attestator.js";
+import { PySdistExtractorAndAnalyzer } from "./pypi-sdist-binary-extractor.js";
 import {
   createDefaultDecompilerProvider,
   createDefaultClassifierProvider,
@@ -113,10 +132,13 @@ function toAnalysisPackage(
     fingerprint: FingerprintedArtifact;
     decompiled: { pseudoSource: string; imports: string[]; strings: string[]; functionCount: number; callTargets: string[]; confidence: number };
     classified: ClassifiedArtifact;
+    malwareDetectionResults?: import("@binshield/analysis-types").MalwareDetectionResult[];
   }>,
-  manifestAnalysis: ManifestAnalysis
+  manifestAnalysis: ManifestAnalysis,
+  supplyChainHealth?: import("@binshield/analysis-types").SupplyChainHealthResult,
+  depGraphEnrichment?: DepGraphEnrichmentResult[]
 ): PackageAnalysis {
-  const binaries = classifiedArtifacts.map(({ fingerprint, decompiled, classified }) => {
+  const binaries = classifiedArtifacts.map(({ fingerprint, decompiled, classified, malwareDetectionResults }) => {
     const scored = scoreBinary({
       behaviors: classified.behaviors,
       findings: classified.findings,
@@ -139,7 +161,8 @@ function toAnalysisPackage(
       imports: decompiled.imports,
       strings: decompiled.strings,
       behaviors: classified.behaviors,
-      findings: classified.findings
+      findings: classified.findings,
+      ...(malwareDetectionResults !== undefined ? { malwareDetectionResults } : {})
     };
   });
 
@@ -159,10 +182,42 @@ function toAnalysisPackage(
     aiModel: "binshield-worker",
     createdAt: new Date().toISOString(),
     binaries,
-    manifestAnalysis
+    manifestAnalysis,
+    ...(supplyChainHealth !== undefined ? { supplyChainHealth } : {})
   };
 
-  const aggregate = aggregatePackageRiskWithManifest(binaries, manifestAnalysis);
+  // Build ActiveVulnerability list from dep-graph enrichment results.
+  // Each enrichment entry carries matched CVE IDs, KEV flag, and EPSS
+  // percentile — enough to drive scoreWithActiveVulnerabilities.
+  // feedUpdatedAt is set to the enrichedAt timestamp of each entry so the
+  // staleness guard in the risk engine works correctly.
+  const activeVulnerabilities: ActiveVulnerability[] = [];
+  if (depGraphEnrichment && depGraphEnrichment.length > 0) {
+    for (const entry of depGraphEnrichment) {
+      for (const cveId of entry.matchedCveIds) {
+        activeVulnerabilities.push({
+          cveId,
+          epssPercentile: entry.highestEpssPercentile,
+          isKev: entry.hasKevMatch,
+          exploitMaturity: entry.hasKevMatch ? "active-exploitation" : undefined,
+          // No patch info available at this level — treat as no-patch-context
+          patchedVersion: undefined,
+          patchAvailableButUnmerged: undefined,
+          feedUpdatedAt: entry.enrichedAt
+        });
+      }
+    }
+  }
+
+  let aggregate: { riskScore: number; riskLevel: import("@binshield/analysis-types").RiskLevel };
+  if (activeVulnerabilities.length > 0) {
+    const scored = scoreWithActiveVulnerabilities(binaries, manifestAnalysis, activeVulnerabilities);
+    aggregate = { riskScore: scored.riskScore, riskLevel: scored.riskLevel };
+    packageAnalysis.activeThreatContext = scored.activeThreatContext;
+  } else {
+    aggregate = aggregatePackageRiskWithManifest(binaries, manifestAnalysis);
+  }
+
   packageAnalysis.riskScore = aggregate.riskScore;
   packageAnalysis.riskLevel = aggregate.riskLevel;
   packageAnalysis.summary = buildPackageSummary(packageAnalysis);
@@ -189,6 +244,24 @@ function createAcquisitionForRequest(request: WorkerScanRequest, acquisition: An
   return acquisition;
 }
 
+// Module-level analytics collector for the worker process.
+// Demo mode is auto-detected from BINSHIELD_DEMO env var; no Supabase
+// credentials are needed when running locally.
+const workerAnalytics = new AnalyticsCollector({
+  supabaseUrl: process.env.SUPABASE_URL,
+  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY
+});
+
+// Module-level feed ingestors — shared across all WorkerRuntime instances so
+// that the NVD/KEV snapshot is built once per process and stays warm.
+const sharedNvdIngester = new NvdFeedIngester();
+const sharedKevSyncer = new CisaKevSyncer();
+
+// Module-level binary provenance registry — shared across all WorkerRuntime
+// instances so that cross-package repackaging detection accumulates knowledge
+// across scans within the same process lifetime.
+const sharedProvenanceRegistry = new BinaryProvenanceRegistry();
+
 export class WorkerRuntime {
   constructor(private readonly services: AnalysisServiceBundle = createDefaultBundle()) {}
 
@@ -200,20 +273,73 @@ export class WorkerRuntime {
   async process(jobId: string): Promise<AnalysisOutcome> {
     const submitted = this.services.jobs.start(jobId);
     const request = submitted.request;
+    const pipelineStart = Date.now();
     const packageSource = createAcquisitionForRequest(request, this.services.acquisition);
 
     const acquired = await packageSource.acquire(request);
     const scriptInput: ScriptAnalysisInput = {
       packageRequest: request,
       packageRoot: acquired.packageRoot,
-      manifest: acquired.manifest
+      manifest: acquired.manifest,
+      buildSystemType: acquired.buildSystemType,
+      pythonBuildThreatDetails: acquired.pythonBuildThreatDetails
     };
+    // OSV malware feed cross-reference — runs before AI classification so that
+    // known-worm packages are flagged immediately without waiting for the full
+    // binary analysis pipeline.  The MatchingEngine is in-memory so this is
+    // synchronous and <5ms.  Results are attached to the manifest analysis via
+    // the knownMalwareAdvisoryIds / knownMalwareMatches fields.
+    const osvEcosystem = request.ecosystem === "pypi" ? "PyPI" : "npm";
+    const osvMatchResult: OsvMatchResult = getSharedMatchingEngine().match(
+      request.packageName,
+      request.version,
+      osvEcosystem
+    );
+
+    if (osvMatchResult.matched) {
+      console.log(
+        `[BinShield] OSV malware match (${osvMatchResult.matchType}): ` +
+          `${request.packageName}@${request.version} — ` +
+          osvMatchResult.findings.map((f) => f.advisoryId).join(", ")
+      );
+    }
+
     // Install-script analysis runs concurrently with binary discovery — it is
     // independent of the binaries and feeds the cache key below.
     const [artifacts, manifestAnalysis] = await Promise.all([
       this.services.extraction.discover(acquired.packageRoot),
       this.services.scriptAnalyzer.analyze(scriptInput)
     ]);
+
+    // Merge OSV match findings into the manifest analysis so they appear in
+    // the knownMalwareAdvisoryIds list and affect risk scoring downstream.
+    if (osvMatchResult.matched && osvMatchResult.findings.length > 0) {
+      const existingIds = new Set(manifestAnalysis.knownMalwareAdvisoryIds);
+      for (const finding of osvMatchResult.findings) {
+        if (!existingIds.has(finding.advisoryId)) {
+          manifestAnalysis.knownMalwareAdvisoryIds.push(finding.advisoryId);
+          existingIds.add(finding.advisoryId);
+        }
+      }
+      // Attach structured match objects for provenance (advisory ID + link)
+      if (!manifestAnalysis.knownMalwareMatches) {
+        manifestAnalysis.knownMalwareMatches = [];
+      }
+      const existingMatchIds = new Set(
+        manifestAnalysis.knownMalwareMatches.map((m) => m.advisoryId)
+      );
+      for (const finding of osvMatchResult.findings) {
+        if (!existingMatchIds.has(finding.advisoryId)) {
+          manifestAnalysis.knownMalwareMatches.push({
+            advisoryId: finding.advisoryId,
+            source: "osv",
+            summary: finding.summary,
+            url: finding.advisoryUrl,
+          });
+          existingMatchIds.add(finding.advisoryId);
+        }
+      }
+    }
     const artifactHashes = artifacts.map((artifact) => artifact.sha256);
     const cacheKey = buildCacheKey(request, [
       ...artifactHashes,
@@ -223,6 +349,16 @@ export class WorkerRuntime {
     const cached = !request.forceReanalyze ? this.services.cache.get(cacheKey) : undefined;
     if (cached) {
       const completed = this.services.jobs.cache(jobId, cached.analysis, artifactHashes, cacheKey);
+      workerAnalytics.scanCompleted({
+        ecosystem: request.ecosystem,
+        packageName: request.packageName,
+        version: request.version,
+        binaryCount: cached.analysis.binaryCount,
+        durationMs: Date.now() - pipelineStart,
+        riskLevel: cached.analysis.riskLevel as "none" | "low" | "medium" | "high" | "critical",
+        riskScore: cached.analysis.riskScore,
+        cached: true
+      });
       return {
         job: completed,
         analysis: cached.analysis,
@@ -234,26 +370,236 @@ export class WorkerRuntime {
       fingerprint: FingerprintedArtifact;
       decompiled: DecompiledArtifact;
       classified: ClassifiedArtifact;
+      malwareDetectionResults?: import("@binshield/analysis-types").MalwareDetectionResult[];
     }> = [];
 
+    // Create the malware-engines registry once per process call so all
+    // artifacts share the same instance.
+    const malwareRegistry = AnalyzerRegistry.createDefault();
+
+    // Register the PyPI binary repackaging analyzer — uses the process-level
+    // shared provenance registry so knowledge accumulates across scans.
+    const repackagingAnalyzer = new PyPiBinaryRepackagingAnalyzer({
+      registry: sharedProvenanceRegistry,
+    });
+    malwareRegistry.register(repackagingAnalyzer);
+
     for (const fingerprint of artifacts) {
+      const binaryBuffer = Buffer.from(fingerprint.bytes);
+
+      // Set per-binary context on the repackaging analyzer before each run
+      // so it can record (packageName, version, binaryPath) in the registry.
+      repackagingAnalyzer.setContext({
+        packageName: request.packageName,
+        version: request.version,
+        binaryPath: fingerprint.relativePath,
+        ecosystem: request.ecosystem === "pypi" ? "pypi" : "npm",
+      });
+
+      // Stage 1: decompile the binary (classifier depends on its output).
       const decompiled = await this.services.decompiler.decompile({
         packageRequest: request,
         packageRoot: acquired.packageRoot,
         artifact: fingerprint
       });
 
-      const classified = await this.services.classifier.classify({
-        packageRequest: request,
-        packageRoot: acquired.packageRoot,
-        artifact: fingerprint,
-        decompiled
-      });
+      // Stage 2: run classifier and malware-engines registry in parallel.
+      // The registry works directly on raw bytes and is independent of
+      // decompiled output, so these two can safely run concurrently.
+      const [classified, malwareRun] = await Promise.all([
+        this.services.classifier.classify({
+          packageRequest: request,
+          packageRoot: acquired.packageRoot,
+          artifact: fingerprint,
+          decompiled
+        }),
+        malwareRegistry.runAll(binaryBuffer)
+      ]);
 
-      classifiedArtifacts.push({ fingerprint, decompiled, classified });
+      const malwareDetectionResults: import("@binshield/analysis-types").MalwareDetectionResult[] =
+        malwareRun.results.map((r) => ({
+          analyzerName: r.analyzerName,
+          analyzerVersion: r.analyzerVersion,
+          detected: r.detected,
+          signals: r.signals,
+          confidence: r.confidence
+        }));
+
+      classifiedArtifacts.push({
+        fingerprint,
+        decompiled,
+        classified,
+        malwareDetectionResults
+      });
     }
 
-    const analysis = toAnalysisPackage(request, acquired.manifest, classifiedArtifacts, manifestAnalysis);
+    // Supply-chain health analysis — runs after binary classification since it
+    // only needs registry metadata (already present in acquired.manifest) and
+    // the dependency graph from the manifest.  Runs best-effort: failures are
+    // caught so they never block the main analysis pipeline.
+    let supplyChainHealth: import("@binshield/analysis-types").SupplyChainHealthResult | undefined;
+    try {
+      const schAnalyzer = new SupplyChainHealthAnalyzer();
+      const directDeps = Object.keys(acquired.manifest.dependencies ?? {});
+      const depGraph: Record<string, string[]> = {};
+      for (const dep of directDeps) {
+        depGraph[dep] = [];
+      }
+      const registryMeta =
+        request.ecosystem === "pypi"
+          ? SupplyChainHealthAnalyzer.buildPypiMetadata({
+              info: {
+                name: acquired.manifest.name,
+                version: acquired.manifest.version,
+                license: null,
+                requires_dist: directDeps,
+                author: null,
+                maintainer: null,
+              },
+              releases: {},
+            })
+          : SupplyChainHealthAnalyzer.buildNpmMetadata({
+              name: acquired.manifest.name,
+              versions: {
+                [acquired.manifest.version]: {
+                  dependencies: acquired.manifest.dependencies ?? {},
+                  license: undefined,
+                },
+              },
+              maintainers: [],
+            });
+      supplyChainHealth = schAnalyzer.analyze(
+        registryMeta,
+        acquired.manifest.version,
+        depGraph,
+        directDeps
+      ) as unknown as import("@binshield/analysis-types").SupplyChainHealthResult;
+    } catch (err) {
+      console.warn(
+        "[BinShield] supply-chain health analysis failed (non-fatal):",
+        err instanceof Error ? err.message : err
+      );
+    }
+
+    // Feed-sync enrichment — cross-reference all direct dependencies against
+    // the NVD/CISA-KEV snapshot to produce per-dep vulnerability counts and
+    // highest EPSS percentile.  Runs best-effort: failures are caught so they
+    // never block the main analysis pipeline.
+    let depGraphEnrichment: DepGraphEnrichmentResult[] = [];
+    try {
+      const depEntries: DepGraphEntry[] = Object.entries(
+        acquired.manifest.dependencies ?? {}
+      ).map(([packageName, version]) => ({ packageName, version }));
+
+      if (depEntries.length > 0) {
+        const enricher = new DepGraphEnricher(
+          sharedNvdIngester.getSnapshot(),
+          sharedKevSyncer
+        );
+        depGraphEnrichment = enricher.enrich(depEntries);
+      }
+    } catch (err) {
+      console.warn(
+        "[BinShield] dep-graph feed enrichment failed (non-fatal):",
+        err instanceof Error ? err.message : err
+      );
+    }
+
+    // PyPI sdist binary extraction & analysis — runs best-effort in parallel
+    // with the wheel provenance step for PyPI packages that ship an sdist.
+    // Findings are merged into manifestAnalysis.findings so they flow through
+    // the existing risk-score aggregation path.
+    //
+    // This closes the gap where wheel scanning catches compiled binaries in
+    // .whl files but sdists were only scanned for source-level build threats.
+    // Attackers increasingly embed pre-built .so/.pyd/.dll binaries inside
+    // sdist archives (in build/, _vendor/, etc.) to bypass wheel analysis.
+    let sdistBinaryAnalysisPromise: Promise<void> | undefined;
+    if (request.ecosystem === "pypi") {
+      sdistBinaryAnalysisPromise = (async () => {
+        try {
+          const sdistAnalyzer = new PySdistExtractorAndAnalyzer();
+          // When the package was acquired as a local directory (sdist extracted
+          // by PyPiPackageSource), analyse that directory directly to avoid a
+          // redundant download.  Otherwise skip — the caller's acquisition path
+          // did not produce an sdist root we can inspect.
+          if (acquired.packageRoot) {
+            const sdistResult = await sdistAnalyzer.analyzeFromDirectory(
+              request.packageName,
+              request.version,
+              acquired.packageRoot
+            );
+            if (sdistResult.hasNativeBinaries) {
+              console.log(
+                `[BinShield] sdist binary analysis: ${sdistResult.nativeBinaries.length} native ` +
+                `binary/binaries found in ${request.packageName}@${request.version} sdist`
+              );
+              // Merge all findings (medium+) into manifestAnalysis
+              for (const finding of sdistResult.findings) {
+                if (
+                  finding.severity === "medium" ||
+                  finding.severity === "high" ||
+                  finding.severity === "critical"
+                ) {
+                  manifestAnalysis.findings.push(finding);
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.warn(
+            "[BinShield] pypi sdist binary extraction failed (non-fatal):",
+            err instanceof Error ? err.message : err
+          );
+        }
+      })();
+    }
+
+    // Await the sdist binary analysis before building the final PackageAnalysis
+    // so its findings are included in risk scoring.
+    if (sdistBinaryAnalysisPromise) {
+      await sdistBinaryAnalysisPromise;
+    }
+
+    const analysis = toAnalysisPackage(request, acquired.manifest, classifiedArtifacts, manifestAnalysis, supplyChainHealth, depGraphEnrichment);
+
+    // PyPI wheel provenance + attestation verification — runs best-effort for
+    // PyPI packages.  Failures are caught so they never block the pipeline.
+    // The result is attached to manifestAnalysis.findings so it flows through
+    // the existing risk-score aggregation.
+    if (request.ecosystem === "pypi") {
+      try {
+        const provenanceResult = await verifyWheelProvenanceAttestation(
+          request.packageName,
+          request.version,
+          {
+            githubToken: process.env.GITHUB_TOKEN,
+            skipTimestampCheck: !process.env.GITHUB_TOKEN, // only run if token available
+            skipBuildLogCheck: !process.env.GITHUB_TOKEN,
+          }
+        );
+        // Merge high-severity provenance findings into the manifest analysis
+        for (const pf of provenanceResult.findings) {
+          if (pf.severity === "high" || pf.severity === "critical") {
+            manifestAnalysis.findings.push({
+              category: "wheelNativeBinary",
+              severity: pf.severity,
+              title: pf.title,
+              description: pf.description,
+              filePath: provenanceResult.wheelFilename ?? request.packageName,
+              evidence: JSON.stringify(pf.evidence),
+              recommendation: pf.recommendation,
+            });
+          }
+        }
+      } catch (err) {
+        console.warn(
+          "[BinShield] pypi wheel provenance attestation failed (non-fatal):",
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+
     this.services.cache.set({
       cacheKey,
       artifactHashes,
@@ -262,6 +608,23 @@ export class WorkerRuntime {
     });
 
     const completed = this.services.jobs.complete(jobId, analysis, artifactHashes, cacheKey);
+
+    // Emit scan_completed analytics event (fire-and-forget, never throws)
+    try {
+      workerAnalytics.scanCompleted({
+        ecosystem: request.ecosystem,
+        packageName: request.packageName,
+        version: request.version,
+        binaryCount: analysis.binaryCount,
+        durationMs: Date.now() - pipelineStart,
+        riskLevel: analysis.riskLevel as "none" | "low" | "medium" | "high" | "critical",
+        riskScore: analysis.riskScore,
+        cached: false
+      });
+    } catch {
+      // analytics must never block the pipeline
+    }
+
     return {
       job: completed,
       analysis,

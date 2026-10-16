@@ -1,0 +1,8 @@
+{
+  "name": "binshield-fixture-shai-hulud",
+  "version": "1.0.0",
+  "description": "TEST FIXTURE — faithfully replicates the documented payload of the Shai-Hulud npm worm (September 2025). NOT real malware: every endpoint uses a reserved non-routable TLD and the payload exits before doing anything. Used to validate BinShield detection against a real-world worm technique.",
+  "scripts": {
+    "postinstall": "node bundle.js"
+  }
+}

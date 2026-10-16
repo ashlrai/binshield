@@ -23,7 +23,7 @@ No other tool decompiles these binaries to check what they actually do. Security
 
 ### One-Liner
 
-"Snyk for binaries -- we decompile your dependencies so attackers can't hide in compiled code."
+"Catch malicious install scripts and native binaries in npm and PyPI dependencies -- we decompile what source scanners skip."
 
 ### Who Uses BinShield
 
@@ -985,7 +985,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           fail-on: high
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -994,7 +994,7 @@ jobs:
 ### Full Configuration
 
 ```yaml
-- uses: ashlrai/binshield-action@v1
+- uses: ashlrai/binshield/apps/github-action@v1
   with:
     # BinShield API URL
     api-base-url: https://binshieldapi-production.up.railway.app

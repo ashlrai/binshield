@@ -23,6 +23,9 @@ import { scoreManifest } from "@binshield/risk-engine";
 
 import type { ScriptAnalysisInput } from "./types";
 import { evaluateScriptPatterns, redactEvidence } from "./threat-patterns";
+import { detectTyposquat } from "./typosquat";
+import { applyTrustedPackageDemotion } from "./trusted-packages";
+import { collectWheelNativeExtensions } from "./package-source";
 
 /** npm lifecycle hooks that execute automatically during `npm install`. */
 const AUTO_RUN_HOOKS = ["preinstall", "install", "postinstall", "prepare"];
@@ -90,6 +93,14 @@ export async function analyzeFromSources(
       ? sources.some((source) => source.label === "setup.py")
       : AUTO_RUN_HOOKS.some((hook) => Boolean(input.manifest.scripts?.[hook]));
 
+  // Collect Python native extensions from the extracted package tree.
+  // This covers both sdist (compiled during install) and wheel (pre-compiled)
+  // distributions. For wheels extracted by PyPiWheelPackageSource the
+  // packageRoot is the raw unzip directory that may contain .so / .pyd files.
+  const pythonExtensionFiles: string[] =
+    ecosystem === "pypi" ? await collectWheelNativeExtensions(input.packageRoot) : [];
+  const hasPythonBinaryExtension = pythonExtensionFiles.length > 0;
+
   const threats = emptyScriptThreatSummary();
   const findings: ScriptFinding[] = [];
   const seen = new Set<string>();
@@ -146,10 +157,86 @@ export async function analyzeFromSources(
     });
   }
 
+  // Python binary extensions in wheels: pre-compiled native code shipped
+  // inside the .whl zip. Treat this as a medium-severity finding so reviewers
+  // know that opaque compiled binaries are present — analogous to how
+  // node-gyp native addons are surfaced on the npm side.
+  if (hasPythonBinaryExtension) {
+    record({
+      category: "pythonBinaryExtension",
+      severity: "medium",
+      title: "Wheel contains compiled Python native extensions",
+      description: `The wheel ships ${pythonExtensionFiles.length} pre-compiled native extension${pythonExtensionFiles.length === 1 ? "" : "s"} (${pythonExtensionFiles.slice(0, 3).join(", ")}${pythonExtensionFiles.length > 3 ? ", …" : ""}). These are binary blobs that bypass source-code review and can contain arbitrary native code.`,
+      filePath: pythonExtensionFiles[0] ?? "wheel",
+      evidence: pythonExtensionFiles.slice(0, 5).join(", "),
+      recommendation:
+        "Verify the wheel was built from the published source tarball. Check PyPI provenance attestations when available, and confirm the binary against a reproducible build."
+    });
+  }
+
   // Dependency-confusion: a package `bin` that shadows a system command.
   for (const finding of await detectBinShadowing(input)) {
     record(finding);
   }
+
+  // Typosquatting: package name is suspiciously close to a popular package.
+  // Runs on npm packages only (PyPI squatting uses different patterns).
+  if (ecosystem === "npm") {
+    const typosquatFinding = detectTyposquat(input.manifest.name);
+    if (typosquatFinding) {
+      record(typosquatFinding);
+    }
+  }
+
+  // For PyPI packages: attach build-system threat details forwarded from the
+  // sdist acquisition step (PyPiPackageSource runs analyzePypiBuildSystem).
+  if (ecosystem === "pypi" && input.pythonBuildThreatDetails) {
+    const { detectedHooks, cythonFiles, suspiciousPatterns } = input.pythonBuildThreatDetails;
+
+    // Emit a finding for detected setuptools / build hooks
+    if (detectedHooks.length > 0) {
+      record({
+        category: "setupToolsHookExecution",
+        severity: "medium",
+        title: "Build system hooks execute code at install time",
+        description: `The package registers ${detectedHooks.length} custom build hook${detectedHooks.length === 1 ? "" : "s"} that run arbitrary Python during \`pip install\`: ${detectedHooks.slice(0, 3).join("; ")}${detectedHooks.length > 3 ? "; …" : ""}.`,
+        filePath: "setup.py",
+        evidence: detectedHooks.slice(0, 5).join("; "),
+        recommendation: "Review all cmdclass overrides and custom install/build_ext classes for unexpected shell invocations or network access."
+      });
+    }
+
+    // Emit a finding for Cython extension sources
+    if (cythonFiles.length > 0) {
+      record({
+        category: "cythonBinaryExtension",
+        severity: "medium",
+        title: "Package contains Cython extension sources compiled at install time",
+        description: `${cythonFiles.length} Cython source file${cythonFiles.length === 1 ? "" : "s"} (.pyx/.pxd) will be compiled into native code during installation: ${cythonFiles.slice(0, 3).join(", ")}${cythonFiles.length > 3 ? ", …" : ""}. Cython extensions can access system calls and C APIs directly.`,
+        filePath: cythonFiles[0] ?? "setup.py",
+        evidence: cythonFiles.slice(0, 5).join(", "),
+        recommendation: "Review Cython sources for direct system call usage (libc.stdlib cimport, ctypes, cffi) and verify they originate from the published source repository."
+      });
+    }
+
+    // Emit a finding for each suspicious build-config pattern (deduplicated, high severity)
+    for (const pattern of suspiciousPatterns.slice(0, 10)) {
+      record({
+        category: "setupToolsHookExecution",
+        severity: "high",
+        title: "Suspicious pattern in build configuration",
+        description: pattern,
+        filePath: "setup.py",
+        evidence: pattern.slice(0, 200),
+        recommendation: "Inspect the flagged build configuration code carefully before installing this package."
+      });
+    }
+  }
+
+  // Apply trusted-package demotion: for allowlisted packages, downgrade the
+  // benign installHook baseline from "low" → "info". High/critical findings,
+  // typosquat hits, and knownMalware are NEVER demoted — see trusted-packages.ts.
+  const demotedFindings = applyTrustedPackageDemotion(findings, input.manifest.name);
 
   const base: ManifestAnalysis = {
     id: `manifest_${input.manifest.name}_${input.manifest.version}`.replace(/[^a-zA-Z0-9_.@/-]/g, "_"),
@@ -160,10 +247,14 @@ export async function analyzeFromSources(
     riskScore: 0,
     riskLevel: "none",
     threats,
-    findings,
+    findings: demotedFindings,
     knownMalwareAdvisoryIds: [],
     sourceMatchConfidence: ecosystem === "pypi" ? "low" : "medium",
-    analyzedAt: new Date().toISOString()
+    analyzedAt: new Date().toISOString(),
+    hasPythonBinaryExtension: hasPythonBinaryExtension || undefined,
+    pythonExtensionFiles: pythonExtensionFiles.length > 0 ? pythonExtensionFiles : undefined,
+    buildSystemType: input.buildSystemType,
+    pythonBuildThreatDetails: input.pythonBuildThreatDetails
   };
 
   const scored = scoreManifest(base);

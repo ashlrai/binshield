@@ -25,11 +25,17 @@ export const SCRIPT_THREAT_KEYS = [
     "reverseShell",
     "remoteCodeExecution"
 ];
-/** Every ScriptThreatCategory — the summary keys plus obfuscation and knownMalware. */
+/** Every ScriptThreatCategory — the summary keys plus obfuscation, knownMalware, pythonBinaryExtension, PyPI build-system categories, wheelNativeBinary, pypi_binary_repackaging, and crossEcosystemConfusion. */
 export const SCRIPT_THREAT_CATEGORIES = [
     ...SCRIPT_THREAT_KEYS,
     "obfuscation",
-    "knownMalware"
+    "knownMalware",
+    "pythonBinaryExtension",
+    "setupToolsHookExecution",
+    "cythonBinaryExtension",
+    "wheelNativeBinary",
+    "pypi_binary_repackaging",
+    "crossEcosystemConfusion"
 ];
 export function entitlementForPlan(plan) {
     switch (plan) {
