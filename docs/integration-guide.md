@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           fail-on: high
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -30,7 +30,7 @@ jobs:
 Store your BinShield API key as a repository secret named `BINSHIELD_API_KEY`, then reference it:
 
 ```yaml
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           api-key: ${{ secrets.BINSHIELD_API_KEY }}
           fail-on: high
@@ -166,7 +166,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ashlrai/binshield-action@v1
+      - uses: ashlrai/binshield/apps/github-action@v1
         with:
           api-key: ${{ secrets.BINSHIELD_API_KEY }}
           fail-on: high
@@ -175,41 +175,12 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-### GitLab CI
+### GitLab CI, CircleCI and other CI systems (coming soon)
 
-```yaml
-binshield:
-  stage: test
-  image: node:20
-  script:
-    - npx @binshield/cli scan --fail-on high --format json > binshield-report.json
-  artifacts:
-    reports:
-      security: binshield-report.json
-  rules:
-    - if: $CI_MERGE_REQUEST_ID
-```
-
-### CircleCI
-
-```yaml
-version: 2.1
-
-jobs:
-  binshield:
-    docker:
-      - image: cimg/node:20.0
-    steps:
-      - checkout
-      - run:
-          name: BinShield scan
-          command: npx @binshield/cli scan --fail-on high
-
-workflows:
-  security:
-    jobs:
-      - binshield
-```
+Non-GitHub CI needs the `@binshield/cli` npm package, which is **not published
+yet**. Don't run `npx @binshield/cli` until it is: the name isn't live on npm.
+Until then, use the [GitHub Action](#github-actions-full-example) above, the
+[web app](https://binshield.dev/scan) or the [API](api-reference.md).
 
 ---
 

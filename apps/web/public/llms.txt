@@ -29,7 +29,7 @@ BinShield is a security platform that analyzes the compiled binary blobs inside 
    curl https://api.binshield.dev/packages/npm/bcrypt/versions/5.1.1
 
 3. Add the GitHub Action to your repo:
-   uses: ashlrai/binshield-action@v1
+   uses: ashlrai/binshield/apps/github-action@v1
    with:
      fail-on: high
 
@@ -103,7 +103,7 @@ Public endpoints (health, package search, package details, SBOM) do not require 
 ## GitHub Action
 
 ```yaml
-- uses: ashlrai/binshield-action@v1
+- uses: ashlrai/binshield/apps/github-action@v1
   with:
     fail-on: high          # critical | high | medium | low | never
     scan-mode: native-only # native-only | all-dependencies

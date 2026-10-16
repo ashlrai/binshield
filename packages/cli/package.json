@@ -1,10 +1,44 @@
 {
   "name": "@binshield/cli",
-  "version": "0.1.0",
-  "description": "CLI for BinShield binary supply-chain security",
-  "bin": { "binshield": "dist/index.js" },
+  "version": "0.2.0",
+  "description": "Zero-dependency CLI for BinShield — audit package dependencies and lockfiles for binary supply-chain risk",
+  "keywords": [
+    "security",
+    "supply-chain",
+    "binary-analysis",
+    "npm",
+    "cli",
+    "sbom",
+    "vulnerability"
+  ],
+  "homepage": "https://binshield.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ashlrai/binshield",
+    "directory": "packages/cli"
+  },
+  "license": "MIT",
   "type": "module",
-  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
-  "dependencies": {},
-  "keywords": ["security", "supply-chain", "binary-analysis", "npm", "cli"]
+  "bin": {
+    "binshield": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run src",
+    "prepublishOnly": "pnpm run build"
+  },
+  "dependencies": {
+    "@binshield/package-intelligence": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  }
 }

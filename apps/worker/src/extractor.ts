@@ -3,6 +3,7 @@ import { readdir } from "node:fs/promises";
 
 import type { BinaryExtractor, FingerprintedArtifact } from "./types";
 import { fingerprintFile, isCandidateBinary } from "./fingerprint";
+import { isPythonNativeExtension } from "./native-indicators";
 
 async function walkDirectory(rootDir: string, currentDir = rootDir, results: string[] = []): Promise<string[]> {
   const entries = await readdir(currentDir, { withFileTypes: true });
@@ -13,7 +14,7 @@ async function walkDirectory(rootDir: string, currentDir = rootDir, results: str
       await walkDirectory(rootDir, absolute, results);
       continue;
     }
-    if (entry.isFile() && isCandidateBinary(entry.name)) {
+    if (entry.isFile() && (isCandidateBinary(entry.name) || isPythonNativeExtension(entry.name))) {
       results.push(absolute);
     }
   }
