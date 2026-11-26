@@ -4,10 +4,10 @@ Thank you for your interest in contributing.
 
 ## Prerequisites
 
-- **Node.js** >= 20
-- **pnpm** 10.28.2 — install via Corepack:
+- **Node.js** 26.x
+- **pnpm** 10.28.2:
   ```bash
-  corepack enable
+  npm install --global pnpm@10.28.2
   ```
 
 ## Setup
