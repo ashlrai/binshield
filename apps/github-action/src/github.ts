@@ -2,7 +2,7 @@ import * as core from "@actions/core";
 import * as github from "@actions/github";
 
 import type { ScanOutcome } from "./types";
-import { renderComment, shouldPublishComment, shouldPublishSummary } from "./report";
+import { renderComment, shouldPublishComment, shouldPublishSummary } from "./report.js";
 
 export async function publishResults(
   commentMode: "summary" | "pr-comment" | "both" | "off",

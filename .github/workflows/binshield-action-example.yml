@@ -1,31 +1,34 @@
-name: BinShield Binary Scan
+name: BinShield Action Smoke
 
 on:
   pull_request:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   binshield:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Scan native dependencies
-        id: binshield
-        uses: ./
         with:
-          api-base-url: https://api.binshield.dev
-          github-token: ${{ github.token }}
-          scan-mode: native-only
-          comment-mode: both
-          fail-on: high
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
 
-      - name: Print results
-        if: always()
+      # The action reads npm lockfiles. Use an empty npm fixture to exercise
+      # its manifest and compiled entry point without calling the live API.
+      - name: Create an empty npm fixture
         run: |
-          echo "Scanned: ${{ steps.binshield.outputs.total-scanned }}"
-          echo "Highest risk: ${{ steps.binshield.outputs.highest-risk }}"
-          echo "Failed: ${{ steps.binshield.outputs.failed }}"
+          fixture="$(mktemp -d "$RUNNER_TEMP/binshield-smoke.XXXXXX")"
+          printf '{"name":"binshield-smoke","version":"0.0.0"}\n' > "$fixture/package.json"
+          printf '{"lockfileVersion":3,"packages":{}}\n' > "$fixture/package-lock.json"
+          echo "BINSHIELD_SMOKE_DIR=$fixture" >> "$GITHUB_ENV"
+      - name: Start the local action
+        uses: ./apps/github-action
+        with:
+          working-directory: ${{ env.BINSHIELD_SMOKE_DIR }}

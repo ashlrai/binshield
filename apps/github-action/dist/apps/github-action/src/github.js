@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
-import { renderComment, shouldPublishComment, shouldPublishSummary } from "./report";
+import { renderComment, shouldPublishComment, shouldPublishSummary } from "./report.js";
 export async function publishResults(commentMode, githubToken, outcomes) {
     if (shouldPublishSummary(commentMode)) {
         await core.summary.addRaw(renderComment(outcomes)).write();

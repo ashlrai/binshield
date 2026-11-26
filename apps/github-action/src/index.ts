@@ -3,11 +3,11 @@ import * as github from "@actions/github";
 import fs from "node:fs";
 import path from "node:path";
 
-import { BinShieldClient, scanTarget } from "./client";
-import { discoverTargets } from "./discovery";
-import { publishResults } from "./github";
-import { buildFailureMessage, summarize } from "./report";
-import { buildSarif } from "./sarif";
+import { BinShieldClient, scanTarget } from "./client.js";
+import { discoverTargets } from "./discovery.js";
+import { publishResults } from "./github.js";
+import { buildFailureMessage, summarize } from "./report.js";
+import { buildSarif } from "./sarif.js";
 import type { GitHubActionConfig, ScanOutcome } from "./types";
 
 function readIntInput(name: string, fallback: number) {
