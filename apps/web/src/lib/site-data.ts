@@ -609,7 +609,15 @@ export async function searchPackages(query: string): Promise<PublicPackageCard[]
   );
 }
 
-export async function getPackageWorkspace(packageName: string, version?: string): Promise<PackageWorkspace> {
+export async function getPackageWorkspace(routeName: string, version?: string): Promise<PackageWorkspace> {
+  let packageName = routeName;
+  try {
+    // Next.js can pass an encoded route segment. Decode it before building API paths.
+    packageName = decodeURIComponent(routeName);
+  } catch {
+    // Let malformed names fall through to the normal not-found path.
+  }
+
   const packageResponse = await fetchJson<{ packageName: string; ecosystem: Ecosystem; versions: PackageAnalysis[] }>(
     `/packages/npm/${encodeURIComponent(packageName)}`
   );
@@ -636,7 +644,7 @@ export async function getPackageWorkspace(packageName: string, version?: string)
 
   return {
     mode: dataMode,
-    packageName: selected.packageName,
+    packageName: found ? selected.packageName : packageName,
     ecosystem: selected.ecosystem,
     versions: versions.length ? versions : [selected],
     selected,
@@ -677,8 +685,8 @@ export async function getBinaryWorkspace(
     diffNarrative: workspace.diffNarrative,
     breadcrumbs: [
       { label: "Packages", href: "/packages" },
-      { label: workspace.packageName, href: `/packages/${workspace.packageName}?version=${encodeURIComponent(workspace.selected.version)}` },
-      { label: binary.filename, href: `/packages/${workspace.packageName}/binaries/${binary.id}?version=${encodeURIComponent(workspace.selected.version)}` }
+      { label: workspace.packageName, href: `/packages/${encodeURIComponent(workspace.packageName)}?version=${encodeURIComponent(workspace.selected.version)}` },
+      { label: binary.filename, href: `/packages/${encodeURIComponent(workspace.packageName)}/binaries/${binary.id}?version=${encodeURIComponent(workspace.selected.version)}` }
     ]
   };
 }

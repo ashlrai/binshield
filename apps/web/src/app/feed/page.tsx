@@ -47,7 +47,7 @@ export default async function FeedPage() {
         ) : (
           <div className="browse-grid">
             {events.map((event) => (
-              <Link key={event.id} href={`/packages/${event.packageName}`} className="package-tile package-tile--stacked">
+              <Link key={event.id} href={`/packages/${encodeURIComponent(event.packageName)}`} className="package-tile package-tile--stacked">
                 <div className="package-tile__header">
                   <div><p className="eyebrow">npm</p><h3>{event.packageName}@{event.version}</h3></div>
                   <span className={`risk-badge ${riskClasses[event.riskLevel] ?? "risk-none"}`}>{event.riskLevel.toUpperCase()} ({event.riskScore})</span>

@@ -25,7 +25,7 @@ export async function generateMetadata({
 
   if (!workspace.found) {
     return {
-      title: `${decodeURIComponent(name)} — Not Found`
+      title: `${workspace.packageName} — Not Found`
     };
   }
 
@@ -74,7 +74,7 @@ export default async function PackagePage({
               Back to browser
             </Link>
             <a
-              href={`${process.env.BINSHIELD_API_BASE_URL ?? process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL ?? "https://api.binshield.dev"}/packages/${workspace.selected.ecosystem}/${workspace.selected.packageName}/versions/${encodeURIComponent(workspace.selected.version)}/sbom`}
+              href={`${process.env.BINSHIELD_API_BASE_URL ?? process.env.NEXT_PUBLIC_BINSHIELD_API_BASE_URL ?? "https://api.binshield.dev"}/packages/${workspace.selected.ecosystem}/${encodeURIComponent(workspace.selected.packageName)}/versions/${encodeURIComponent(workspace.selected.version)}/sbom`}
               className="button-link button-link--ghost"
               download
             >
@@ -150,7 +150,7 @@ export default async function PackagePage({
             {workspace.versionTimeline.map((analysis) => (
               <Link
                 key={analysis.version}
-                href={`/packages/${workspace.packageName}?version=${encodeURIComponent(analysis.version)}`}
+                href={`/packages/${encodeURIComponent(workspace.packageName)}?version=${encodeURIComponent(analysis.version)}`}
                 className={`version-pill ${analysis.active ? "version-pill--active" : ""}`}
               >
                 <strong>{analysis.version}</strong>
@@ -360,7 +360,7 @@ export default async function PackagePage({
                   </div>
                 ) : null}
                 <Link
-                  href={`/packages/${workspace.packageName}/binaries/${binary.id}?version=${encodeURIComponent(workspace.selected.version)}`}
+                  href={`/packages/${encodeURIComponent(workspace.packageName)}/binaries/${binary.id}?version=${encodeURIComponent(workspace.selected.version)}`}
                   className="binary-row__link"
                 >
                   Open binary evidence view
@@ -378,7 +378,7 @@ export default async function PackagePage({
           <div className="stack-list">
             {workspace.related.length ? (
               workspace.related.map((item) => (
-                <Link key={item.packageName} href={`/packages/${item.packageName}`} className="stack-item stack-item--link">
+                <Link key={item.packageName} href={`/packages/${encodeURIComponent(item.packageName)}`} className="stack-item stack-item--link">
                   <div>
                     <p className="eyebrow">{item.ecosystem}</p>
                     <strong>{item.packageName}</strong>

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { getSampleAnalysis } from "@binshield/analysis-types";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   getBillingSnapshot,
@@ -30,6 +31,37 @@ describe("site data", () => {
     expect(workspace.evidenceCards.length).toBeGreaterThan(0);
     expect(workspace.packageSignals.length).toBeGreaterThan(0);
     expect(workspace.diffNarrative.reviewChecklist.length).toBeGreaterThan(0);
+  });
+
+  it("resolves scoped package route params without double-encoding the API path", async () => {
+    const packageName = "@example/native";
+    const routeName = encodeURIComponent(packageName);
+    const analysis = { ...getSampleAnalysis("bcrypt")!, packageName };
+    const apiPath = `/packages/npm/${routeName}`;
+    const fetch = vi.fn(async (url: string) => {
+      const { pathname } = new URL(url);
+      if (pathname === apiPath) return Response.json({ versions: [analysis] });
+      if (pathname === `${apiPath}/versions/${analysis.version}`) return Response.json(analysis);
+      return new Response(null, { status: 404 });
+    });
+    vi.stubEnv("BINSHIELD_API_BASE_URL", "https://api.example.test");
+    vi.stubGlobal("fetch", fetch);
+    vi.resetModules();
+
+    try {
+      const { getBinaryWorkspace, getPackageWorkspace } = await import("./site-data");
+      const workspace = await getPackageWorkspace(routeName);
+      expect(workspace.found).toBe(true);
+      expect(workspace.packageName).toBe(packageName);
+      expect(fetch).toHaveBeenCalledWith(`https://api.example.test${apiPath}`, expect.anything());
+
+      const detail = await getBinaryWorkspace(routeName, analysis.binaries[0].id);
+      expect(detail?.breadcrumbs[1].href).toBe(`/packages/${routeName}?version=${analysis.version}`);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
   });
 
   it("returns dashboard, billing, watchlist, and settings snapshots", async () => {

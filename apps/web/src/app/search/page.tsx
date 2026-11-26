@@ -44,7 +44,7 @@ export default async function SearchPage({
         <div className="search-results">
           {results.length ? (
             results.map((item) => (
-              <Link key={`${item.packageName}-${item.latestVersion}`} href={`/packages/${item.packageName}`} className="search-row">
+              <Link key={`${item.packageName}-${item.latestVersion}`} href={`/packages/${encodeURIComponent(item.packageName)}`} className="search-row">
                 <div>
                   <p className="eyebrow">{item.ecosystem}</p>
                   <strong>{item.packageName}</strong>
