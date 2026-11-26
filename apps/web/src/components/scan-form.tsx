@@ -110,7 +110,7 @@ export function ScanForm({ apiBase, onComplete }: ScanFormProps) {
           <span>Model: {result.aiModel}</span>
         </div>
         <div className="scan-form__actions">
-          <a href={`/packages/${result.packageName}?version=${encodeURIComponent(result.version)}`} className="button-link">
+          <a href={`/packages/${encodeURIComponent(result.packageName)}?version=${encodeURIComponent(result.version)}`} className="button-link">
             View full analysis
           </a>
           <button onClick={handleReset} className="button-link button-link--ghost" type="button">

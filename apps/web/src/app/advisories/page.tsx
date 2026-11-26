@@ -76,7 +76,7 @@ export default async function AdvisoriesPage() {
                   {advisory.affectedPackages.slice(0, 3).map((pkg, i) => {
                     const name = typeof pkg === "string" ? pkg : pkg.packageName;
                     return (
-                      <Link key={`${advisory.id}-${name}-${i}`} href={`/packages/${name}`} className="tag tag-muted">
+                      <Link key={`${advisory.id}-${name}-${i}`} href={`/packages/${encodeURIComponent(name)}`} className="tag tag-muted">
                         {name}
                       </Link>
                     );

@@ -52,7 +52,7 @@ export default async function PackagesIndexPage({
         </div>
         <div className="browse-grid">
           {results.map((item) => (
-            <Link key={`${item.packageName}-${item.latestVersion}`} href={`/packages/${item.packageName}`} className="package-tile package-tile--stacked">
+            <Link key={`${item.packageName}-${item.latestVersion}`} href={`/packages/${encodeURIComponent(item.packageName)}`} className="package-tile package-tile--stacked">
               <div className="package-tile__header">
                 <div>
                   <p className="eyebrow">{item.ecosystem}</p>

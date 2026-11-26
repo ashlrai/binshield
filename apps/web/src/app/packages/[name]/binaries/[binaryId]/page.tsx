@@ -41,7 +41,7 @@ export default async function BinaryPage({
         description="Review one native artifact in depth: evidence checklist, surfaced imports and strings, grouped findings, and package-level context for approval decisions."
         actions={
           <Link
-            href={`/packages/${workspace.packageName}?version=${encodeURIComponent(workspace.selectedVersion)}`}
+            href={`/packages/${encodeURIComponent(workspace.packageName)}?version=${encodeURIComponent(workspace.selectedVersion)}`}
             className="button-link"
           >
             Back to package

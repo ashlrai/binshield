@@ -74,7 +74,7 @@ export default async function HomePage() {
         />
         <div className="featured-grid">
           {featured.map((item, i) => (
-            <Link key={item.packageName} href={`/packages/${item.packageName}`} className="package-tile" style={{ animationDelay: `${0.1 + i * 0.08}s` }}>
+            <Link key={item.packageName} href={`/packages/${encodeURIComponent(item.packageName)}`} className="package-tile" style={{ animationDelay: `${0.1 + i * 0.08}s` }}>
               <div className="package-tile__header">
                 <div>
                   <p className="eyebrow">{item.ecosystem}</p>
