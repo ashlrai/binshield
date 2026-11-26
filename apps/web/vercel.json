@@ -1,5 +1,5 @@
 {
   "framework": "nextjs",
-  "installCommand": "cd ../.. && pnpm install",
-  "buildCommand": "cd ../.. && pnpm --filter @binshield/web build"
+  "installCommand": "cd ../.. && npx --yes \"$(node -p 'require(\"./package.json\").packageManager')\" install --frozen-lockfile",
+  "buildCommand": "cd ../.. && npx --yes \"$(node -p 'require(\"./package.json\").packageManager')\" --filter @binshield/web build"
 }
