@@ -14,7 +14,7 @@ Follow these steps in order. Steps marked **[human]** require a browser and a Gi
 
 ## Step 1 — Ensure `dist/` is committed and fresh
 
-The action runs from the compiled bundle in `dist/`. It must be committed to the repo.
+The action runs from `dist/index.cjs`. Build and commit that self-contained Node bundle and `dist/THIRD_PARTY_NOTICES.txt` together. A consuming workflow does not install the action’s workspace dependencies. The package smoke test starts the committed bundle in an isolated npm fixture without credentials; it does not prove scan coverage for a pnpm lockfile.
 
 ```bash
 # From the repo root
