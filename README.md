@@ -14,6 +14,8 @@ malicious.
 
 🌐 **[binshield.dev](https://binshield.dev)** · 🔌 **[GitHub Action](apps/github-action/README.md)** · 📖 **[Docs](docs/)**
 
+Part of the [AshlrAI open-source ecosystem](https://github.com/ashlrai#the-open-source-ecosystem).
+
 ## The problem
 
 A wave of supply-chain worms — Shai-Hulud and its kin — has shown how fast a
